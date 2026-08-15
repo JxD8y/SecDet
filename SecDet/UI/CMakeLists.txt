@@ -10,4 +10,7 @@ qt_add_qml_module(app_ui URI UI VERSION 1.0
 					Colors.qml
 					ArchiveInfoPage.qml
 					PasswordDialog.qml
+					CreateArchive.qml
+					ProgressWindow.qml
+					SpeedGraph.qml
 				)

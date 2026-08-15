@@ -6,12 +6,17 @@ import UI
 
 Page {
     id: root
-    width: 500
-    implicitWidth: 500
-    Layout.preferredWidth: 500
-    Layout.minimumWidth: 500
-    Layout.maximumWidth: 500
+    width: 460
+    implicitWidth: 460
+    Layout.preferredWidth: 460
+    Layout.minimumWidth: 460
+    Layout.maximumWidth: 460
     Layout.fillWidth: false
+
+    background: Rectangle {
+        color: "transparent"
+    }
+
     signal closeRequested()
     signal saveRequested()
 
@@ -20,43 +25,56 @@ Page {
         source: "Fonts/MaterialIconsRound-Regular.otf"
     }
 
-    component GoldCheckBox : RowLayout {
+    // ==========================================
+    // --- Custom Component: Fluent Gold CheckBox ---
+    // ==========================================
+    component GoldCheckBox : Item {
         id: cbRoot
         property string text: ""
         property bool checked: false
         signal toggled(bool isChecked)
 
-        spacing: 10
+        implicitWidth: cbRow.implicitWidth
+        implicitHeight: Math.max(20, cbRow.implicitHeight)
 
-        Rectangle {
-            id: box
-            width: 18
-            height: 18
-            radius: 4
-            color: cbRoot.checked ? Colors.goldPrimary : "transparent"
-            border.color: cbRoot.checked ? Colors.goldHover : (cbArea.containsMouse ? Colors.goldBorderHi : Colors.goldBorder)
-            border.width: 1
+        RowLayout {
+            id: cbRow
+            anchors.fill: parent
+            spacing: 10
 
-            Behavior on color { ColorAnimation { duration: 120 } }
-            Behavior on border.color { ColorAnimation { duration: 120 } }
+            Rectangle {
+                id: box
+                width: 18
+                height: 18
+                radius: 4
+                Layout.alignment: Qt.AlignVCenter
+                color: cbRoot.checked ? Colors.goldPrimary : "transparent"
+                border.color: cbRoot.checked ? Colors.goldHover : (cbArea.containsMouse ? Colors.goldBorderHi : Colors.goldBorder)
+                border.width: 1
+
+                Behavior on color { ColorAnimation { duration: 120 } }
+                Behavior on border.color { ColorAnimation { duration: 120 } }
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "\ue5ca" // check mark
+                    font.family: materialIcons.name
+                    font.pixelSize: 14
+                    color: Colors.textOnGold
+                    visible: cbRoot.checked
+                }
+            }
 
             Text {
-                anchors.centerIn: parent
-                text: "\ue5ca" // check mark
-                font.family: materialIcons.name
-                font.pixelSize: 14
-                color: "#0d0e11"
-                visible: cbRoot.checked
+                text: cbRoot.text
+                color: Colors.textMain
+                font.family: Colors.fontFamily
+                font.pixelSize: 12
+                font.weight: Font.Medium
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                elide: Text.ElideRight
             }
-        }
-
-        Text {
-            text: cbRoot.text
-            color: Colors.textMain
-            font.pixelSize: 12
-            font.weight: Font.Medium
-            Layout.fillWidth: true
-            elide: Text.ElideRight
         }
 
         MouseArea {
@@ -71,46 +89,58 @@ Page {
         }
     }
 
-    // --- Custom Gold Toggle Switch ---
-    component GoldSwitch : RowLayout {
+    // ==========================================
+    // --- Custom Component: Fluent Gold Switch ---
+    // ==========================================
+    component GoldSwitch : Item {
         id: swRoot
         property string text: ""
         property bool checked: false
         signal toggled(bool isChecked)
 
-        spacing: 12
+        implicitWidth: swRow.implicitWidth
+        implicitHeight: Math.max(22, swRow.implicitHeight)
 
-        Text {
-            text: swRoot.text
-            color: Colors.textMain
-            font.pixelSize: 12
-            font.weight: Font.Medium
-            Layout.fillWidth: true
-            elide: Text.ElideRight
-        }
+        RowLayout {
+            id: swRow
+            anchors.fill: parent
+            spacing: 12
 
-        Rectangle {
-            id: track
-            width: 38
-            height: 20
-            radius: 10
-            color: swRoot.checked ? Qt.rgba(0.9, 0.76, 0.35, 0.25) : "#101217"
-            border.color: swRoot.checked ? Colors.goldBorderHi : Colors.goldBorder
-            border.width: 1
-
-            Behavior on color { ColorAnimation { duration: 150 } }
+            Text {
+                text: swRoot.text
+                color: Colors.textMain
+                font.family: Colors.fontFamily
+                font.pixelSize: 12
+                font.weight: Font.Medium
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                elide: Text.ElideRight
+            }
 
             Rectangle {
-                id: thumb
-                width: 14
-                height: 14
-                radius: 7
-                anchors.verticalCenter: parent.verticalCenter
-                x: swRoot.checked ? parent.width - width - 3 : 3
-                color: swRoot.checked ? Colors.goldPrimary : Colors.textMuted
+                id: track
+                width: 38
+                height: 20
+                radius: 10
+                Layout.alignment: Qt.AlignVCenter
+                color: swRoot.checked ? Colors.goldLightHover : Colors.bgInput
+                border.color: swRoot.checked ? Colors.goldBorderHi : Colors.goldBorder
+                border.width: 1
 
-                Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
                 Behavior on color { ColorAnimation { duration: 150 } }
+
+                Rectangle {
+                    id: thumb
+                    width: 14
+                    height: 14
+                    radius: 7
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: swRoot.checked ? parent.width - width - 3 : 3
+                    color: swRoot.checked ? Colors.goldPrimary : Colors.textMuted
+
+                    Behavior on x { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+                    Behavior on color { ColorAnimation { duration: 150 } }
+                }
             }
         }
 
@@ -126,6 +156,9 @@ Page {
         }
     }
 
+    // ==========================================
+    // --- Custom Component: Fluent Segmented Toggle ---
+    // ==========================================
     component TripleToggle : Rectangle {
         id: toggleRoot
         property int currentIndex: 1 // 0: Fast, 1: Balanced, 2: Ultra
@@ -135,11 +168,10 @@ Page {
         implicitWidth: 320
         implicitHeight: 34
         radius: 8
-        color: Colors.bgMain
+        color: Colors.bgInput
         border.color: Colors.goldBorder
         border.width: 1
 
-        // Animated Active Pill Background
         Rectangle {
             id: activePill
             width: (toggleRoot.width - 6) / 3
@@ -147,7 +179,7 @@ Page {
             y: 3
             x: 3 + toggleRoot.currentIndex * width
             radius: 6
-            color: Qt.rgba(0.9, 0.76, 0.35, 0.18)
+            color: Colors.goldLight
             border.color: Colors.goldBorderHi
             border.width: 1
 
@@ -168,6 +200,7 @@ Page {
                     Text {
                         anchors.centerIn: parent
                         text: modelData
+                        font.family: Colors.fontFamily
                         font.pixelSize: 11
                         font.weight: toggleRoot.currentIndex === index ? Font.Bold : Font.Medium
                         color: toggleRoot.currentIndex === index ? Colors.goldHover : Colors.textMuted
@@ -192,16 +225,22 @@ Page {
         id: dialogFrame
         anchors.fill: parent
         color: Colors.bgCard
-        radius: 16
+        radius: 12
         border.color: Colors.goldBorder
         border.width: 1
+
+        Behavior on color { ColorAnimation { duration: 200 } }
+        Behavior on border.color { ColorAnimation { duration: 200 } }
     }
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 14
+        anchors.margins: 14
+        spacing: 12
 
+        // ==========================================
+        // --- Header: Title & Close Button ---
+        // ==========================================
         RowLayout {
             Layout.fillWidth: true
 
@@ -210,13 +249,14 @@ Page {
                 Text {
                     text: "info"
                     font.family: materialIcons.name
-                    font.pixelSize: 22
+                    font.pixelSize: 20
                     color: Colors.goldPrimary
                 }
 
                 Text {
-                    text: "Archive info"
-                    font.pixelSize: 15
+                    text: "Archive Info & Settings"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 14
                     font.weight: Font.Bold
                     color: Colors.textMain
                 }
@@ -242,28 +282,32 @@ Page {
                     id: closeMouse
                     anchors.fill: parent
                     hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
                     onClicked: root.closeRequested()
                 }
             }
         }
 
-        // --- SECTION 1: COMPRESSION RATIO TRIPLE TOGGLE & OPTIONS ---
+        // ==========================================
+        // --- SECTION 1: Compression Preset & Options ---
+        // ==========================================
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: compColumn.implicitHeight + 24
+            implicitHeight: compColumn.implicitHeight + 20
             color: Colors.bgSurface
-            radius: 12
+            radius: 10
             border.color: Colors.goldBorder
             border.width: 1
 
             ColumnLayout {
                 id: compColumn
                 anchors.fill: parent
-                anchors.margins: 12
-                spacing: 12
+                anchors.margins: 10
+                spacing: 10
 
                 Text {
                     text: "COMPRESSION LEVEL"
+                    font.family: Colors.fontFamily
                     font.pixelSize: 10
                     font.weight: Font.Bold
                     color: Colors.goldPrimary
@@ -275,13 +319,12 @@ Page {
                     onSelected: (idx) => console.log("Compression preset:", options[idx])
                 }
 
-                Rectangle { Layout.fillWidth: true; height: 1; color: Qt.rgba(0.24, 0.2, 0.13, 0.4) }
+                Rectangle { Layout.fillWidth: true; height: 1; color: Colors.divider }
 
-                // Switches & Checkboxes Grid
                 GridLayout {
                     columns: 2
-                    columnSpacing: 16
-                    rowSpacing: 10
+                    columnSpacing: 14
+                    rowSpacing: 8
                     Layout.fillWidth: true
 
                     GoldSwitch {
@@ -303,7 +346,7 @@ Page {
                     }
 
                     GoldCheckBox {
-                        text: "Integrity Verification Check"
+                        text: "Integrity Verification"
                         checked: true
                         Layout.fillWidth: true
                     }
@@ -311,14 +354,23 @@ Page {
             }
         }
 
-        // --- SECTION 2: ARCHIVE README MANIFEST (LIST VIEW) ---
         Rectangle {
+            id: passwordContainer
             Layout.fillWidth: true
-            implicitHeight: 110
-            color: Colors.bgSurface
-            radius: 12
+            implicitHeight: 140
+            color: Colors.bgCard
+            radius: 10
             border.color: Colors.goldBorder
             border.width: 1
+
+            Behavior on border.color { ColorAnimation { duration: 150 } }
+            Behavior on border.width { NumberAnimation { duration: 150 } }
+
+            ListModel {
+                id: passwords
+                ListElement { password_hash: "ad9a67fefa847de87753df6794a0ae466431e76ad1fb4db58fbbe836d1dde0e7" }
+                ListElement { password_hash: "2285dd09ea6ccd0ec7e7253d2f7dc10810608d45609a902b5094176974eafc44" }
+            }
 
             ColumnLayout {
                 anchors.fill: parent
@@ -327,99 +379,144 @@ Page {
 
                 RowLayout {
                     Layout.fillWidth: true
+
                     Text {
-                        text: "\ue873" // description
+                        text: "key"
                         font.family: materialIcons.name
                         font.pixelSize: 14
                         color: Colors.goldPrimary
                     }
+
                     Text {
-                        text: "ARCHIVE README.TXT"
+                        text: "Passwords"
+                        font.family: Colors.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Bold
                         color: Colors.goldPrimary
                         Layout.fillWidth: true
                     }
+
                     Text {
-                        text: "328 Bytes"
+                        text: "info"
+                        font.family: materialIcons.name
                         font.pixelSize: 10
                         color: Colors.textMuted
+                        MouseArea{
+                            anchors.fill: parent
+                            onClicked:{
+                                ToolTip.show("Your archives can have multiple passcodes\nbut its necessary to put atleast one to continue.")
+                            }
+                        }
                     }
                 }
 
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    color: Colors.bgMain
                     radius: 6
-                    border.color: Qt.rgba(0.24, 0.2, 0.13, 0.5)
-
+                    color: Colors.bgInput
+                    border.color: Colors.borderSubtle
+                    border.width: 1
                     ListView {
+                        id: passwordListView
                         anchors.fill: parent
-                        anchors.margins: 6
+                        anchors.margins: 4
                         clip: true
-                        spacing: 4
+                        spacing: 2
+                        model: passwords
 
-                        model: ListModel {
-                            ListElement { sectionTitle: "Project"; lineContent: "Dark Gold Engine v2.4 Release Build" }
-                            ListElement { sectionTitle: "Author"; lineContent: "Core UI/UX Engineering Team" }
-                            ListElement { sectionTitle: "Checksum"; lineContent: "SHA256: e3b0c44298fc1c149afbf4c8996fb924" }
-                            ListElement { sectionTitle: "Notice"; lineContent: "Encrypted payload requires key verification on extract." }
-                        }
+                        delegate: Rectangle {
+                            width: passwordContainer.width
+                            height: 28
+                            radius: 4
+                            color: Colors.bgHover
 
-                        delegate: RowLayout {
-                            width: ListView.view ? ListView.view.width : parent.width
-                            spacing: 8
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8
+                                anchors.rightMargin: 8
+                                spacing: 8
 
-                            Text {
-                                text: model.sectionTitle + ":"
-                                font.pixelSize: 11
-                                font.weight: Font.Bold
-                                color: Colors.goldHover
-                                Layout.preferredWidth: 65
+                                Text {
+                                    text: "key"
+                                    font.family: materialIcons.name
+                                    font.pixelSize: 14
+                                    color: Colors.textMuted
+                                }
+
+                                Text {
+                                    text: model.password_hash
+                                    color: Colors.textMain
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 11
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
                             }
-                            Text {
-                                text: model.lineContent
-                                font.pixelSize: 11
-                                color: Colors.textMain
-                                Layout.fillWidth: true
-                                elide: Text.ElideRight
+                        }
+                    }
+
+                }
+                RowLayout{
+                    TextField {
+                        id: passInput
+                        Layout.fillWidth: true
+                        placeholderText: "Enter password..."
+                        placeholderTextColor: Colors.textSubtle
+                        color: Colors.textMain
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 13
+                        echoMode: showPassBtn.showPassword ? TextInput.Normal : TextInput.Password
+                        background: null
+                        onAccepted: {
+                            if (passInput.text.length > 0) {
+                                passwordDialog.acceptedPassword(passInput.text)
+                                passwordDialog.close()
                             }
                         }
+                    }
+                    Text{
+                        font.family: materialIcons.name
+                        font.pixelSize: 16
+                        color: Colors.goldBorder
+                        text: "add"
                     }
                 }
             }
         }
 
-        // --- SECTION 3: ADVANCED ENTROPY VIEW (FEATURED COMPONENT) ---
+        // ==========================================
+        // --- SECTION 3: Shannon Entropy Matrix ---
+        // ==========================================
         Rectangle {
             id: entropyCard
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: Colors.bgSurface
-            radius: 12
+            radius: 10
             border.color: Colors.goldBorder
             border.width: 1
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 12
+                anchors.margins: 10
                 spacing: 8
 
-                // Header & Live Bits/Byte Indicator
+                // Header & Live Indicator
                 RowLayout {
                     Layout.fillWidth: true
 
                     RowLayout {
                         spacing: 6
                         Text {
-                            text: "\ue880" // analytics / timeline
+                            text: "\ue880" // analytics
                             font.family: materialIcons.name
                             font.pixelSize: 16
                             color: Colors.goldPrimary
                         }
                         Text {
                             text: "SHANNON ENTROPY MATRIX"
+                            font.family: Colors.fontFamily
                             font.pixelSize: 10
                             font.weight: Font.Bold
                             color: Colors.goldPrimary
@@ -428,12 +525,11 @@ Page {
 
                     Item { Layout.fillWidth: true }
 
-                    // High Entropy Warning Badge
                     Rectangle {
                         implicitWidth: badgeRow.implicitWidth + 12
                         implicitHeight: 20
                         radius: 10
-                        color: Qt.rgba(0.9, 0.76, 0.35, 0.15)
+                        color: Colors.goldLight
                         border.color: Colors.goldBorderHi
                         border.width: 1
 
@@ -443,7 +539,8 @@ Page {
                             spacing: 4
                             Rectangle { width: 6; height: 6; radius: 3; color: "#4ade80" }
                             Text {
-                                text: "Avg: 7.84 Bits/Byte (High Density)"
+                                text: "Avg: 7.84 Bits/Byte"
+                                font.family: Colors.fontFamily
                                 font.pixelSize: 10
                                 font.weight: Font.Bold
                                 color: Colors.goldHover
@@ -452,14 +549,13 @@ Page {
                     }
                 }
 
-                // --- HISTOGRAM CANVAS VIEW ---
+                // Histogram View
                 Item {
                     id: histogramContainer
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    implicitHeight: 100
+                    implicitHeight: 90
 
-                    // Entropy Dataset representing 36 archive chunks (0.0 to 8.0 bits)
                     readonly property var entropyData: [
                         2.1, 3.4, 4.2, 5.8, 7.2, 7.8, 7.9, 7.95, 7.9, 7.88, 
                         7.5, 6.2, 4.1, 7.9, 7.92, 7.98, 7.95, 7.89, 7.92, 7.91, 
@@ -467,11 +563,9 @@ Page {
                         7.8, 7.9, 7.85, 7.1, 5.2, 3.0
                     ]
 
-                    // Range selection values (normalized 0.0 to 1.0)
-                    property real rangeStart: 0.20 // 20%
-                    property real rangeEnd: 0.80   // 80%
+                    property real rangeStart: 0.20
+                    property real rangeEnd: 0.80
 
-                    // Background Grid Lines
                     Column {
                         anchors.fill: parent
                         spacing: (parent.height - 3) / 3
@@ -480,17 +574,16 @@ Page {
                             Rectangle {
                                 width: histogramContainer.width
                                 height: 1
-                                color: Qt.rgba(0.24, 0.2, 0.13, 0.25)
+                                color: Colors.divider
                             }
                         }
                     }
 
-                    // Histogram Bars
                     RowLayout {
                         anchors.fill: parent
                         anchors.topMargin: 4
                         anchors.bottomMargin: 4
-                        spacing: 3
+                        spacing: 2
 
                         Repeater {
                             model: histogramContainer.entropyData
@@ -510,13 +603,12 @@ Page {
                                     height: Math.max(4, (modelData / 8.0) * parent.height)
                                     radius: 2
 
-                                    color: barItem.inRange ? Colors.goldPrimary : "#24211a"
+                                    color: barItem.inRange ? Colors.goldPrimary : (Colors.isDarkMode ? "#222530" : "#e4e5eb")
                                     border.color: barItem.inRange ? Colors.goldHover : "transparent"
                                     border.width: barItem.inRange ? 1 : 0
 
                                     Behavior on color { ColorAnimation { duration: 120 } }
 
-                                    // Top Glow Accent for High Entropy (>7.5) within selected range
                                     Rectangle {
                                         width: parent.width
                                         height: 2
@@ -530,26 +622,25 @@ Page {
                     }
                 }
 
-                // --- ADVANCED RANGE SLIDER WITH DUAL THUMBS ---
+                // Dual Thumbs Range Slider
                 Item {
                     id: rangeSlider
                     Layout.fillWidth: true
-                    height: 24
+                    height: 22
 
                     readonly property real trackWidth: width - 16
 
-                    // Start Thumb Drag Handler
                     Item {
                         id: startThumb
                         width: 16; height: 16
-                        y: 4
+                        y: 3
                         x: Math.max(0, Math.min(rangeSlider.trackWidth, histogramContainer.rangeStart * rangeSlider.trackWidth))
 
                         Rectangle {
                             anchors.fill: parent
                             radius: 8
                             color: startMouse.containsPress ? Colors.goldHover : Colors.goldPrimary
-                            border.color: "#ffffff"
+                            border.color: Colors.goldBorderHi
                             border.width: 1
 
                             Text {
@@ -557,7 +648,7 @@ Page {
                                 text: "\ue5c4" // arrow back
                                 font.family: materialIcons.name
                                 font.pixelSize: 10
-                                color: "#0d0e11"
+                                color: Colors.textOnGold
                             }
                         }
 
@@ -585,18 +676,17 @@ Page {
                         }
                     }
 
-                    // End Thumb Drag Handler
                     Item {
                         id: endThumb
                         width: 16; height: 16
-                        y: 4
+                        y: 3
                         x: Math.max(0, Math.min(rangeSlider.trackWidth, histogramContainer.rangeEnd * rangeSlider.trackWidth))
 
                         Rectangle {
                             anchors.fill: parent
                             radius: 8
                             color: endMouse.containsPress ? Colors.goldHover : Colors.goldPrimary
-                            border.color: "#ffffff"
+                            border.color: Colors.goldBorderHi
                             border.width: 1
 
                             Text {
@@ -604,7 +694,7 @@ Page {
                                 text: "\ue5c8" // arrow forward
                                 font.family: materialIcons.name
                                 font.pixelSize: 10
-                                color: "#0d0e11"
+                                color: Colors.textOnGold
                             }
                         }
 
@@ -632,7 +722,6 @@ Page {
                         }
                     }
 
-                    // Active Range Highlight Track
                     Rectangle {
                         anchors.verticalCenter: parent.verticalCenter
                         x: startThumb.x + 8
@@ -643,23 +732,23 @@ Page {
                         z: -1
                     }
 
-                    // Background Track Bar
                     Rectangle {
                         anchors.fill: parent
-                        anchors.topMargin: 10.5
-                        anchors.bottomMargin: 10.5
+                        anchors.topMargin: 9.5
+                        anchors.bottomMargin: 9.5
                         radius: 1.5
-                        color: "#181a20"
+                        color: Colors.bgElevated
                         z: -2
                     }
                 }
 
-                // Range Metrics Readout
+                // Range Metrics
                 RowLayout {
                     Layout.fillWidth: true
 
                     Text {
-                        text: "Start Offset: " + Math.round(histogramContainer.rangeStart * 512) + " MB"
+                        text: "Start: " + Math.round(histogramContainer.rangeStart * 512) + " MB"
+                        font.family: Colors.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Medium
                         color: Colors.textMuted
@@ -669,6 +758,7 @@ Page {
 
                     Text {
                         text: "Span: " + Math.round((histogramContainer.rangeEnd - histogramContainer.rangeStart) * 512) + " MB"
+                        font.family: Colors.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Bold
                         color: Colors.goldHover
@@ -677,7 +767,8 @@ Page {
                     Item { Layout.fillWidth: true }
 
                     Text {
-                        text: "End Offset: " + Math.round(histogramContainer.rangeEnd * 512) + " MB"
+                        text: "End: " + Math.round(histogramContainer.rangeEnd * 512) + " MB"
+                        font.family: Colors.fontFamily
                         font.pixelSize: 10
                         font.weight: Font.Medium
                         color: Colors.textMuted
@@ -686,25 +777,27 @@ Page {
             }
         }
 
-        // --- DIALOG ACTION BUTTONS ---
+        // ==========================================
+        // --- Dialog Action Buttons ---
+        // ==========================================
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
 
             Item { Layout.fillWidth: true }
 
-            // Cancel Button
             Rectangle {
                 implicitWidth: 100
                 implicitHeight: 34
-                radius: 8
-                color: cancelArea.containsMouse ? Qt.rgba(1,1,1,0.06) : "transparent"
+                radius: 6
+                color: cancelArea.containsMouse ? Colors.bgHover : "transparent"
                 border.color: Colors.goldBorder
                 border.width: 1
 
                 Text {
                     anchors.centerIn: parent
                     text: "Cancel"
+                    font.family: Colors.fontFamily
                     font.pixelSize: 12
                     font.weight: Font.Medium
                     color: Colors.textMuted
@@ -714,16 +807,16 @@ Page {
                     id: cancelArea
                     anchors.fill: parent
                     hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
                     onClicked: root.closeRequested()
                 }
             }
 
-            // Save / Apply Button
             Rectangle {
                 implicitWidth: 130
                 implicitHeight: 34
-                radius: 8
-                color: saveArea.containsPress ? Qt.rgba(0.9, 0.76, 0.35, 0.8) : (saveArea.containsMouse ? Colors.goldHover : Colors.goldPrimary)
+                radius: 6
+                color: saveArea.containsPress ? Qt.darker(Colors.goldPrimary, 1.15) : (saveArea.containsMouse ? Colors.goldHover : Colors.goldPrimary)
 
                 Behavior on color { ColorAnimation { duration: 120 } }
 
@@ -734,13 +827,14 @@ Page {
                         text: "\ue877" // check_circle
                         font.family: materialIcons.name
                         font.pixelSize: 16
-                        color: "#0d0e11"
+                        color: Colors.textOnGold
                     }
                     Text {
                         text: "Save Settings"
+                        font.family: Colors.fontFamily
                         font.pixelSize: 12
                         font.weight: Font.Bold
-                        color: "#0d0e11"
+                        color: Colors.textOnGold
                     }
                 }
 
@@ -748,6 +842,7 @@ Page {
                     id: saveArea
                     anchors.fill: parent
                     hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
                     onClicked: root.saveRequested()
                 }
             }

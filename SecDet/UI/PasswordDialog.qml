@@ -12,34 +12,35 @@ Dialog {
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
-    // Signal emitted when user submits the password
     signal acceptedPassword(string password)
 
-    // Dark backdrop overlay matching theme
     Overlay.modal: Rectangle {
-        color: "#b0000000"
+        color: Colors.overlayModal
         Behavior on opacity { NumberAnimation { duration: 150 } }
     }
 
     background: Rectangle {
         color: Colors.bgSurface
-        radius: 14
+        radius: 12
         border.color: Colors.goldBorderHi
         border.width: 1
+
+        Behavior on color { ColorAnimation { duration: 200 } }
+        Behavior on border.color { ColorAnimation { duration: 200 } }
     }
 
     contentItem: ColumnLayout {
         spacing: 16
 
-        // --- Header: Icon & Title ---
+        // Header: Icon & Title
         RowLayout {
             spacing: 12
             Layout.fillWidth: true
 
             Rectangle {
                 width: 38; height: 38; radius: 19
-                color: Qt.rgba(0.9, 0.76, 0.35, 0.1)
-                border.color: Colors.goldBorder
+                color: Colors.goldLight
+                border.color: Colors.goldBorderHi
                 border.width: 1
 
                 Text {
@@ -57,6 +58,7 @@ Dialog {
 
                 Text {
                     text: "Password Required"
+                    font.family: Colors.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Bold
                     color: Colors.textMain
@@ -64,19 +66,20 @@ Dialog {
 
                 Text {
                     text: "Enter password to unlock or extract contents"
+                    font.family: Colors.fontFamily
                     font.pixelSize: 11
                     color: Colors.textMuted
                 }
             }
         }
 
-        // --- Password Input Field ---
+        // Password Input Field
         Rectangle {
             Layout.fillWidth: true
             height: 40
-            radius: 8
-            color: Colors.bgMain
-            border.color: passInput.activeFocus ? Colors.goldBorderHi : Colors.goldBorder
+            radius: 6
+            color: Colors.bgInput
+            border.color: passInput.activeFocus ? Colors.goldBorderHi : Colors.borderSubtle
             border.width: 1
 
             Behavior on border.color { ColorAnimation { duration: 150 } }
@@ -91,7 +94,9 @@ Dialog {
                     id: passInput
                     Layout.fillWidth: true
                     placeholderText: "Enter password..."
+                    placeholderTextColor: Colors.textSubtle
                     color: Colors.textMain
+                    font.family: Colors.fontFamily
                     font.pixelSize: 13
                     echoMode: showPassBtn.showPassword ? TextInput.Normal : TextInput.Password
                     background: null
@@ -122,13 +127,14 @@ Dialog {
                         id: eyeMouse
                         anchors.fill: parent
                         hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
                         onClicked: showPassBtn.showPassword = !showPassBtn.showPassword
                     }
                 }
             }
         }
 
-        // --- Action Buttons ---
+        // Action Buttons
         RowLayout {
             Layout.fillWidth: true
             spacing: 10
@@ -137,16 +143,15 @@ Dialog {
             Rectangle {
                 Layout.fillWidth: true
                 height: 36
-                radius: 8
-                color: cancelMouse.containsPress ? Qt.rgba(1, 1, 1, 0.08)
-                     : cancelMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.04)
-                     : "transparent"
-                border.color: cancelMouse.containsMouse ? Colors.goldBorderHi : Colors.goldBorder
+                radius: 6
+                color: cancelMouse.containsMouse ? Colors.bgHover : "transparent"
+                border.color: Colors.goldBorder
                 border.width: 1
 
                 Text {
                     anchors.centerIn: parent
                     text: "Cancel"
+                    font.family: Colors.fontFamily
                     font.pixelSize: 12
                     font.weight: Font.Medium
                     color: Colors.textMuted
@@ -156,6 +161,7 @@ Dialog {
                     id: cancelMouse
                     anchors.fill: parent
                     hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
                     onClicked: passwordDialog.close()
                 }
             }
@@ -164,23 +170,27 @@ Dialog {
             Rectangle {
                 Layout.fillWidth: true
                 height: 36
-                radius: 8
-                color: confirmMouse.containsPress ? Qt.darker(Colors.goldPrimary, 1.2)
+                radius: 6
+                color: confirmMouse.containsPress ? Qt.darker(Colors.goldPrimary, 1.15)
                      : confirmMouse.containsMouse ? Colors.goldHover
                      : Colors.goldPrimary
+
+                Behavior on color { ColorAnimation { duration: 120 } }
 
                 Text {
                     anchors.centerIn: parent
                     text: "Unlock"
+                    font.family: Colors.fontFamily
                     font.pixelSize: 12
                     font.weight: Font.Bold
-                    color: Colors.bgMain
+                    color: Colors.textOnGold
                 }
 
                 MouseArea {
                     id: confirmMouse
                     anchors.fill: parent
                     hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
                     onClicked: {
                         if (passInput.text.length > 0) {
                             passwordDialog.acceptedPassword(passInput.text)
@@ -192,7 +202,6 @@ Dialog {
         }
     }
 
-    // Auto-focus and clear field when shown
     onOpened: {
         passInput.text = ""
         passInput.forceActiveFocus()
