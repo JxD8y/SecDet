@@ -43,4 +43,3 @@ int main(int argc, char** argv) {
 //Most of the callbacks need to return a global status like failed <cause> or their status like IteratingDirectory loading file or ... 
 // SePackage::WriteMetadata -> when metadata change happens .
 // The Add file or remove file should start the write operation on a temp file then move it to the main file when the process is done !
-
