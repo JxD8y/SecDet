@@ -29,33 +29,36 @@
 
 using namespace std;
 
+class SeArchive;
+
 class SeMetadata{
 public:
-    static expected<SeMetadata,error_code> LoadMetadataFromBytes(u16string file_name);
+    static expected<SeMetadata,error_code> LoadMetadataFromBytes(span<unsigned char> metadata_bytes);
     
-    SeMetadata() = delete;
     
     void GetMetadataBytes(span<unsigned char> out_data);
-
+    
     uint16_t GetCompressionLevel() noexcept {return this->m_compression_level;}
     bool GetPreserveMetadata() noexcept {return this->m_preserve_metadata;}
     
-
+    
     void SetCompressionLevel(uint16_t value) { 
         if(value > 0x3 || value < 0x0)
-            return;
+        return;
         this->m_compression_level = value;
         this->m_isReady = false;
     }
     void SetPreserveMetadata(bool value) {
         if(value == m_preserve_metadata)
-            return;
+        return;
         this->m_preserve_metadata = value;
         this->m_isReady = false;
     }
+    friend class SeArchive;
 
 private:
     SeMetadata(uint16_t version,uint16_t compressionLevel, bool preserveMetadata);
+    SeMetadata() {};
    
     // header metadata size: 19 byte
     bool m_preserve_metadata = false;
