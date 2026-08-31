@@ -31,9 +31,10 @@ enum class SeError{
 
     CRYPTOBufferWasEmpty,
     CRYPTOStringWasEmpty,
+    CRYPTOInvalidSessionMode,
     CRYPTOCannotInitSodium,
     CRYPTOGenericFailure,
-
+    CRYPTOKDFFail,
 
     StreamAlreadyOpen,
 
@@ -71,6 +72,9 @@ struct SeErrorCategory: std::error_category{
             case SeError::CRYPTOBufferWasEmpty: return "Crypto: byffer was empty";
             case SeError::CRYPTOCannotInitSodium: return "Crypto: cannot initiate libsodium";
             case SeError::CRYPTOGenericFailure: return "Crypto: crypto operation failed";
+            case SeError::CRYPTOInvalidSessionMode: return "Crypto: wrong session mode";
+            case SeError::CRYPTOKDFFail: return "Crypto: kdf failed";
+
 
             case SeError::StreamAlreadyOpen: return "Stream: file is already open";
 
