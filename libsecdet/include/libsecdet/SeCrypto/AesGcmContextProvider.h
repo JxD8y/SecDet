@@ -1,0 +1,2 @@
+// Singular pre archive , holds the master key , for each file encryption/decryption user call a Factory method CreateEncryptionContext with file id
+// this gives us control over master key while the contexts dont know about the underling stream 

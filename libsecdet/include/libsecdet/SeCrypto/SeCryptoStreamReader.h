@@ -1,1 +1,0 @@
-//Reader and writer streams open the secdet archive , find the metadata , validate it , create their CryptoProvider object with the data in it , 
