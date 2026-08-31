@@ -54,6 +54,15 @@ public:
         this->m_preserve_metadata = value;
         this->m_isReady = false;
     }
+
+    bool operator==(const SeMetadata& b) const{
+        return b.m_archive_file_name == this->m_archive_file_name && 
+                b.m_compression_level == this->m_compression_level &&
+                b.m_preserve_metadata == this->m_preserve_metadata &&
+                b.m_toc_offset == this->m_toc_offset &&
+                b.m_version == this->m_version;
+    }
+    
     friend class SeArchive;
 
 private:

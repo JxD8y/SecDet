@@ -14,7 +14,6 @@
 #include <string_view>
 #include <system_error>
 
-
 enum class FileMode {
     CreateAlways, // Create new, overwrite if exists (Read/Write)
     OpenExisting, // Open existing file (Read/Write)
@@ -31,18 +30,20 @@ class MappedFileStream {
 public:
     static constexpr size_t DEFAULT_RESERVE = 64 * 1024; // 64 KB alignment
 
-    // Factory method using std::expected
-    static std::expected<MappedFileStream, std::error_code> open(
+    std::expected<void, std::error_code> open(
         const std::filesystem::path& path,
         FileMode mode = FileMode::OpenOrCreate,
         size_t initial_reserve = DEFAULT_RESERVE) {
         
-        MappedFileStream stream;
-        auto res = stream.init(path, mode, initial_reserve);
+        if(this->is_open())
+            return std::unexpected(SeError::StreamAlreadyOpen);
+        
+        auto res = this->init(path, mode, initial_reserve);
         if (!res) {
             return std::unexpected(res.error());
         }
-        return stream;
+        
+        return {};
     }
 
     MappedFileStream() = default;
@@ -168,6 +169,11 @@ public:
         return m_cursor;
     }
 
+    [[nodiscard]] bool eof() const noexcept {
+        std::lock_guard lock(m_mutex);
+        return m_cursor >= m_file_size;
+    }
+    
     [[nodiscard]] bool is_open() const noexcept {
         std::lock_guard lock(m_mutex);
         return m_file_handle != INVALID_HANDLE_VALUE;

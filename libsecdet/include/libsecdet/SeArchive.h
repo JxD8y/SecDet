@@ -5,12 +5,24 @@
 #include <span>
 #include <algorithm>
 #include <stack>
+#include <filesystem>
+#include <functional>
+#include <thread>
+#include <zstd.h>
 
 #include "SeMetadata.h"
 #include "SeError.h"
 #include "SeTOC.h"
+#include "SeJob.h"
+#include "SeCRC32.h"
+#include "SeMMStream.h"
+#include "SeCrypto/SeCryptoUtils.h"
 
 using namespace std;
+#define SE_JOB_MAX_COUNT 10
+#define SE_ARCHIVE_KEY_LIM 1
+
+using ProgressCallback = std::function<void(const SeJob&)>;
 
 
 class SeArchive{
@@ -25,6 +37,11 @@ class SeArchive{
     // [TOC bytes]
 
 public:
+    explicit SeArchive(SeMetadata metadata, SeTableOfContent toc, u16string archivePath) :m_metadata(metadata),
+        m_toc(toc),
+        m_archiveFilePath(archivePath)
+    {
+    }
     // The archivePath file should exist otherwise a error will be returned
     static expected<SeArchive,error_code> CreateArchive(uint16_t version,uint16_t compressionLevel, bool preserveMetadata,u16string archivePath);
     static expected<SeArchive,error_code> LoadArchiveFile(u16string path);
@@ -61,12 +78,12 @@ public:
     /// @brief Registers a Create directory job 
     /// @param fileName Relative file path
     /// @return 
-    expected<void,error_code> CreateArchiveDirectory(u16string fileName);
+    expected<void,error_code> AddDirectory(u16string fileName);
 
     /// @brief Registers a remove directory job, it will remove the files inside the directory completely
     /// @param fileName Relative file path
     /// @return 
-    expected<void,error_code> RemoveArchiveDirectory(u16string fileName); // Remove a directory ( still deciding what to do with the files inside it!)
+    expected<void,error_code> DeleteDirectory(u16string fileName); // Remove a directory ( still deciding what to do with the files inside it!)
 
     /// @brief Moves a file within the archive from one directory to another;Still need to call SaveChanges
     /// @param fileName Source file relative path
@@ -82,37 +99,50 @@ public:
 
     /// @brief Extract the file into temp directory, calculate its checksum, compare the uncompressed and compressed size in TOC to verify the file health; You have to register a key before calling this function
     /// @param fileName Relative file path
+    /// @param callback Function to notify you of the changes in the job process
+    /// @param stopToken Cancelation token
     /// @return 
-    expected<void,error_code> TestFile(u16string fileName); 
+    expected<void,error_code> TestFileSync(u16string fileName,ProgressCallback callback,stop_token stopToken); 
 
     /// @brief Extract a full directory; you have to register a key before calling this function
     /// @param fileName Relative file path
     /// @param outputPath Output file on disk
+    /// @param callback Function to notify of job status
+    /// @param stopToken Cancelation token
     /// @return Number of files extracted ( Does not count the created directories )
-    expected<size_t,error_code> ExtractDirectory(u16string fileName,u16string outputPath); 
+    expected<size_t,error_code> ExtractDirectory(u16string fileName,u16string outputPath,ProgressCallback callback,stop_token stopToken); 
     
     /// @brief Extract a file into disk; you have to register a key before calling this function
     /// @param fileName Relative file path in archive
     /// @param outputPath Output file on disk
+    /// @param callback Function to notify you about job status
+    /// @param stopToken Cancelation token
     /// @return Bytes extracted 
-    expected<size_t,error_code> ExtractFile(u16string fileName,u16string outputPath);
+    expected<size_t,error_code> ExtractFile(u16string fileName,u16string outputPath, ProgressCallback callback,stop_token stopToken);
+
+
+    /// @brief Writes every requested job to the file
+    /// @param callback Progress report
+    /// @param stopToken Cancelation token
+    /// @return 
+    expected<void,error_code> SaveChangesSync(ProgressCallback callback , stop_token stopToken);
 
     /// @brief Register a key for archive manipulation tasks
     /// @param key ASCII key string
     /// @return 
-    expected<void,error_code> RegisterKey(string key);
+    expected<void,error_code> RegisterKey(string& key);
 
     /// @brief Checks if a key exists within the current SeArchive object
     /// @return 
-    expected<bool,error_code> IsKeyPresent();
+    bool IsKeyPresent();
 
     /// @brief Remove the present key from the SeArchive
     /// @return 
-    expected<void,error_code> RemoveKey();
+    expected<void,error_code> RemoveKey(string& key);
 
     /// @brief Get a list of pending jobs on the Archive
     /// @return 
-    expected<const stack<SeJob>&,error_code> GetJobs();
+    const vector<SeJob>& GetJobs();
     /// @brief Remove a job with its id
     /// @param id Id ofthe desired job
     /// @return 
@@ -122,19 +152,37 @@ public:
     void SetPreserveMetadata(bool preserve);
     void SetCompressionLevel(uint32_t compressionLevel);
 
-    expected<void,error_code> SaveChangesSync(); // Lemme think about the callback datastruct
-
     bool IsReady();
 private:
-    SeArchive(SeMetadata metadata,SeTableOfContent toc, u16string archivePath):m_metadata(metadata),
-                                                        m_toc(toc),
-                                                        m_archiveFilePath(archivePath)
-    {}
+    
+    // WARN: ALIGNMENT IS NON_EXISTANT
 
     bool verifyKey();
 
-    u16string m_archiveFilePath = s"";
+    bool verifyJobs();
+
+    bool addJob(const SeJob&);
+
+    // Low overhead sub-routines to do archive jobs
+    expected<void,error_code> doAddFileJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
+    expected<void,error_code> doRemoveFileJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
+    expected<void,error_code> doAddDirectoryJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
+    expected<void,error_code> doDeleteDirectoryJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
+    expected<void,error_code> doMoveFileJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
+    expected<void,error_code> doMoveDirectoryJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
+    expected<void,error_code> doChangeCompressionLevel(SeJob& job, ProgressCallback callback , stop_token stopToken);
+    expected<void,error_code> doTestFile(SeJob& job, ProgressCallback callback , stop_token stopToken);
+
+    vector<vector<unsigned char>> m_archiveKeys; // One key is allowed in version 1
+
+    MappedFileStream m_archiveStream;
+    vector<SeJob> m_jobs;
+    u16string m_archiveFilePath = u"";
     SeMetadata m_metadata;
     SeTableOfContent m_toc;
     bool m_isReady = false;
+    
+    unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> m_zstdCctx{ ZSTD_createCCtx(), ZSTD_freeCCtx };
+
+    unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> m_zstdDctx{ ZSTD_createDCtx(), ZSTD_freeDCtx };
 };
