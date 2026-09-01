@@ -26,19 +26,17 @@ public:
 		}
 		return AesGcmContextProvider();
 	}
-
-	static GenerateSecureRandom(span<unsigned char> in, size_t count);
 	
 	// Non-copiable
 	AesGcmContextProvider& operator=(const AesGcmContextProvider&) = delete;
 	AesGcmContextProvider(const AesGcmContextProvider&) = delete;
 
-	AesGcmContextProvider(const AesGcmContextProvider&& other) noexcept{
+	AesGcmContextProvider(AesGcmContextProvider&& other) noexcept{
 		memcpy(m_masterKey.data(), other.m_masterKey.data(), KEY_BYTES);
 		sodium_memzero(other.m_masterKey.data(), KEY_BYTES);
 	}
 
-	AesGcmContextProvider& operator=(const AesGcmContextProvider&& other) noexcept {
+	AesGcmContextProvider& operator=(AesGcmContextProvider&& other) noexcept {
 		if (this != &other) {
 			sodium_memzero(this->m_masterKey.data(), KEY_BYTES);
 			memcpy(this->m_masterKey.data(), other.m_masterKey.data(), KEY_BYTES);
@@ -51,35 +49,10 @@ public:
 		sodium_memzero(this->m_masterKey.data(), KEY_BYTES);
 	}
 	
-	inline expected<std::unique_ptr<AesGcmStreamContext>,error_code> createSession(
+	inline expected<std::unique_ptr<AesGcmStreamContext>, error_code> createSession(
 		uint64_t fileSubkeyId,
-		const char kdfContext[KDF_CONTEXT_BYTES] = "file_enc"
-	) const {
-		std::vector<unsigned char> subkey{KEY_BYTES};
-
-		// Securely derive a 256-bit key from the master key
-		if (crypto_kdf_derive_from_key(
-			subkey.data(),
-			KEY_BYTES,
-			fileSubkeyId,
-			kdfContext,
-			masterKey_.data()) != 0) {
-			
-			return unexpected(SeError::CRYPTOKDFFail);
-		}
-
-		vector<unsigned char> baseNonce{ crypto_aead_aes256gcm_NPUBBYTES };
-		randombytes_buf(baseNonce.data(), baseNonce.size());
-
-		auto session = std::make_unique<AesGcmStreamSession>(
-			subkey,
-			baseNonce,
-			AesGcmStreamSession::Mode::Encrypt
-		);
-
-		sodium_memzero(subkey.data(), KEY_BYTES);
-		return session;
-	}
+		const char kdfContext[KDF_CONTEXT_BYTES]
+	);
 
 private:
 	vector<unsigned char> m_masterKey{ KEY_BYTES };

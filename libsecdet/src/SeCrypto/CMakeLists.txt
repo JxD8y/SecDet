@@ -2,9 +2,9 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(SeCrypto 
-            SeCryptoStreamReader.cpp
-            SeCryptoStreamWriter.cpp
-            SeCryptoAesProvider.cpp)
+            SeCryptoUtils.cpp
+            AesGcmStreamSession.cpp
+            AesGcmContextProvider.cpp)
 
 find_package(unofficial-sodium CONFIG REQUIRED)
 
