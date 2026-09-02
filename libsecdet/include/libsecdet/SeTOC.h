@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "SeError.h"
+#include "SeCrypto/SeCryptoUtils.h"
 
 using namespace std;
 
@@ -20,28 +21,54 @@ class SeArchiveEntry{
 public:
     static expected<SeArchiveEntry,error_code> CreateFromBytes(span<unsigned char>);
 
-    SeArchiveEntry() = default;
+    static SeArchiveEntry CreateFileEntry(u16string _path, uint64_t _uncompressed_sz = 0, uint64_t _compressed_sz = 0,
+        uint32_t _attributes = 0, uint32_t _offset = 0, uint32_t _crc32 = 0) {
 
-    SeArchiveEntry(u16string _path, uint64_t _uncompressed_sz , uint64_t _compressed_sz, 
-                    uint32_t _attributes, uint32_t _offset, uint32_t _crc32): path(_path),
-                                                                                uncompressed_size(_uncompressed_sz),
-                                                                                compressed_size(_compressed_sz),
-                                                                                attributes(_attributes),
-                                                                                offset(_offset),
-                                                                                crc32(_crc32)
-    {
+        SeArchiveEntry entry;
+        entry.path = _path;
+        entry.uncompressed_size = _uncompressed_sz;
+        entry.compressed_size = _compressed_sz;
+        entry.attributes = _attributes;
+        entry.offset = _offset;
+        entry.crc32 = _crc32;
+        entry.fileUid = getSecureRandom();
+        
+        return entry;
+    }
 
+    static SeArchiveEntry CreateDirectoryEntry(u16string _path) {
+        
+        SeArchiveEntry entry;
+        entry.path = _path;
+        entry.attributes = -1;
+        entry.crc32 = -1;
+        entry.offset = 0;
+        entry.fileUid = 0;
+
+        return entry;
+    }
+
+    SeArchiveEntry() { // Upon refactoring def ctor should be private!
+        this->fileUid = getSecureRandom();
     }
 
 
     u16string path; //Relative path
     uint64_t uncompressed_size = 0;
     uint64_t compressed_size = 0;
-    uint32_t attributes = 0;
     uint64_t offset = 0;
+    uint64_t fileUid = 0;
+    uint32_t attributes = 0;
     uint32_t crc32 = 0;
 
     vector<unsigned char> Serialize();
+
+    uint64_t GetDiskSize()const noexcept {
+        uint64_t size = 0;
+        size += (path.size() * sizeof(char16_t)) + (4 * sizeof(uint64_t)) + +sizeof(uint32_t) + sizeof(uint32_t); // entry
+        size += compressed_size;
+        return size;
+    }
 
     bool isDirectory() const { return (attributes & 1) != 0; }
     // Entries should serialize their size !
@@ -67,8 +94,12 @@ public:
     bool RemoveEntry(u16string);
     bool RemoveEntry(SeArchiveEntry&);
 
-    expected<void,error_code> CheckPath(u16string);
-    expected<void,error_code> CheckParentPath(u16string);//Check if the parent directory exist
+    expected<SeArchiveEntry&, error_code> GetEntry(u16string path);
+    
+    vector<SeArchiveEntry&> GetEntriesFollowing(SeArchiveEntry& entry);
+
+    bool CheckPath(u16string);
+    bool CheckParentPath(u16string); // Check if the parent directory exist
 
     [[nodiscard]] span<const SeArchiveEntry> GetEntries() const noexcept{
         return m_entries;

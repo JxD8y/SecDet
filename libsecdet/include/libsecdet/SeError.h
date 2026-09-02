@@ -25,7 +25,7 @@ enum class SeError{
     OperationCanceled,
     ZstdInitiationFail,
     RequiredFieldMissing,
-
+    SmallBuffer,
 
 
 
@@ -67,6 +67,8 @@ struct SeErrorCategory: std::error_category{
             case SeError::InvalidJob: return "Job object was not valid";
             case SeError::ZstdInitiationFail: return "Cannot initiate the zstd context";
             case SeError::RequiredFieldMissing: return "One of the required field is missing.";
+            case SeError::SmallBuffer: return "Insufficient space in passed buffer";
+
 
             case SeError::CRYPTOStringWasEmpty: return "Crypto: string was empty";
             case SeError::CRYPTOBufferWasEmpty: return "Crypto: byffer was empty";

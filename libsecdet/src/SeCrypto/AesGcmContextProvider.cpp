@@ -2,9 +2,9 @@
 #include "libsecdet/SeCrypto/AesGcmStreamSession.h"
 
 
-inline expected<std::unique_ptr<AesGcmStreamContext>, error_code> AesGcmContextProvider::createSession(
+inline expected<std::unique_ptr<AesGcmStreamSession>, error_code> AesGcmContextProvider::createSession(
 	uint64_t fileSubkeyId,
-	const char kdfContext[KDF_CONTEXT_BYTES] = "file_enc"
+	const char kdfContext[KDF_CONTEXT_BYTES]
 ){
 	std::vector<unsigned char> subkey{ KEY_BYTES };
 
@@ -22,7 +22,7 @@ inline expected<std::unique_ptr<AesGcmStreamContext>, error_code> AesGcmContextP
 	vector<unsigned char> baseNonce{ crypto_aead_aes256gcm_NPUBBYTES };
 	randombytes_buf(baseNonce.data(), baseNonce.size());
 
-	auto session = std::make_unique<AesGcmStreamContext>(
+	auto session = std::make_unique<AesGcmStreamSession>(
 		subkey,
 		baseNonce,
 		Mode::Encryption
@@ -30,4 +30,17 @@ inline expected<std::unique_ptr<AesGcmStreamContext>, error_code> AesGcmContextP
 
 	sodium_memzero(subkey.data(), KEY_BYTES);
 	return session;
+}
+
+expected<void, error_code> AesGcmContextProvider::SetMasterKey(span<unsigned char> key) {
+	
+	if (key.size() < AesGcmContextProvider::KEY_BYTES) {
+		return unexpected(SeError::SmallBuffer);
+	}
+
+	memcpy(this->m_masterKey.data(), key.data(), AesGcmContextProvider::KEY_BYTES);
+
+	this->m_keyRegister = true;
+	return {};
+
 }

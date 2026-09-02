@@ -24,3 +24,13 @@ bool secureBufferCompare(span<unsigned char> op1,span<unsigned char> op2){
 
     return sodium_memcmp(op1.data(),op2.data(),op1.size()) == 0;
 }
+
+uint64_t getSecureRandom() {
+    sodium_init(); // dont want the extra expected here because this function rarely fails.
+
+    uint64_t data;
+
+    randombytes_buf(&data, sizeof(uint64_t));
+
+    return data;
+}

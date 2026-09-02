@@ -28,6 +28,7 @@ expected<SeArchiveEntry,error_code> SeArchiveEntry::CreateFromBytes(span<unsigne
     read(&_sEntry.attributes,sizeof(_sEntry.attributes));
     read(&_sEntry.offset,sizeof(_sEntry.offset));
     read(&_sEntry.crc32,sizeof(_sEntry.crc32));
+    read(&_sEntry.fileUid,sizeof(_sEntry.fileUid));
 
     return _sEntry;
 }
@@ -51,6 +52,7 @@ vector<unsigned char> SeArchiveEntry::Serialize(){
     append_buffer(&this->attributes,sizeof(this->attributes));
     append_buffer(&this->offset,sizeof(this->offset));
     append_buffer(&this->crc32,sizeof(this->crc32));
+    append_buffer(&this->fileUid, sizeof(this->fileUid));
     
     return buffer;
 }

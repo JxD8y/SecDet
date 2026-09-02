@@ -10,7 +10,8 @@
 
 using namespace std;
 
-class AesGcmStreamContext;
+class AesGcmStreamSession;
+class SeArchive;
 
 class AesGcmContextProvider {
 public:
@@ -49,13 +50,21 @@ public:
 		sodium_memzero(this->m_masterKey.data(), KEY_BYTES);
 	}
 	
-	inline expected<std::unique_ptr<AesGcmStreamContext>, error_code> createSession(
+	inline expected<std::unique_ptr<AesGcmStreamSession>, error_code> createSession(
 		uint64_t fileSubkeyId,
-		const char kdfContext[KDF_CONTEXT_BYTES]
+		const char kdfContext[KDF_CONTEXT_BYTES] = "file_enc"
 	);
+
+	expected<void,error_code> SetMasterKey(span<unsigned char> key);
+	
+	bool keyExists() const noexcept {
+		return this->m_keyRegister;
+	}
 
 private:
 	vector<unsigned char> m_masterKey{ KEY_BYTES };
+	
+	bool m_keyRegister = false;
 
 	AesGcmContextProvider();
 	vector<unsigned char> generateSessionKey(span<unsigned char> fileIdx);
