@@ -100,13 +100,6 @@ public:
     /// @return 
     expected<void,error_code> MoveDirectory(u16string fileName, u16string destPath); // Moving a directory to another with all of its files
 
-    /// @brief Extract the file into temp directory, calculate its checksum, compare the uncompressed and compressed size in TOC to verify the file health; You have to register a key before calling this function
-    /// @param fileName Relative file path
-    /// @param callback Function to notify you of the changes in the job process
-    /// @param stopToken Cancelation token
-    /// @return 
-    expected<void,error_code> TestFileSync(u16string fileName,ProgressCallback callback,stop_token stopToken); 
-
     /// @brief Extract a full directory; you have to register a key before calling this function
     /// @param fileName Relative file path
     /// @param outputPath Output file on disk

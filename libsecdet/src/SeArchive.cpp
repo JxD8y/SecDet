@@ -132,11 +132,11 @@ expected<void,error_code> SeArchive::DeleteDirectory(u16string fileName){
     return {};
 }
 
-expected<void,error_code> SeArchive::MoveArchiveFile(u16string fileName,u16string destPath){
-    if(!this->m_toc.CheckPath(fileName) || !this->m_toc.CheckPath(destPath))
+expected<void,error_code> SeArchive::MoveArchiveFile(u16string src,u16string dst){
+    if(!this->m_toc.CheckPath(src) || !this->m_toc.CheckPath(dst))
         return unexpected(SeError::TocPathIsInvalid);
     
-    auto job = SeJob(JobType::MoveArchiveFile,fileName,destPath);
+    auto job = SeJob(JobType::MoveArchiveFile,src,dst);
     
     if(!this->addJob(job))
         return unexpected(SeError::CannotCreateJob);
@@ -322,7 +322,7 @@ expected<void,error_code> SeArchive::doAddFileJob(SeJob& job, ProgressCallback c
         return unexpected(_fs.error());
     }
 
-    SeArchiveEntry entry = SeArchiveEntry::CreateFileEntry(job.m_fileName);
+    SeArchiveEntry entry = SeArchiveEntry::CreateFileEntry(this->m_toc.GetFileName(job.m_fileName)); // Important: the header entry will have only file name, the TOC will contains full path!
     entry.uncompressed_size = inFileStream.size();
     entry.attributes = 0; //Dont know and care how to get and set file attr for now !
     entry.offset = this->m_toc.getNextAvailOffset();
@@ -487,6 +487,9 @@ expected<void,error_code> SeArchive::doAddFileJob(SeJob& job, ProgressCallback c
 
     this->m_archiveStream.flush();
 
+    // Modifying entry's path from file name to full path
+    entry.path = job.m_fileName;
+
     this->m_toc.AddEntry(entry); // Unlikely to get an error here !
 
     job.setStatus(JobStatus::Finished);
@@ -622,36 +625,236 @@ expected<void, error_code> SeArchive::doAddDirectoryJob(SeJob& job, ProgressCall
 }
 
 expected<void, error_code> SeArchive::doDeleteDirectoryJob(SeJob& job, ProgressCallback callback, stop_token stopToken) {
-    // retrieve all of the directory files , calls Remove file for each of them , then removes the directory from toc
-    // toc should have a safety check like the unix rm to avoid directories with content get removed
+    
+    job.setStatus(JobStatus::Pending);
+    if (callback)
+        callback(job);
+
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    if (!this->m_toc.CheckPath(job.m_fileName)) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::TocPathIsInvalid);
+    }
+
+    auto _dir = this->m_toc.GetEntry(job.m_fileName);
+    if (!_dir) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::TocPathIsInvalid);
+    }
+    auto dir = *_dir;
+
+    auto dirEntries = this->m_toc.GetDirectoryFileEntries(dir);
+
+    job.setStatus(JobStatus::Running);
+    if (callback)
+        callback(job);
+    if (dirEntries.size() == 0) {
+        // Removing empty directory
+
+        this->m_toc.RemoveEntry(dir);
+
+        job.setStatus(JobStatus::Finished);
+        if (callback)
+            callback(job);
+        return {};
+    }
+    else {
+        // Removing files
+
+        for (int i{ 0 }; i < dirEntries.size(); i++) { // Same as doRemoveFile no stopToken is processed here cause makes the reverting task harder!
+            
+            auto fileEntry = dirEntries[i];
+
+            job.percentage = (i / dirEntries.size()) * 100;
+            if (callback)
+                callback(job);
+
+            // Not very efficient but i will call the doRemoveFile with my own file entries
+
+            SeJob jFileRemove(JobType::RemoveFile, fileEntry.path, u"");
+            auto _remove = doRemoveFileJob(jFileRemove, nullptr, stopToken); // no need for callback since we are the reporter!
+            if (!_remove) {
+
+                job.setStatus(JobStatus::Failed);
+                if (callback)
+                    callback(job);
+                return unexpected(_remove.error());
+            }
+        }
+
+        this->m_toc.RemoveEntry(dir);
+        job.setStatus(JobStatus::Finished);
+        if (callback)
+            callback(job);
+        return {};
+    }
 }
 
 expected<void, error_code> SeArchive::doMoveFileJob(SeJob& job, ProgressCallback callback, stop_token stopToken) {
-    // Modify the toc entry, The problemo here is that for a simple move which is purely metadata based if the path length exceeds the previous we have to move the whole archive:
-    // which even defeat the purpose of putting TOC at the eOF!
+    // File header entries are just file name and not needed to be moved around upon the file moves!
 
-    // DECIDE HERE!
+    job.setStatus(JobStatus::Pending);
+    if (callback)
+        callback(job);
+
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+    // Assuming the job as registered & file name is src , file path is dst
+
+    auto _ent = this->m_toc.GetEntry(job.m_fileName);
+    
+    if (!_ent) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_ent.error());
+    }
+
+    job.setStatus(JobStatus::Running);
+    if (callback)
+        callback(job);
+    
+    auto entry = *_ent;
+    
+    // Verifying the destination and constructing path
+
+    auto fileName = this->m_toc.GetFileName(entry.path);
+
+    if (!this->m_toc.CheckPath(job.m_filePath) || !this->m_toc.IsDirectory(job.m_filePath)) {
+        // Sloppiness at job verification can cause this
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::TocPathIsInvalid);
+    }
+    
+    auto finalPath = this->m_toc.CreateFilePath(job.m_filePath, fileName); // No need to retrieve the dest directory entry
+    
+    this->m_toc.RemoveEntry(entry);
+
+    entry.path = finalPath;
+    
+    this->m_toc.AddEntry(entry);
+
+    job.setStatus(JobStatus::Finished);
+    if (callback)
+        callback(job);
+    return {};
+    
 }
 
 expected<void, error_code> SeArchive::doMoveDirectoryJob(SeJob& job, ProgressCallback callback, stop_token stopToken) {
-    // this one is simple! just retrieve all directory files , list them modify their TOCs and call the movefile on them
-    // then move the directory in TOC
+    
+    job.setStatus(JobStatus::Pending);
+    if (callback)
+        callback(job);
+
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    if (!this->m_toc.CheckPath(job.m_fileName) || !this->m_toc.IsDirectory(job.m_fileName) || !this->m_toc.CheckPath(job.m_filePath) || !this->m_toc.IsDirectory(job.m_filePath)) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::TocPathIsInvalid);
+    }
+
+    auto _ent = this->m_toc.GetEntry(job.m_fileName);
+    if (!_ent){
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_ent.error());
+    }
+    auto entry = *_ent;
+
+    auto newDirPath = this->m_toc.CreateDirPath(job.m_filePath, this->m_toc.GetFileName(entry.path));
+
+    auto entrySubs = this->m_toc.GetDirectoryFileEntries(entry);
+
+    if (entrySubs.size() == 0) {
+        this->m_toc.RemoveEntry(entry);
+        entry.path = newDirPath;
+        this->m_toc.AddEntry(entry);
+
+        job.setStatus(JobStatus::Finished);
+        if (callback)
+            callback(job);
+        return {};
+    }
+    else {
+        
+        for (int i{ 0 }; i < entrySubs.size(); i++) {
+
+            auto subEntry = entrySubs[i];
+            
+            if (subEntry.isDirectory()) {
+                auto newPath = this->m_toc.CreateDirPath(newDirPath, this->m_toc.GetFileName(subEntry.path));
+                SeJob jMove(JobType::MoveDirectory, subEntry.path, newPath);
+                auto _move = doMoveDirectoryJob(jMove, nullptr, stopToken);
+                if (!_move)
+                {
+                    job.setStatus(JobStatus::Failed);
+                    if (callback)
+                        callback(job);
+                    return unexpected(_move.error());
+                }
+            }
+            else {
+                auto newPath = this->m_toc.CreateDirPath(newDirPath, this->m_toc.GetFileName(subEntry.path));
+                SeJob jMove(JobType::MoveArchiveFile, subEntry.path, newPath);
+                auto _move = doMoveFileJob(jMove, nullptr, stopToken);
+                if (!_move)
+                {
+                    job.setStatus(JobStatus::Failed);
+                    if (callback)
+                        callback(job);
+                    return unexpected(_move.error());
+                }
+            }
+        }
+        this->m_toc.RemoveEntry(entry);
+        entry.path = newDirPath;
+        this->m_toc.AddEntry(entry);
+
+        job.setStatus(JobStatus::Finished);
+        if (callback)
+            callback(job);
+        return {};
+    }
+
 }
 
-expected<void, error_code> SeArchive::doChangeCompressionLevel(SeJob& job, ProgressCallback callback, stop_token stopToken) {
+expected<void, error_code> SeArchive::doChangeCompressionLevel(SeJob& job, ProgressCallback callback, stop_token stopToken) { // left un declared until tests
     // This one here is also a fundamental task! its much safer to apply the changes in a temp archive then rename it to the main !
+    return {};
 }
 
 expected<void, error_code> SeArchive::doTestFile(SeJob& job, ProgressCallback callback, stop_token stopToken) {
     // Just test Extract file and calculate the uncompressed size and crc32
-}
-
-expected<void, error_code> SeArchive::TestFileSync(u16string fileName, ProgressCallback callback, stop_token stopToken) {
     return {};
 }
 
-
 expected<size_t, error_code> SeArchive::ExtractDirectory(u16string fileName, u16string outputPath, ProgressCallback callback, stop_token stopToken) {
+    // these are going to be sync functions
     return {};
 }
 

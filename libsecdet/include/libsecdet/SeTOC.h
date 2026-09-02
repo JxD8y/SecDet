@@ -28,7 +28,7 @@ public:
         entry.path = _path;
         entry.uncompressed_size = _uncompressed_sz;
         entry.compressed_size = _compressed_sz;
-        entry.attributes = _attributes;
+        entry.attributes = 0;
         entry.offset = _offset;
         entry.crc32 = _crc32;
         entry.fileUid = getSecureRandom();
@@ -40,7 +40,7 @@ public:
         
         SeArchiveEntry entry;
         entry.path = _path;
-        entry.attributes = -1;
+        entry.attributes = 1;
         entry.crc32 = -1;
         entry.offset = 0;
         entry.fileUid = 0;
@@ -70,7 +70,7 @@ public:
         return size;
     }
 
-    bool isDirectory() const { return (attributes & 1) != 0; }
+    bool isDirectory() const { return (attributes & 0x1) != 0; } // ?? 
     // Entries should serialize their size !
     bool operator==(const SeArchiveEntry& value){
         if(path == value.path && offset == value.offset && crc32 == value.crc32)
@@ -96,10 +96,19 @@ public:
 
     expected<SeArchiveEntry&, error_code> GetEntry(u16string path);
     
-    vector<SeArchiveEntry&> GetEntriesFollowing(SeArchiveEntry& entry);
+    vector<SeArchiveEntry&> GetEntriesFollowing(SeArchiveEntry& entry); // Entries after the passed entry offset
 
-    bool CheckPath(u16string);
+    vector<SeArchiveEntry&> GetDirectoryFileEntries(SeArchiveEntry& dirEntry); // Contains all the files + subdirectories inside
+
+    bool CheckPath(u16string); // Checks if path exists whether dir or file
+    bool IsDirectory(u16string); // Path should end with / to count as directory
     bool CheckParentPath(u16string); // Check if the parent directory exist
+
+    u16string GetFileName(u16string entryPath); // if the path is: /Folder1/MyFiles/file -> file or if its /Folder1/MyFiles/ -> MyFiles
+
+    u16string CreateFilePath(u16string parentDir, u16string fileName);
+
+    u16string CreateDirPath(u16string parentDir, u16string dirName); // just puts a / in the end
 
     [[nodiscard]] span<const SeArchiveEntry> GetEntries() const noexcept{
         return m_entries;
