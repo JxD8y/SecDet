@@ -69,6 +69,47 @@ public:
 
     // --- Thread-Safe Core Operations ---
 
+    std::expected<void, std::error_code> truncate(size_t new_size) {
+        std::lock_guard lock(m_mutex);
+        if (m_file_handle == INVALID_HANDLE_VALUE) {
+            return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+        }
+
+        // 1. Flush dirty pages before tearing down the view
+        if (m_view) {
+            FlushViewOfFile(m_view, 0);
+        }
+
+        // 2. MUST unmap view and close mapping handle before SetEndOfFile
+        unmap_view();
+
+        // 3. Move file pointer and commit new physical end of file
+        LARGE_INTEGER li;
+        li.QuadPart = static_cast<LONGLONG>(new_size);
+        if (!SetFilePointerEx(m_file_handle, li, nullptr, FILE_BEGIN) || !SetEndOfFile(m_file_handle)) {
+            auto err = last_error();
+            // Attempt to restore minimum state
+            m_file_size = 0;
+            return std::unexpected(err);
+        }
+
+        m_file_size = new_size;
+        if (m_cursor > m_file_size) {
+            m_cursor = m_file_size;
+        }
+
+        // 4. Re-establish mapping for future read/write operations
+        size_t map_size = std::max(m_file_size, m_granularity);
+        map_size = align_to_granularity(map_size);
+
+        auto remap_res = remap_to_capacity(map_size);
+        if (!remap_res) {
+            return std::unexpected(remap_res.error());
+        }
+
+        return {};
+    }
+
     std::expected<size_t, std::error_code> write(const void* data, size_t byte_count) {
         if (!data || byte_count == 0) return 0;
 
@@ -97,7 +138,7 @@ public:
         return write(str.data(), str.size());
     }
 
-    std::expected<size_t, std::error_code> write(std::span<const std::byte> bytes) {
+    std::expected<size_t, std::error_code> write(std::span<unsigned char> bytes) {
         return write(bytes.data(), bytes.size_bytes());
     }
 
@@ -309,26 +350,38 @@ private:
         m_mapped_capacity = 0;
     }
 
-    std::expected<void, std::error_code> flush_internal() noexcept {
+    std::expected<void, std::error_code> flush_internal() noexcept { // FIX: ERROR_USER_MAPPED_FILE which caused by setEndofFile call if the file shrinks using trunk
         if (m_view) {
-            FlushViewOfFile(m_view, 0);
-        }
-        if (m_file_handle != INVALID_HANDLE_VALUE) {
-            // Truncate physical file down from the padded mapping allocation to exact logical size
-            LARGE_INTEGER li;
-            li.QuadPart = static_cast<LONGLONG>(m_file_size);
-            if (!SetFilePointerEx(m_file_handle, li, nullptr, FILE_BEGIN) || !SetEndOfFile(m_file_handle)) {
+            if (!FlushViewOfFile(m_view, 0)) {
                 return std::unexpected(last_error());
             }
-            FlushFileBuffers(m_file_handle);
+        }
+        if (m_file_handle != INVALID_HANDLE_VALUE) {
+            if (!FlushFileBuffers(m_file_handle)) {
+                return std::unexpected(last_error());
+            }
         }
         return {};
     }
 
     void close_internal() noexcept {
         if (m_file_handle != INVALID_HANDLE_VALUE) {
-            flush_internal();
+            // 1. Flush memory view
+            if (m_view) {
+                FlushViewOfFile(m_view, 0);
+            }
+
+            // 2. Release mapping handles to permit SetEndOfFile
             unmap_view();
+
+            // 3. Physically truncate the file to the exact logical size
+            LARGE_INTEGER li;
+            li.QuadPart = static_cast<LONGLONG>(m_file_size);
+            if (SetFilePointerEx(m_file_handle, li, nullptr, FILE_BEGIN)) {
+                SetEndOfFile(m_file_handle);
+            }
+
+            FlushFileBuffers(m_file_handle);
             CloseHandle(m_file_handle);
             m_file_handle = INVALID_HANDLE_VALUE;
             m_file_size = 0;
