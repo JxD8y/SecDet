@@ -17,6 +17,8 @@
 #include "SeCRC32.h"
 #include "SeMMStream.h"
 #include "SeCrypto/SeCryptoUtils.h"
+#include "SeCrypto/AesGcmContextProvider.h"
+#include "SeCrypto/AesGcmStreamSession.h"
 
 using namespace std;
 #define SE_JOB_MAX_COUNT 10
@@ -37,9 +39,10 @@ class SeArchive{
     // [TOC bytes]
 
 public:
-    explicit SeArchive(SeMetadata metadata, SeTableOfContent toc, u16string archivePath) :m_metadata(metadata),
+    explicit SeArchive(SeMetadata metadata, SeTableOfContent toc, u16string archivePath,AesGcmContextProvider crypto) :m_metadata(metadata),
         m_toc(toc),
-        m_archiveFilePath(archivePath)
+        m_archiveFilePath(archivePath),
+        m_cryptoCtx(move(crypto))
     {
     }
     // The archivePath file should exist otherwise a error will be returned
@@ -136,10 +139,6 @@ public:
     /// @return 
     bool IsKeyPresent();
 
-    /// @brief Remove the present key from the SeArchive
-    /// @return 
-    expected<void,error_code> RemoveKey(string& key);
-
     /// @brief Get a list of pending jobs on the Archive
     /// @return 
     const vector<SeJob>& GetJobs();
@@ -173,7 +172,7 @@ private:
     expected<void,error_code> doChangeCompressionLevel(SeJob& job, ProgressCallback callback , stop_token stopToken);
     expected<void,error_code> doTestFile(SeJob& job, ProgressCallback callback , stop_token stopToken);
 
-    vector<vector<unsigned char>> m_archiveKeys; // One key is allowed in version 1
+    AesGcmContextProvider m_cryptoCtx;
 
     MappedFileStream m_archiveStream;
     vector<SeJob> m_jobs;

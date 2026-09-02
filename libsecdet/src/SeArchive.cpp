@@ -10,8 +10,12 @@ expected<SeArchive,error_code> SeArchive::CreateArchive(uint16_t version,uint16_
     if(!SeArchive::verifyAbsPath(archivePath))
         return unexpected(make_error_code(errc::no_such_file_or_directory));
     
-    
-    return expected<SeArchive, error_code>(in_place,SeMetadata(version,compressionLevel,preserveMetadata),SeTableOfContent::CreateNewTableOfContent(),archivePath);
+    auto _cctx = AesGcmContextProvider::CreateContext();
+
+    if (!_cctx)
+        return unexpected(_cctx.error());
+
+    return expected<SeArchive, error_code>(in_place,SeMetadata(version,compressionLevel,preserveMetadata),SeTableOfContent::CreateNewTableOfContent(),archivePath,*move(_cctx));
 }
 
 expected<SeArchive,error_code> SeArchive::LoadArchiveFile(u16string path){
@@ -61,7 +65,11 @@ expected<SeArchive,error_code> SeArchive::LoadArchiveFile(u16string path){
     
     SeTableOfContent toc = *_toc;
 
-    return expected<SeArchive, error_code>(in_place, metadata, toc, path);
+    auto _cctx = AesGcmContextProvider::CreateContext();
+    if (!_cctx)
+        return unexpected(_cctx.error());
+
+    return expected<SeArchive, error_code>(in_place, metadata, toc, path,*move(_cctx));
 }
 
 bool SeArchive::verifyAbsPath(u16string path){
@@ -149,64 +157,25 @@ expected<void,error_code> SeArchive::MoveDirectory(u16string fileName,u16string 
 }
 
 
-// Key will be stored internally by storing its hash value 
-expected<void,error_code> SeArchive::RegisterKey(string& key){
-    if(this->m_archiveKeys.size() == SE_ARCHIVE_KEY_LIM)
-        return unexpected(SeError::KeyLimitReached);
+    
+expected<void,error_code> SeArchive::RegisterKey(string& key){ // Master Key does not go through a KDF we just use its hash value
     
     vector<unsigned char> key_hash(crypto_hash_sha256_BYTES);
     auto exp = sha256String(key,key_hash);
     if (!exp)
         return unexpected(exp.error());
     
-    bool exists = false;
-    for(vector<unsigned char>& hashKey: this->m_archiveKeys){
-        if(secureBufferCompare(hashKey,key_hash))
-        {
-            exists = true;
-            break;
-        }
-    }
-    if(exists)
-        return unexpected(SeError::KeyAlreadyExists);
     
-    this->m_archiveKeys.push_back(move(key_hash));
+    this->m_cryptoCtx.SetMasterKey(key_hash); // Set master key is not responsible for cleaning the left over of masterkey
+
+    sodium_memzero(key_hash.data(), key_hash.size());
 
     return {};
 }
 
 bool SeArchive::IsKeyPresent(){
-    if(this->m_archiveKeys.size() != 0)
-        return true;
-    return false;
+    return this->m_cryptoCtx.keyExists();
 }
-
-expected<void,error_code> SeArchive::RemoveKey(string& key){
-    if(this->m_archiveKeys.size() == SE_ARCHIVE_KEY_LIM)
-        return unexpected(SeError::KeyDoesNotExist);
-    
-    vector<unsigned char> key_hash(crypto_hash_sha256_BYTES);
-    auto exp = sha256String(key,key_hash);
-    if (!exp)
-        return unexpected(exp.error());
-    
-    bool exists = false;
-    for(int i{0}; i <= this->m_archiveKeys.size(); i++){
-        auto hashKey = this->m_archiveKeys[i];
-        if(secureBufferCompare(hashKey,key_hash))
-        {
-            this->m_archiveKeys.erase(this->m_archiveKeys.begin() + i);
-            exists = true;
-            break;
-        }
-    }
-    if(!exists)
-        return unexpected(SeError::KeyDoesNotExist);
-
-    return {};
-}
-
-
 
 const vector<SeJob>& SeArchive::GetJobs(){
     return this->m_jobs;
@@ -232,20 +201,6 @@ void SeArchive::SetPreserveMetadata(bool preserve){
 void SeArchive::SetCompressionLevel(uint32_t compressionLevel){
     if(this->m_metadata.m_compression_level != compressionLevel)
         this->m_metadata.SetCompressionLevel(compressionLevel);
-}
-
-
-expected<void,error_code> SeArchive::TestFileSync(u16string fileName,ProgressCallback callback,stop_token stopToken){
-    return {};
-}
-
-
-expected<size_t,error_code> SeArchive::ExtractDirectory(u16string fileName,u16string outputPath,ProgressCallback callback,stop_token stopToken){
-    return {};
-}
-
-expected<size_t,error_code> SeArchive::ExtractFile(u16string fileName,u16string outputPath, ProgressCallback callback,stop_token stopToken){
-    return {};
 }
 
 expected<void,error_code> SeArchive::SaveChangesSync(ProgressCallback callback , stop_token stopToken){
@@ -338,8 +293,10 @@ expected<void,error_code> SeArchive::SaveChangesSync(ProgressCallback callback ,
                 _result = doTestFile(job,callback,stopToken);
         }
 
-        if(!_result)
+        if(!_result) // whatever happen here we should fix the TOC then exit
             return unexpected(_result.error());
+
+        // after doing this ops the TOC and metadata both should be updated and re-written on disk!
     }
 }
 
@@ -349,8 +306,13 @@ expected<void,error_code> SeArchive::SaveChangesSync(ProgressCallback callback ,
 expected<void,error_code> SeArchive::doAddFileJob(SeJob& job, ProgressCallback callback , stop_token stopToken){
     job.m_status = JobStatus::Pending;
     
-    if(stopToken.stop_requested())
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+
         return unexpected(SeError::OperationCanceled);
+    }
     
     if(callback != nullptr)
         callback(job);
@@ -360,13 +322,33 @@ expected<void,error_code> SeArchive::doAddFileJob(SeJob& job, ProgressCallback c
         return unexpected(_fs.error());
     }
 
-    SeArchiveEntry entry;
-    entry.path = job.m_fileName;
+    SeArchiveEntry entry = SeArchiveEntry::CreateFileEntry(job.m_fileName);
     entry.uncompressed_size = inFileStream.size();
     entry.attributes = 0; //Dont know and care how to get and set file attr for now !
-    entry.offset = 0;
+    entry.offset = this->m_toc.getNextAvailOffset();
+    entry.fileUid = getSecureRandom();
+    entry.crc32 = CRC32C_INIT;
 
     size_t fileOffset = this->m_toc.getNextAvailOffset();
+
+    // Before doing anything we will start writing the file header ( entry placeholder in its place )
+    
+    if (auto _sk = this->m_archiveStream.seek(entry.offset); !_sk)
+    {
+        // either the file is not big enough or some error in the getNextAvailOffset caused this
+        return unexpected(_sk.error());
+    }
+    auto entryPlaceHolderBytes = entry.Serialize();
+    auto _wentryError = m_archiveStream.write(entryPlaceHolderBytes);
+    if (!_wentryError) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+
+        return unexpected(_wentryError.error());
+    }
+
+    m_archiveStream.flush(); // assuming that the only possible error here is closed handle which will likely occure on top!
 
     // Setting up file compression
 
@@ -376,15 +358,57 @@ expected<void,error_code> SeArchive::doAddFileJob(SeJob& job, ProgressCallback c
     
     size_t readSz = ZSTD_CStreamInSize();
     size_t writeSz = ZSTD_CStreamOutSize();
+
     vector<unsigned char> inBuffer(readSz);
     vector<unsigned char> outBuffer(writeSz);
 
-    while (!inFileStream.eof()) {
+    auto _cryptoStream = this->m_cryptoCtx.createSession(entry.fileUid);
+    if (!_cryptoStream) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+
+        return unexpected(_cryptoStream.error());
+    }
+
+    unique_ptr<AesGcmStreamSession> cryptoStreamSession = *move(_cryptoStream);
+
+    vector<unsigned char> cryptoOutBuffer(writeSz + AesGcmStreamSession::TAG_BYTES);
+
+    bool isLastChunk = false;
+
+    job.setStatus(JobStatus::Running);
+    job.totalBytes = inFileStream.size();
+
+    if (callback)
+        callback(job);
+
+    size_t processedBytes = 0;
+    while (!isLastChunk) {
+        
+        if (stopToken.stop_requested()) {
+            if (entry.compressed_size > 0) {
+                // Reverting disk changes
+                this->m_archiveStream.seek(entry.offset);
+                // No other disk changes required
+                job.setStatus(JobStatus::Aborted);
+                if (callback)
+                    callback(job);
+                return unexpected(SeError::OperationCanceled);
+            }
+        }
+
         auto _rd = inFileStream.read(inBuffer.data(), readSz);
         if (!_rd) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+                callback(job);
             return unexpected(_rd.error());
         }
-        ZSTD_EndDirective mode = *_rd < readSz ? ZSTD_e_end : ZSTD_e_continue;
+
+        isLastChunk = (*_rd < readSz) || inFileStream.eof(); // if file size is exact multiple of readsz then it wouldnt exit the loop in time causing problem!
+        ZSTD_EndDirective mode = isLastChunk ? ZSTD_e_end : ZSTD_e_continue;
+
         ZSTD_inBuffer inBuff{ inBuffer.data(),*_rd,0 };
         bool finished = false;
 
@@ -394,21 +418,246 @@ expected<void,error_code> SeArchive::doAddFileJob(SeJob& job, ProgressCallback c
             size_t remaining = ZSTD_compressStream2(this->m_zstdCctx.get(), &outBuff, &inBuff, mode);
 
             if (ZSTD_isError(remaining)) {
+                job.setStatus(JobStatus::Failed);
+                if (callback)
+                    callback(job);
+
                 return unexpected(SeError::ZSTDCompressionError);
             }
 
-            finished = *_rd < readSz ? (remaining == 0) : (inBuff.pos == inBuff.size); // Either not fully take the input in or it needs one more pass to write footer
-        
+            
+            if (outBuff.pos > 0) {
+                processedBytes += inBuff.size;
+
+                auto _cryptoResult = cryptoStreamSession->encryptChunk(span<unsigned char>{reinterpret_cast<unsigned char*>(outBuff.dst), outBuff.size}, cryptoOutBuffer);
+                entry.compressed_size += cryptoOutBuffer.size(); // since we need the final size we have to include the aes tag bytes
+
+                if (!_cryptoResult) {
+                    job.setStatus(JobStatus::Failed);
+                    if (callback)
+                        callback(job);
+                    return unexpected(_cryptoResult.error());
+                }
+
+                auto _wLError = m_archiveStream.write(cryptoOutBuffer);
+
+                // Status report
+                job.processedBytes = entry.compressed_size;
+                job.percentage = (processedBytes / inFileStream.size()) * 100;
+
+                if (callback)
+                    callback(job);
+
+                if (!_wLError) {
+                    job.setStatus(JobStatus::Failed);
+                    if (callback)
+                        callback(job);
+                    return unexpected(_wLError.error());
+                }
+            }
+            
+            if (mode == ZSTD_e_end) {
+                finished = remaining == 0;
+            }
+            else {
+                finished = inBuff.pos == inBuff.size;
+            }
+
 
         }
+        // doing the crc32 and compression tracking
+        uint64_t t_crc = entry.crc32;
+        entry.crc32 = crc32c_update(t_crc, inBuff.src, inBuff.size);
+    }
+
+    uint64_t t_crc = entry.crc32;
+    entry.crc32 = crc32c_finalize(t_crc);
+
+    // Replacing the entry placeholder:
+    auto entryBytes = entry.Serialize();
+
+    this->m_archiveStream.seek(entry.offset);
+
+    if (auto _entErr = this->m_archiveStream.write(entryBytes); !_entErr) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_entErr.error());
+    }
+
+    this->m_archiveStream.flush();
+
+    this->m_toc.AddEntry(entry); // Unlikely to get an error here !
+
+    job.setStatus(JobStatus::Finished);
+    if (callback)
+        callback(job);
+}
+
+expected<void, error_code> SeArchive::doRemoveFileJob(SeJob& job, ProgressCallback callback, stop_token stopToken) {
+
+    job.setStatus(JobStatus::Pending);
+    if (callback)
+        callback(job);
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    auto _entError = this->m_toc.GetEntry(job.m_fileName);
+    if (!_entError) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_entError.error());
+    }
+    auto& entry = *_entError;
+    
+    auto inFileEntrySize = entry.GetDiskSize();
+    // Move files that are in front of the requested file entry.compressedSize + entrysize backward then truncate
+    auto frontEntries = this->m_toc.GetEntriesFollowing(entry);
+
+    if (frontEntries.size() == 0) {
+        job.setStatus(JobStatus::Running);
+        if (callback)
+            callback(job);
+        // No front entries
+        // Only trunking
+        if (auto _err = this->m_archiveStream.truncate(this->m_archiveStream.size() - inFileEntrySize); !_err) {
+            this->m_toc.RemoveEntry(entry);
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+                callback(job);
+
+            return unexpected(_err.error());
+        }
+
+        job.setStatus(JobStatus::Finished);
+        if (callback)
+            callback(job);
+        
+        return {};
+    }
+    else {
+        // Files are in front of entry
+        // Pushing them back one by one until the last one!
+        
+        // The front entries does not return entries sorted by their offset!
+        job.setStatus(JobStatus::Running);
+        if (callback)
+            callback(job);
+
+        sort(frontEntries.begin(), frontEntries.end(), [](SeArchiveEntry& a , SeArchiveEntry& b) {
+            return a.offset < b.offset;
+        });
+
+        size_t shifted = 0;
+
+        for (int i{ 0 }; i < frontEntries.size(); i++) { // cancelation token will be ignored here; else it would be too time consuming to revert everything back to before!
+            auto& frontEnt = frontEntries[i];
+
+            job.percentage = (i / frontEntries.size()) * 100;
+            if (callback)
+                callback(job);
+            
+            size_t entrySize = frontEnt.GetDiskSize();
+
+            if (auto _err = this->m_archiveStream.shift_bytes(shifted + entry.offset, frontEnt.offset, entrySize); !_err) {
+                job.setStatus(JobStatus::Failed);
+                if (callback)
+                    callback(job);
+
+                return unexpected(_err.error());
+            }
+
+            shifted += entrySize;
+        }
+
+        this->m_toc.RemoveEntry(entry);
+
+        job.setStatus(JobStatus::Finished);
+        if (callback)
+            callback(job);
+        return {};
+
     }
 
 
 
 }
 
+expected<void, error_code> SeArchive::doAddDirectoryJob(SeJob& job, ProgressCallback callback, stop_token stopToken) {
+    job.setStatus(JobStatus::Pending);
+    if (callback)
+        callback(job);
+
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    // Verifying the parent directory path ensuring it does exist
+    if (!this->m_toc.CheckParentPath(job.m_fileName)) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::TocPathIsInvalid);
+    }
+
+    SeArchiveEntry entry = SeArchiveEntry::CreateDirectoryEntry(job.m_fileName);
+    
+    if (auto _err = this->m_toc.AddEntry(entry); !_err) {
+        return unexpected(_err.error());
+    }
+
+    job.setStatus(JobStatus::Finished);
+    if (callback)
+        callback(job);
+    return {};
+}
+
+expected<void, error_code> SeArchive::doDeleteDirectoryJob(SeJob& job, ProgressCallback callback, stop_token stopToken) {
+    // retrieve all of the directory files , calls Remove file for each of them , then removes the directory from toc
+    // toc should have a safety check like the unix rm to avoid directories with content get removed
+}
+
+expected<void, error_code> SeArchive::doMoveFileJob(SeJob& job, ProgressCallback callback, stop_token stopToken) {
+    // Modify the toc entry, The problemo here is that for a simple move which is purely metadata based if the path length exceeds the previous we have to move the whole archive:
+    // which even defeat the purpose of putting TOC at the eOF!
+
+    // DECIDE HERE!
+}
+
+expected<void, error_code> SeArchive::doMoveDirectoryJob(SeJob& job, ProgressCallback callback, stop_token stopToken) {
+    // this one is simple! just retrieve all directory files , list them modify their TOCs and call the movefile on them
+    // then move the directory in TOC
+}
+
+expected<void, error_code> SeArchive::doChangeCompressionLevel(SeJob& job, ProgressCallback callback, stop_token stopToken) {
+    // This one here is also a fundamental task! its much safer to apply the changes in a temp archive then rename it to the main !
+}
+
+expected<void, error_code> SeArchive::doTestFile(SeJob& job, ProgressCallback callback, stop_token stopToken) {
+    // Just test Extract file and calculate the uncompressed size and crc32
+}
+
+expected<void, error_code> SeArchive::TestFileSync(u16string fileName, ProgressCallback callback, stop_token stopToken) {
+    return {};
+}
 
 
+expected<size_t, error_code> SeArchive::ExtractDirectory(u16string fileName, u16string outputPath, ProgressCallback callback, stop_token stopToken) {
+    return {};
+}
+
+expected<size_t, error_code> SeArchive::ExtractFile(u16string fileName, u16string outputPath, ProgressCallback callback, stop_token stopToken) {
+    return {};
+}
 
 bool SeArchive::verifyJobs(){
     // Verifying job is not about telling wether its runned or not! you should check to see if it does conflict with other jobs or not!
