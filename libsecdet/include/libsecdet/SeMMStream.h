@@ -68,6 +68,36 @@ public:
     }
 
     // --- Thread-Safe Core Operations ---
+    std::expected<void, std::error_code> shift_bytes(size_t dst_offset, size_t src_offset, size_t count) {
+        if (count == 0 || dst_offset == src_offset) {
+            return {};
+        }
+
+        std::lock_guard lock(m_mutex);
+        if (m_file_handle == INVALID_HANDLE_VALUE) {
+            return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+        }
+
+        // Validate boundaries and order
+        if (dst_offset > src_offset) {
+            return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+        }
+
+        // Overflow check: src_offset + count
+        if (src_offset > SIZE_MAX - count || (src_offset + count) > m_file_size) {
+            return std::unexpected(std::make_error_code(std::errc::result_out_of_range));
+        }
+
+        // Ensure mapped view is active
+        if (!m_view) {
+            return std::unexpected(std::make_error_code(std::errc::bad_address));
+        }
+
+        // std::memmove safely handles overlapping memory windows
+        std::memmove(m_view + dst_offset, m_view + src_offset, count);
+
+        return {};
+    }
 
     std::expected<void, std::error_code> truncate(size_t new_size) {
         std::lock_guard lock(m_mutex);
