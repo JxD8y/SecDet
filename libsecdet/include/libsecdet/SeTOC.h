@@ -5,10 +5,8 @@
 #include <string>
 #include <vector>
 
-
 #include "SeCrypto/SeCryptoUtils.h"
 #include "SeError.h"
-
 
 using namespace std;
 
@@ -101,20 +99,31 @@ public:
   // We should not use ref in vector like this
   expected<SeArchiveEntry &, error_code> GetEntry(u16string path);
 
-  vector<SeArchiveEntry> GetEntriesFollowing(SeArchiveEntry &entry); // Entries after the passed entry offset
+  vector<SeArchiveEntry> GetEntriesFollowing(
+      SeArchiveEntry &entry); // Entries after the passed entry offset
 
-  vector<SeArchiveEntry> GetDirectoryFileEntries(SeArchiveEntry& dirEntry); // Contains all the files + subdirectories inside
+  vector<SeArchiveEntry> GetDirectoryFileEntries(
+      SeArchiveEntry
+          &dirEntry); // Contains all the files + subdirectories inside
 
   bool CheckPath(u16string);   // Checks if path exists whether dir or file
   bool IsDirectory(u16string); // Path should end with / to count as directory
   bool CheckParentPath(u16string); // Check if the parent directory exist
 
-  u16string GetFileName(u16string entryPath); // if the path is: /Folder1/MyFiles/file -> file or
+  u16string GetFileName(
+      u16string entryPath); // if the path is: /Folder1/MyFiles/file -> file or
                             // if its /Folder1/MyFiles/ -> MyFiles
 
   u16string CreateFilePath(u16string parentDir, u16string fileName);
 
-  u16string CreateDirPath(u16string parentDir,u16string dirName); // just puts a / in the end
+  u16string CreateDirPath(u16string parentDir,
+                          u16string dirName); // just puts a / in the end
+
+  static bool mergePath(u16string path, u16string fileName);
+
+  static bool verifyAbsPath(u16string path);
+
+  static bool isAbsPathDir(u16string path);
 
   [[nodiscard]] span<const SeArchiveEntry> GetEntries() const noexcept {
     return m_entries;
@@ -137,7 +146,7 @@ public:
   //  which again causes that user loss all the empty directories which are many
   //  of theM!
 
-  bool operator==(const SeTableOfContent &); 
+  bool operator==(const SeTableOfContent &);
 
   bool operator!=(const SeTableOfContent &b) { return !(*this == b); }
 

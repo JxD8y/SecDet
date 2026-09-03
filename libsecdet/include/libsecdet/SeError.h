@@ -26,7 +26,7 @@ enum class SeError{
     ZstdInitiationFail,
     RequiredFieldMissing,
     SmallBuffer,
-
+    ExpectedDirectory,
 
 
     CRYPTOBufferWasEmpty,
@@ -68,7 +68,7 @@ struct SeErrorCategory: std::error_category{
             case SeError::ZstdInitiationFail: return "Cannot initiate the zstd context";
             case SeError::RequiredFieldMissing: return "One of the required field is missing.";
             case SeError::SmallBuffer: return "Insufficient space in passed buffer";
-
+            case SeError::ExpectedDirectory: return "Expected a directory"
 
             case SeError::CRYPTOStringWasEmpty: return "Crypto: string was empty";
             case SeError::CRYPTOBufferWasEmpty: return "Crypto: byffer was empty";

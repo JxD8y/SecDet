@@ -16,7 +16,9 @@ enum class JobType{
     MoveArchiveFile,
     MoveDirectory,
     CompressionLevelChange,
-    TestFile
+    TestFile,
+    ExtractFile,
+    ExtractDirectory
 };
 
 enum class JobStatus{

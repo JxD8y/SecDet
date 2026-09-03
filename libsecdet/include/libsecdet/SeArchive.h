@@ -51,8 +51,6 @@ public:
 
     ~SeArchive(); // there will be synchornisity objects and streams that need to be handled here
 
-    static bool verifyAbsPath(u16string path);
-
     // Concurrent object - disabling the copy and move ctors
     SeArchive(const SeArchive&) = delete;
     SeArchive& operator=(const SeArchive&) = delete;
@@ -106,7 +104,7 @@ public:
     /// @param callback Function to notify of job status
     /// @param stopToken Cancelation token
     /// @return Number of files extracted ( Does not count the created directories )
-    expected<size_t,error_code> ExtractDirectory(u16string fileName,u16string outputPath,ProgressCallback callback,stop_token stopToken); 
+    expected<size_t,error_code> ExtractDirectorySync(u16string fileName,u16string outputPath,ProgressCallback callback,stop_token stopToken); 
     
     /// @brief Extract a file into disk; you have to register a key before calling this function
     /// @param fileName Relative file path in archive
@@ -114,7 +112,7 @@ public:
     /// @param callback Function to notify you about job status
     /// @param stopToken Cancelation token
     /// @return Bytes extracted 
-    expected<size_t,error_code> ExtractFile(u16string fileName,u16string outputPath, ProgressCallback callback,stop_token stopToken);
+    expected<size_t,error_code> ExtractFileSync(u16string fileName,u16string outputPath, ProgressCallback callback,stop_token stopToken);
 
 
     /// @brief Writes every requested job to the file
@@ -152,6 +150,9 @@ private:
     bool verifyKey();
 
     bool verifyJobs();
+
+    /// @brief Optimizes queued jobs by merging redundant operations, cancelling transient actions, and folding moves
+    void optimizeJobs();
 
     bool addJob(const SeJob&);
 

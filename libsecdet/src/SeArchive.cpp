@@ -204,8 +204,10 @@ void SeArchive::SetCompressionLevel(uint32_t compressionLevel){
 }
 
 expected<void,error_code> SeArchive::SaveChangesSync(ProgressCallback callback , stop_token stopToken){
-    //ProcessCallback will be called with jobs qeued in the job container
-    
+    // ProcessCallback will be called with jobs queued in the job container
+    // Optimize queued jobs (merge duplicates, cancel transient ops, fold moves) prior to verification and execution
+    this->optimizeJobs();
+
     if(!verifyJobs())
         return unexpected(SeError::ConflictingJobFound);
     
@@ -863,21 +865,56 @@ expected<void, error_code> SeArchive::doTestFile(SeJob& job, ProgressCallback ca
     return {};
 }
 
-expected<size_t, error_code> SeArchive::ExtractDirectory(u16string fileName, u16string outputPath, ProgressCallback callback, stop_token stopToken) {
+expected<size_t, error_code> SeArchive::ExtractFileSync(u16string fileName, u16string outputPath, ProgressCallback callback, stop_token stopToken) {
+    // Only directory output path are allowed
+    // Job handling is internal to this function no registration required
+    SeJob job(JobType::ExtractFile, fileName, outputPath);
+    job.setStatus(JobStatus::Pending);
+    if (callback)
+        callback(job);
+    if (!SeTableOfContent::verifyAbsPath(outputPath) || !SeTableOfContent::isAbsPathDir(outputPath)) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::ExpectedDirectory);
+    }
+    
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+
+    return {};
+}
+
+expected<size_t, error_code> SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath, ProgressCallback callback, stop_token stopToken) {
     // these are going to be sync functions
     return {};
 }
 
-expected<size_t, error_code> SeArchive::ExtractFile(u16string fileName, u16string outputPath, ProgressCallback callback, stop_token stopToken) {
-    return {};
-}
 
 bool SeArchive::verifyJobs(){
-    // Verifying job is not about telling wether its runned or not! you should check to see if it does conflict with other jobs or not!
+    // Extraction jobs are strictly synchronous and cannot be queued or processed as archive modification jobs
+    for (const auto& job : this->m_jobs) {
+        if (job.m_type == JobType::ExtractFile || job.m_type == JobType::ExtractDirectory || job.m_type == JobType::None) {
+            return false;
+        }
+        if (job.m_status != JobStatus::Idle) {
+            return false;
+        }
+    }
     return true;
 }
 
 bool SeArchive::addJob(const SeJob& job){
+    // Extraction jobs are synchronous operations and cannot be queued as archive modification jobs
+    if (job.m_type == JobType::ExtractFile || job.m_type == JobType::ExtractDirectory || job.m_type == JobType::None) {
+        return false;
+    }
+
     if (any_of(m_jobs.begin(), m_jobs.end(), [job](const SeJob& value) {
         return job.m_id == value.m_id;
     }))
@@ -887,4 +924,323 @@ bool SeArchive::addJob(const SeJob& job){
     
     m_jobs.push_back(job);
     return true;
+}
+
+void SeArchive::optimizeJobs() {
+    // Helper lambda to normalize archive path separators
+    auto normalizeArchivePath = [](const u16string& path) -> u16string {
+        u16string res = path;
+        for (auto& ch : res) {
+            if (ch == u'\\') ch = u'/';
+        }
+        return res;
+    };
+
+    // Helper lambda to compare paths uniformly
+    auto arePathsEqual = [&](const u16string& p1, const u16string& p2) -> bool {
+        return normalizeArchivePath(p1) == normalizeArchivePath(p2);
+    };
+
+    // Helper lambda to extract base item name (file or directory name)
+    auto getArchiveItemName = [&](const u16string& path) -> u16string {
+        u16string norm = normalizeArchivePath(path);
+        if (norm.empty()) return u"";
+        while (norm.size() > 1 && norm.back() == u'/') {
+            norm.pop_back();
+        }
+        size_t lastSlash = norm.find_last_of(u'/');
+        if (lastSlash != u16string::npos) {
+            return norm.substr(lastSlash + 1);
+        }
+        return norm;
+    };
+
+    // Helper lambda to combine parent directory and item name
+    auto combineArchivePath = [&](const u16string& dir, const u16string& name) -> u16string {
+        u16string normDir = normalizeArchivePath(dir);
+        u16string normName = normalizeArchivePath(name);
+        while (!normName.empty() && normName.front() == u'/') {
+            normName.erase(normName.begin());
+        }
+        if (normDir.empty()) {
+            return normName;
+        }
+        if (normDir.back() != u'/') {
+            normDir.push_back(u'/');
+        }
+        return normDir + normName;
+    };
+
+    // Helper lambda to extract parent directory path from a full path
+    auto getArchiveItemDir = [&](const u16string& path) -> u16string {
+        u16string norm = normalizeArchivePath(path);
+        if (norm.empty()) return u"";
+        while (norm.size() > 1 && norm.back() == u'/') {
+            norm.pop_back();
+        }
+        size_t lastSlash = norm.find_last_of(u'/');
+        if (lastSlash != u16string::npos) {
+            return norm.substr(0, lastSlash + 1);
+        }
+        return u"";
+    };
+
+    // Helper lambda to check if child path resides inside parent directory
+    auto isUnderDirectory = [&](const u16string& child, const u16string& parentDir) -> bool {
+        u16string normChild = normalizeArchivePath(child);
+        u16string normParent = normalizeArchivePath(parentDir);
+        if (normParent.empty()) return false;
+        if (normParent.back() != u'/') {
+            normParent.push_back(u'/');
+        }
+        return normChild.size() > normParent.size() && normChild.compare(0, normParent.size(), normParent) == 0;
+    };
+
+    // Helper lambda to check if a path already exists in current archive TOC
+    auto existsInTOC = [&](const u16string& path) -> bool {
+        u16string norm = normalizeArchivePath(path);
+        for (const auto& entry : this->m_toc.GetEntries()) {
+            if (normalizeArchivePath(entry.path) == norm) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // --- Pass 1: Deduplicate CompressionLevelChange jobs ---
+    // If multiple compression changes are queued in a single transaction, keep only the latest one.
+    int lastCompressionIdx = -1;
+    for (int i = 0; i < static_cast<int>(this->m_jobs.size()); ++i) {
+        if (this->m_jobs[i].m_type == JobType::CompressionLevelChange) {
+            lastCompressionIdx = i;
+        }
+    }
+    if (lastCompressionIdx != -1) {
+        vector<SeJob> filtered;
+        filtered.reserve(this->m_jobs.size());
+        for (int i = 0; i < static_cast<int>(this->m_jobs.size()); ++i) {
+            if (this->m_jobs[i].m_type == JobType::CompressionLevelChange) {
+                if (i == lastCompressionIdx) {
+                    filtered.push_back(move(this->m_jobs[i]));
+                }
+            } else {
+                filtered.push_back(move(this->m_jobs[i]));
+            }
+        }
+        this->m_jobs = move(filtered);
+    }
+
+    // --- Pass 2: Iterative I/O Optimizer Loop ---
+    // Simulates an I/O request scheduler: merges repeated jobs, cancels transient additions/removals,
+    // eliminates redundant directory additions/deletions, and folds move operations until a fixpoint is reached.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+
+        for (size_t i = 0; i < this->m_jobs.size(); ++i) {
+            auto& jobA = this->m_jobs[i];
+
+            // 1. File Operation Optimizations
+            if (jobA.m_type == JobType::AddFile) {
+                for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
+                    auto& jobB = this->m_jobs[j];
+
+                    // Case 1A: Double AddFile on same archive destination
+                    // AddFile(P, disk1) followed by AddFile(P, disk2) -> drop jobA (disk2 overwrites disk1)
+                    if (jobB.m_type == JobType::AddFile && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        this->m_jobs.erase(this->m_jobs.begin() + i);
+                        changed = true;
+                        break;
+                    }
+
+                    // Case 1B: AddFile followed by RemoveFile on same archive path
+                    if (jobB.m_type == JobType::RemoveFile && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        if (!existsInTOC(jobA.m_fileName)) {
+                            // File was transient (created and deleted within this uncommitted queue session).
+                            // Both jobs cancel out completely!
+                            this->m_jobs.erase(this->m_jobs.begin() + j); // Erase later job first
+                            this->m_jobs.erase(this->m_jobs.begin() + i);
+                        } else {
+                            // File already existed in TOC originally. The AddFile was an overwrite,
+                            // but RemoveFile means it should be deleted. Drop AddFile, keep RemoveFile.
+                            this->m_jobs.erase(this->m_jobs.begin() + i);
+                        }
+                        changed = true;
+                        break;
+                    }
+
+                    // Case 1C: AddFile followed by MoveArchiveFile
+                    // AddFile(src, disk) followed by MoveArchiveFile(src, dstDir) ->
+                    // Directly AddFile(dstDir/fileName, disk) and eliminate MoveArchiveFile.
+                    if (jobB.m_type == JobType::MoveArchiveFile && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        u16string fileName = getArchiveItemName(jobA.m_fileName);
+                        u16string targetPath = combineArchivePath(jobB.m_filePath, fileName);
+                        jobA.m_fileName = targetPath;
+                        this->m_jobs.erase(this->m_jobs.begin() + j);
+                        changed = true;
+                        break;
+                    }
+                }
+                if (changed) break;
+            }
+            else if (jobA.m_type == JobType::RemoveFile) {
+                for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
+                    auto& jobB = this->m_jobs[j];
+                    // Case 1D: Duplicate RemoveFile
+                    if (jobB.m_type == JobType::RemoveFile && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        this->m_jobs.erase(this->m_jobs.begin() + j);
+                        changed = true;
+                        break;
+                    }
+                    // If an AddFile occurs on same path, stop scanning (valid sequence: delete old, add new)
+                    if (jobB.m_type == JobType::AddFile && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        break;
+                    }
+                }
+                if (changed) break;
+            }
+            // 2. Directory Operation Optimizations
+            else if (jobA.m_type == JobType::AddDirectory) {
+                for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
+                    auto& jobB = this->m_jobs[j];
+
+                    // Case 2A: Double AddDirectory
+                    if (jobB.m_type == JobType::AddDirectory && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        this->m_jobs.erase(this->m_jobs.begin() + j);
+                        changed = true;
+                        break;
+                    }
+
+                    // Case 2B: AddDirectory followed by DeleteDirectory
+                    if (jobB.m_type == JobType::DeleteDirectory && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        if (!existsInTOC(jobA.m_fileName)) {
+                            // Transient directory created & deleted in same batch -> cancel both out!
+                            this->m_jobs.erase(this->m_jobs.begin() + j);
+                            this->m_jobs.erase(this->m_jobs.begin() + i);
+                        } else {
+                            // Pre-existed in TOC -> drop redundant Add, keep Delete
+                            this->m_jobs.erase(this->m_jobs.begin() + i);
+                        }
+                        changed = true;
+                        break;
+                    }
+
+                    // Case 2C: AddDirectory followed by MoveDirectory
+                    // AddDirectory(src) followed by MoveDirectory(src, dstDir) ->
+                    // Directly AddDirectory(dstDir/srcName) and eliminate MoveDirectory
+                    if (jobB.m_type == JobType::MoveDirectory && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        u16string dirName = getArchiveItemName(jobA.m_fileName);
+                        u16string targetPath = combineArchivePath(jobB.m_filePath, dirName);
+                        if (targetPath.empty() || targetPath.back() != u'/') {
+                            targetPath.push_back(u'/');
+                        }
+                        jobA.m_fileName = targetPath;
+                        this->m_jobs.erase(this->m_jobs.begin() + j);
+                        changed = true;
+                        break;
+                    }
+                }
+                if (changed) break;
+            }
+            else if (jobA.m_type == JobType::DeleteDirectory) {
+                // Case 2D: Duplicate DeleteDirectory
+                for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
+                    auto& jobB = this->m_jobs[j];
+                    if (jobB.m_type == JobType::DeleteDirectory && arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
+                        this->m_jobs.erase(this->m_jobs.begin() + j);
+                        changed = true;
+                        break;
+                    }
+                }
+                if (changed) break;
+
+                // Case 2E: DeleteDirectory subsumes newly added files/dirs inside this directory
+                for (size_t k = 0; k < i; ++k) {
+                    auto& priorJob = this->m_jobs[k];
+                    if ((priorJob.m_type == JobType::AddFile || priorJob.m_type == JobType::AddDirectory) &&
+                        isUnderDirectory(priorJob.m_fileName, jobA.m_fileName)) {
+                        if (!existsInTOC(priorJob.m_fileName)) {
+                            // Transient item inside deleted directory; erase prior add job
+                            this->m_jobs.erase(this->m_jobs.begin() + k);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+                if (changed) break;
+            }
+            // 3. Move Operation Merging & Folding
+            else if (jobA.m_type == JobType::MoveArchiveFile) {
+                // jobA: move from jobA.m_fileName (source file) to directory jobA.m_filePath
+                u16string fileBaseName = getArchiveItemName(jobA.m_fileName);
+                u16string destFile = combineArchivePath(jobA.m_filePath, fileBaseName);
+
+                for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
+                    auto& jobB = this->m_jobs[j];
+
+                    // Case 3A: MoveArchiveFile followed by MoveArchiveFile (Chained move)
+                    if (jobB.m_type == JobType::MoveArchiveFile && arePathsEqual(destFile, jobB.m_fileName)) {
+                        u16string origDir = getArchiveItemDir(jobA.m_fileName);
+                        // Check for round-trip move (moved back to original directory)
+                        if (arePathsEqual(origDir, jobB.m_filePath)) {
+                            // Net move is a no-op! Both moves cancel out completely.
+                            this->m_jobs.erase(this->m_jobs.begin() + j);
+                            this->m_jobs.erase(this->m_jobs.begin() + i);
+                        } else {
+                            // Chain: update jobA destination directory to jobB destination directory
+                            jobA.m_filePath = jobB.m_filePath;
+                            this->m_jobs.erase(this->m_jobs.begin() + j);
+                        }
+                        changed = true;
+                        break;
+                    }
+
+                    // Case 3B: MoveArchiveFile followed by RemoveFile on destination
+                    if (jobB.m_type == JobType::RemoveFile && arePathsEqual(destFile, jobB.m_fileName)) {
+                        jobA.m_type = JobType::RemoveFile;
+                        jobA.m_filePath.clear();
+                        this->m_jobs.erase(this->m_jobs.begin() + j);
+                        changed = true;
+                        break;
+                    }
+                }
+                if (changed) break;
+            }
+            else if (jobA.m_type == JobType::MoveDirectory) {
+                // jobA: move directory from jobA.m_fileName to directory jobA.m_filePath
+                u16string dirBaseName = getArchiveItemName(jobA.m_fileName);
+                u16string destDir = combineArchivePath(jobA.m_filePath, dirBaseName);
+                if (destDir.empty() || destDir.back() != u'/') destDir.push_back(u'/');
+
+                for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
+                    auto& jobB = this->m_jobs[j];
+
+                    // Case 4A: Chained directory moves
+                    if (jobB.m_type == JobType::MoveDirectory && arePathsEqual(destDir, jobB.m_fileName)) {
+                        u16string origParentDir = getArchiveItemDir(jobA.m_fileName);
+                        if (arePathsEqual(origParentDir, jobB.m_filePath)) {
+                            // Round-trip move cancelled out
+                            this->m_jobs.erase(this->m_jobs.begin() + j);
+                            this->m_jobs.erase(this->m_jobs.begin() + i);
+                        } else {
+                            jobA.m_filePath = jobB.m_filePath;
+                            this->m_jobs.erase(this->m_jobs.begin() + j);
+                        }
+                        changed = true;
+                        break;
+                    }
+
+                    // Case 4B: MoveDirectory followed by DeleteDirectory
+                    if (jobB.m_type == JobType::DeleteDirectory && arePathsEqual(destDir, jobB.m_fileName)) {
+                        jobA.m_type = JobType::DeleteDirectory;
+                        jobA.m_filePath.clear();
+                        this->m_jobs.erase(this->m_jobs.begin() + j);
+                        changed = true;
+                        break;
+                    }
+                }
+                if (changed) break;
+            }
+        }
+    }
 }
