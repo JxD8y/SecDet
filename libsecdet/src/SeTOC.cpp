@@ -5,15 +5,16 @@ expected<SeArchiveEntry,error_code> SeArchiveEntry::CreateFromBytes(span<unsigne
     SeArchiveEntry _sEntry;
     size_t offset = 0;
 
-    auto read = [&bytes,&offset](void*dest,size_t size){
+    auto read = [&bytes,&offset](void*dest,size_t size) -> expected<void, error_code> {
         if(offset + size > bytes.size()){
             return unexpected(SeError::BufferUnderflow);
         }
         memcpy(dest,bytes.data()+offset , size);
         offset += size;
+        return {};
     };
     uint32_t cCount = 0;
-    read(&cCount,sizeof(cCount));
+    auto _err = read(&cCount,sizeof(cCount)); // ? is it valid?
     if(cCount > 0){
         size_t path_bytes = cCount * sizeof(char16_t);
         if(offset + path_bytes > bytes.size()){
@@ -23,12 +24,15 @@ expected<SeArchiveEntry,error_code> SeArchiveEntry::CreateFromBytes(span<unsigne
         memcpy(_sEntry.path.data(),bytes.data()+offset,path_bytes);
         offset += path_bytes;
     }
-    read(&_sEntry.uncompressed_size,sizeof(_sEntry.uncompressed_size));
-    read(&_sEntry.compressed_size,sizeof(_sEntry.compressed_size));
-    read(&_sEntry.attributes,sizeof(_sEntry.attributes));
-    read(&_sEntry.offset,sizeof(_sEntry.offset));
-    read(&_sEntry.crc32,sizeof(_sEntry.crc32));
-    read(&_sEntry.fileUid,sizeof(_sEntry.fileUid));
+    _err = read(&_sEntry.uncompressed_size,sizeof(_sEntry.uncompressed_size));
+    _err = read(&_sEntry.compressed_size,sizeof(_sEntry.compressed_size));
+    _err = read(&_sEntry.attributes,sizeof(_sEntry.attributes));
+    _err = read(&_sEntry.offset,sizeof(_sEntry.offset));
+    _err = read(&_sEntry.crc32,sizeof(_sEntry.crc32));
+    _err = read(&_sEntry.fileUid,sizeof(_sEntry.fileUid));
+
+    if (!_err)
+        return unexpected(_err.error());
 
     return _sEntry;
 }
@@ -72,10 +76,14 @@ expected<SeTableOfContent,error_code> SeTableOfContent::LoadTableOfContentFromBy
     // [ENTRY N]
     // [PAD]
 
-    if(!memcmp(data.data(),SE_TOC_MAGIC,4)){
+    if(memcmp(data.data(),SE_TOC_MAGIC,4)){
         return unexpected(SeError::InvalidTOCMagic);
     }
     
+    // Skipping Toc magic
+
+    data = data.subspan(4);
+
     SeTableOfContent _toc;
 
     while(data.size() != 0){

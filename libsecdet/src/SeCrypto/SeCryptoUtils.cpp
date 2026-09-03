@@ -1,7 +1,7 @@
 #include "libsecdet/SeCrypto/SeCryptoUtils.h"
 
 
-expected<void,error_code> sha256String(string data,span<unsigned char,crypto_hash_sha256_BYTES> out_hash){
+expected<void,error_code> sha256String(string data,span<unsigned char> out_hash){
     if(data == "")
         return unexpected(SeError::CRYPTOStringWasEmpty);
     if(out_hash.size() == 0 || out_hash.data() == nullptr)

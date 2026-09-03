@@ -13,7 +13,7 @@ inline constexpr uint32_t CRC32C_INIT = 0xFFFFFFFF;
 
 
 // 1. Process a single chunk into the running CRC accumulator
-uint32_t crc32c_update(uint32_t current_crc, const void* data, size_t length) {
+inline uint32_t crc32c_update(uint32_t current_crc, const void* data, size_t length) {
     const auto* p = static_cast<const uint8_t*>(data);
     uint64_t crc = current_crc; // Keep the running state directly
 

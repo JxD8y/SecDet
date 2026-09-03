@@ -277,20 +277,28 @@ expected<void,error_code> SeArchive::SaveChangesSync(ProgressCallback callback ,
                 return unexpected(SeError::InvalidJob);
             case JobType::AddFile:
                 _result = doAddFileJob(job,callback,stopToken);
+                break;
             case JobType::RemoveFile:
                 _result = doRemoveFileJob(job,callback,stopToken);
+                break;
             case JobType::AddDirectory:
                 _result = doAddDirectoryJob(job,callback,stopToken);
+                break;
             case JobType::DeleteDirectory:
                 _result = doDeleteDirectoryJob(job,callback,stopToken);
+                break;
             case JobType::MoveArchiveFile:
                 _result = doMoveFileJob(job,callback,stopToken);
+                break;
             case JobType::MoveDirectory:
                 _result = doMoveDirectoryJob(job,callback,stopToken);
+                break;
             case JobType::CompressionLevelChange:
                 _result = doChangeCompressionLevel(job,callback,stopToken);
+                break;
             case JobType::TestFile:
                 _result = doTestFile(job,callback,stopToken);
+                break;
         }
 
         if(!_result) // whatever happen here we should fix the TOC then exit
@@ -429,8 +437,8 @@ expected<void,error_code> SeArchive::doAddFileJob(SeJob& job, ProgressCallback c
             if (outBuff.pos > 0) {
                 processedBytes += inBuff.size;
 
-                auto _cryptoResult = cryptoStreamSession->encryptChunk(span<unsigned char>{reinterpret_cast<unsigned char*>(outBuff.dst), outBuff.size}, cryptoOutBuffer);
-                entry.compressed_size += cryptoOutBuffer.size(); // since we need the final size we have to include the aes tag bytes
+                auto _cryptoResult = cryptoStreamSession->encryptChunk(span<unsigned char>{reinterpret_cast<unsigned char*>(outBuff.dst), outBuff.pos}, cryptoOutBuffer);
+                entry.compressed_size += outBuff.pos + AesGcmStreamSession::TAG_BYTES; // the outbuff.pos is the real byte count out of compression
 
                 if (!_cryptoResult) {
                     job.setStatus(JobStatus::Failed);
@@ -443,7 +451,7 @@ expected<void,error_code> SeArchive::doAddFileJob(SeJob& job, ProgressCallback c
 
                 // Status report
                 job.processedBytes = entry.compressed_size;
-                job.percentage = (processedBytes / inFileStream.size()) * 100;
+                job.percentage = inFileStream.size() == 0 ? 100 : (processedBytes / inFileStream.size()) * 100;
 
                 if (callback)
                     callback(job);
@@ -530,7 +538,6 @@ expected<void, error_code> SeArchive::doRemoveFileJob(SeJob& job, ProgressCallba
         // No front entries
         // Only trunking
         if (auto _err = this->m_archiveStream.truncate(this->m_archiveStream.size() - inFileEntrySize); !_err) {
-            this->m_toc.RemoveEntry(entry);
             job.setStatus(JobStatus::Failed);
             if (callback)
                 callback(job);
@@ -576,6 +583,9 @@ expected<void, error_code> SeArchive::doRemoveFileJob(SeJob& job, ProgressCallba
                 return unexpected(_err.error());
             }
 
+            frontEnt.offset = shifted + entry.offset;
+            this->m_toc.RemoveEntry(frontEnt);
+            this->m_toc.AddEntry(frontEnt);
             shifted += entrySize;
         }
 

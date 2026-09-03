@@ -29,7 +29,7 @@ enum class JobStatus{
 };
 
 
-int getRandom(int min,int max){
+inline int getRandom(int min,int max){
     thread_local mt19937 gen(random_device{}());
     uniform_int_distribution<int> distrib(min,max);
     return distrib(gen);

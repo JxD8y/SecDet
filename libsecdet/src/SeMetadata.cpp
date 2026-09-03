@@ -22,7 +22,7 @@ expected<SeMetadata,error_code> SeMetadata::LoadMetadataFromBytes(span<unsigned 
     }
 
 
-    if(!memcmp(metadata_bytes.data(),SE_METADATA_MAGIC,4)){
+    if(memcmp(metadata_bytes.data(),SE_METADATA_MAGIC,4)){
         return unexpected(SeError::InvalidMetadataMagic); // Not that the SDA is executable i used it to avoid defining custom
     }
 
@@ -50,5 +50,6 @@ expected<SeMetadata,error_code> SeMetadata::LoadMetadataFromBytes(span<unsigned 
     auto toc_offset = bit_cast<uint64_t>(toc_offset_bytes); // Consumer should check the validity of toc_offset
 
     SeMetadata _m(version,compressionLevel,preserveMetadata);
+    _m.m_toc_offset = toc_offset;
     return _m;
 }

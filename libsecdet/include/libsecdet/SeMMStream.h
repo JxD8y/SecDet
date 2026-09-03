@@ -78,7 +78,8 @@ public:
             return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
         }
 
-        // Validate boundaries and order
+        // Validate boundaries and order 
+        // only backward shifts are allowed in this function, the expantion logic is not here!
         if (dst_offset > src_offset) {
             return std::unexpected(std::make_error_code(std::errc::invalid_argument));
         }
@@ -288,7 +289,7 @@ private:
 
         m_file_handle = CreateFileW(
             path.c_str(),
-            GENERIC_READ | GENERIC_WRITE,
+            GENERIC_READ | GENERIC_WRITE, // READ ONLY FILES MAY NOT OPEN!
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             nullptr,
             disposition,

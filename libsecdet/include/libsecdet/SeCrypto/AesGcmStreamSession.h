@@ -46,8 +46,9 @@ public:
     expected<void, error_code> decryptChunk(span<unsigned char> cipherText, span<unsigned char> output);
 
 private:
-    vector<unsigned char> m_sessionKey{ KEY_BYTES };
-    vector<unsigned char> m_baseNonce{ KEY_BYTES };
+    vector<unsigned char> m_sessionKey = vector<unsigned char>(KEY_BYTES);
+    vector<unsigned char> m_baseNonce = vector<unsigned char>(KEY_BYTES);
+
     Mode m_mode;
     uint64_t m_chunkCtr = 0;
 
@@ -55,9 +56,7 @@ private:
 
         vector<unsigned char> nonce = m_baseNonce;
 
-        for (uint64_t i = 0; i < m_chunkCtr; ++i) {
-            sodium_increment(nonce.data(), NONCE_BYTES);
-        }
+        sodium_increment(nonce.data(), NONCE_BYTES);
 
         return nonce;
     }

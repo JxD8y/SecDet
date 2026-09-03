@@ -34,6 +34,8 @@ public:
 
 	AesGcmContextProvider(AesGcmContextProvider&& other) noexcept{
 		memcpy(m_masterKey.data(), other.m_masterKey.data(), KEY_BYTES);
+		this->m_keyRegister = other.m_keyRegister;
+		other.m_keyRegister = false;
 		sodium_memzero(other.m_masterKey.data(), KEY_BYTES);
 	}
 
@@ -50,7 +52,7 @@ public:
 		sodium_memzero(this->m_masterKey.data(), KEY_BYTES);
 	}
 	
-	inline expected<std::unique_ptr<AesGcmStreamSession>, error_code> createSession(
+	expected<std::unique_ptr<AesGcmStreamSession>, error_code> createSession(
 		uint64_t fileSubkeyId,
 		const char kdfContext[KDF_CONTEXT_BYTES] = "file_enc"
 	);
@@ -62,8 +64,8 @@ public:
 	}
 
 private:
-	vector<unsigned char> m_masterKey{ KEY_BYTES };
-	
+	vector<unsigned char> m_masterKey = vector<unsigned char>(KEY_BYTES);
+
 	bool m_keyRegister = false;
 
 	AesGcmContextProvider();
