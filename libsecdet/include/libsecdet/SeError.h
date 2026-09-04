@@ -40,6 +40,8 @@ enum class SeError{
     StreamAlreadyOpen,
 
     ZSTDCompressionError,
+
+    CrcChecksumFailed,
 };
 
 struct SeErrorCategory: std::error_category{
@@ -85,6 +87,8 @@ struct SeErrorCategory: std::error_category{
             case SeError::StreamAlreadyOpen: return "Stream: file is already open";
 
             case SeError::ZSTDCompressionError: return "ZSTD: compression failed";
+
+            case SeError::CrcChecksumFailed: return "CRC checksum failed";
             
             default: return "Unknown error";
         }

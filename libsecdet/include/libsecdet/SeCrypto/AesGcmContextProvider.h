@@ -55,7 +55,6 @@ public:
 	template <Mode cryptoMode>
 	expected<std::unique_ptr<AesGcmStreamSession<cryptoMode>>, error_code> createSession(
 		uint64_t fileSubkeyId,
-		Mode mode,
 		const char kdfContext[KDF_CONTEXT_BYTES] = "file_enc"
 	);
 

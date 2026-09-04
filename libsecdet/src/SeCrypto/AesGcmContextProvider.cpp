@@ -4,7 +4,6 @@
 template <Mode cryptoMode>
 expected<std::unique_ptr<AesGcmStreamSession<cryptoMode>>, error_code> AesGcmContextProvider::createSession(
 	uint64_t fileSubkeyId,
-	Mode mode,
 	const char kdfContext[KDF_CONTEXT_BYTES]
 ){
 	std::vector<unsigned char> subkey{ KEY_BYTES };

@@ -19,6 +19,7 @@
 #include "SeCrypto/SeCryptoUtils.h"
 #include "SeCrypto/AesGcmContextProvider.h"
 #include "SeCrypto/AesGcmStreamSession.h"
+#include "SeTaskHandle.h"
 
 using namespace std;
 #define SE_JOB_MAX_COUNT 10
@@ -44,7 +45,9 @@ public:
         m_archiveFilePath(archivePath),
         m_cryptoCtx(move(crypto))
     {
+        this->m_isReady = true;
     }
+
     // The archivePath file should exist otherwise a error will be returned
     static expected<SeArchive,error_code> CreateArchive(uint16_t version,uint16_t compressionLevel, bool preserveMetadata,u16string archivePath);
     static expected<SeArchive,error_code> LoadArchiveFile(u16string path);
@@ -52,10 +55,6 @@ public:
     ~SeArchive(); // there will be synchornisity objects and streams that need to be handled here
 
     // Concurrent object - disabling the copy and move ctors
-    SeArchive(const SeArchive&) = delete;
-    SeArchive& operator=(const SeArchive&) = delete;
-    SeArchive(const SeArchive&&) = delete;
-    SeArchive& operator=(const SeArchive&&) = delete;
 
     const SeMetadata& GetMetadata() const noexcept {
         return this->m_metadata;
@@ -121,6 +120,11 @@ public:
     /// @return 
     expected<void,error_code> SaveChangesSync(ProgressCallback callback , stop_token stopToken);
 
+    /// @brief Asynchronously writes every requested job to the file in a separate thread.
+    /// @param callback Progress report callback (optional)
+    /// @return SeTaskHandle to control, monitor, and await the asynchronous save operation
+    SeTaskHandle<void> SaveChangesAsync(ProgressCallback callback = nullptr);
+
     /// @brief Register a key for archive manipulation tasks
     /// @param key ASCII key string
     /// @return 
@@ -141,6 +145,7 @@ public:
 
     void SetPreserveMetadata(bool preserve);
     void SetCompressionLevel(uint32_t compressionLevel);
+    expected<void, error_code> ChangeCompressionLevel(uint32_t compressionLevel);
 
     bool IsReady();
 private:

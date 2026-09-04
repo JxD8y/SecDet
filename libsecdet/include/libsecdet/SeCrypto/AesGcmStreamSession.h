@@ -28,7 +28,7 @@ public:
         memcpy(this->m_sessionKey.data(), sessionKey.data(), KEY_BYTES);
         memcpy(this->m_baseNonce.data(), baseNonce.data(), NONCE_BYTES);
         this->m_mode = CRYPTOMODE;
-        this->m_stagerBuffer.reserve(2*BUFFER_SIZE);
+        this->m_stagerBuffer.reserve(BUFFER_SIZE + (64 * 1024));
     }
 
     ~AesGcmStreamSession() {

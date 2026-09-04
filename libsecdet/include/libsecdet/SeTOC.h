@@ -66,18 +66,21 @@ public:
 
   uint64_t GetDiskSize() const noexcept {
     uint64_t size = 0;
-    size += (path.size() * sizeof(char16_t)) + (4 * sizeof(uint64_t)) +
-            +sizeof(uint32_t) + sizeof(uint32_t); // entry
+    size += sizeof(uint32_t) + (path.size() * sizeof(char16_t)) +
+            (4 * sizeof(uint64_t)) + (2 * sizeof(uint32_t)); // header fields: cCount, path, 4x uint64_t, 2x uint32_t
     size += compressed_size;
     return size;
   }
 
-  bool isDirectory() const { return (attributes & 0x1) != 0; } // ??
+  bool isDirectory() const { return (attributes & 0x1) != 0; }
   // Entries should serialize their size !
-  bool operator==(const SeArchiveEntry &value) {
+  bool operator==(const SeArchiveEntry &value) const {
     if (path == value.path && offset == value.offset && crc32 == value.crc32)
       return true;
     return false;
+  }
+  bool operator!=(const SeArchiveEntry &value) const {
+    return !(*this == value);
   }
 };
 
@@ -89,6 +92,29 @@ public:
 
   static SeTableOfContent CreateNewTableOfContent();
 
+  static u16string NormalizeArchivePath(u16string path);
+  static u16string NormalizeDirectoryPath(u16string path);
+  static u16string NormalizeFilePath(u16string path);
+
+  bool CheckPath(u16string) const;       // Checks if path exists whether dir or file
+  static bool IsDirectory(u16string);    // Path should end with / to count as directory
+  bool CheckParentPath(u16string) const; // Check if the parent directory exist
+  static u16string GetParentDirectory(u16string path);
+
+  static u16string GetFileName(u16string entryPath); // if the path is: /Folder1/MyFiles/file -> file or
+  // if its /Folder1/MyFiles/ -> MyFiles
+
+  static u16string CreateFilePath(u16string parentDir, u16string fileName);
+
+  static u16string CreateDirPath(u16string parentDir, u16string dirName); // just puts a / in the end
+
+  static u16string mergePath(u16string path, u16string fileName);
+
+  static bool verifyAbsPath(u16string path);
+
+  static bool isAbsPathDir(u16string path);
+
+
   // Again , any tampering with the TOC will set the is ready to false until you
   // serialize it again
 
@@ -97,39 +123,25 @@ public:
   bool RemoveEntry(SeArchiveEntry &);
 
   // We should not use ref in vector like this
-  expected<SeArchiveEntry &, error_code> GetEntry(u16string path);
+  expected<SeArchiveEntry, error_code> GetEntry(u16string path);
+  expected<const SeArchiveEntry, error_code> GetEntry(u16string path) const;
 
   vector<SeArchiveEntry> GetEntriesFollowing(
       SeArchiveEntry &entry); // Entries after the passed entry offset
 
   vector<SeArchiveEntry> GetDirectoryFileEntries(
       SeArchiveEntry
-          &dirEntry); // Contains all the files + subdirectories inside
-
-  bool CheckPath(u16string);   // Checks if path exists whether dir or file
-  bool IsDirectory(u16string); // Path should end with / to count as directory
-  bool CheckParentPath(u16string); // Check if the parent directory exist
-
-  u16string GetFileName(
-      u16string entryPath); // if the path is: /Folder1/MyFiles/file -> file or
-                            // if its /Folder1/MyFiles/ -> MyFiles
-
-  u16string CreateFilePath(u16string parentDir, u16string fileName);
-
-  u16string CreateDirPath(u16string parentDir,
-                          u16string dirName); // just puts a / in the end
-
-  static bool mergePath(u16string path, u16string fileName);
-
-  static bool verifyAbsPath(u16string path);
-
-  static bool isAbsPathDir(u16string path);
+          &dirEntry, bool recursive = false); // Contains files + subdirectories inside
 
   [[nodiscard]] span<const SeArchiveEntry> GetEntries() const noexcept {
     return m_entries;
   }
 
   expected<size_t, error_code> Serialize();
+  vector<unsigned char> SerializeToBytes() const;
+  span<const unsigned char> GetTOCBytes() const noexcept {
+    return m_serializedBytes;
+  }
 
   bool IsReady() const noexcept { return m_isReady; }
 
@@ -146,14 +158,15 @@ public:
   //  which again causes that user loss all the empty directories which are many
   //  of theM!
 
-  bool operator==(const SeTableOfContent &);
+  bool operator==(const SeTableOfContent &) const;
 
-  bool operator!=(const SeTableOfContent &b) { return !(*this == b); }
+  bool operator!=(const SeTableOfContent &b) const { return !(*this == b); }
 
 private:
   SeTableOfContent();
 
-  vector<SeArchiveEntry> m_entries; // Possible high memroy usage if the archive
+  vector<SeArchiveEntry> m_entries; // Possible high memory usage if the archive
                                     // contains too many files
+  vector<unsigned char> m_serializedBytes;
   bool m_isReady = false;
 };
