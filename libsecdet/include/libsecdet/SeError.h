@@ -35,6 +35,7 @@ enum class SeError{
     CRYPTOCannotInitSodium,
     CRYPTOGenericFailure,
     CRYPTOKDFFail,
+    CRYPTOStageTooSmall, 
 
     StreamAlreadyOpen,
 
@@ -68,8 +69,11 @@ struct SeErrorCategory: std::error_category{
             case SeError::ZstdInitiationFail: return "Cannot initiate the zstd context";
             case SeError::RequiredFieldMissing: return "One of the required field is missing.";
             case SeError::SmallBuffer: return "Insufficient space in passed buffer";
-            case SeError::ExpectedDirectory: return "Expected a directory"
+            case SeError::ExpectedDirectory: return "Expected a directory";
 
+
+
+            case SeError::CRYPTOStageTooSmall: return "Crypto: not an error, just keep pushing data until reach buffer size";
             case SeError::CRYPTOStringWasEmpty: return "Crypto: string was empty";
             case SeError::CRYPTOBufferWasEmpty: return "Crypto: byffer was empty";
             case SeError::CRYPTOCannotInitSodium: return "Crypto: cannot initiate libsodium";

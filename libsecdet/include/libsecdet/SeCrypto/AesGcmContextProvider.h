@@ -7,10 +7,10 @@
 #include <sodium.h>
 
 #include "libsecdet/SeError.h"
+#include "AesGcmStreamSession.h"
 
 using namespace std;
 
-class AesGcmStreamSession;
 class SeArchive;
 
 class AesGcmContextProvider {
@@ -52,8 +52,10 @@ public:
 		sodium_memzero(this->m_masterKey.data(), KEY_BYTES);
 	}
 	
-	expected<std::unique_ptr<AesGcmStreamSession>, error_code> createSession(
+	template <Mode cryptoMode>
+	expected<std::unique_ptr<AesGcmStreamSession<cryptoMode>>, error_code> createSession(
 		uint64_t fileSubkeyId,
+		Mode mode,
 		const char kdfContext[KDF_CONTEXT_BYTES] = "file_enc"
 	);
 

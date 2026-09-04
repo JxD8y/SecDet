@@ -1,9 +1,10 @@
 #include "libsecdet/SeCrypto/AesGcmContextProvider.h"
 #include "libsecdet/SeCrypto/AesGcmStreamSession.h"
 
-
-inline expected<std::unique_ptr<AesGcmStreamSession>, error_code> AesGcmContextProvider::createSession(
+template <Mode cryptoMode>
+expected<std::unique_ptr<AesGcmStreamSession<cryptoMode>>, error_code> AesGcmContextProvider::createSession(
 	uint64_t fileSubkeyId,
+	Mode mode,
 	const char kdfContext[KDF_CONTEXT_BYTES]
 ){
 	std::vector<unsigned char> subkey{ KEY_BYTES };
@@ -24,8 +25,7 @@ inline expected<std::unique_ptr<AesGcmStreamSession>, error_code> AesGcmContextP
 
 	auto session = std::make_unique<AesGcmStreamSession>(
 		subkey,
-		baseNonce,
-		Mode::Encryption
+		baseNonce
 	);
 
 	sodium_memzero(subkey.data(), KEY_BYTES);
@@ -33,7 +33,6 @@ inline expected<std::unique_ptr<AesGcmStreamSession>, error_code> AesGcmContextP
 }
 
 expected<void, error_code> AesGcmContextProvider::SetMasterKey(span<unsigned char> key) {
-	
 	if (key.size() < AesGcmContextProvider::KEY_BYTES) {
 		return unexpected(SeError::SmallBuffer);
 	}
