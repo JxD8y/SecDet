@@ -81,7 +81,7 @@ bool SeArchive::IsReady() { return this->m_isReady; }
 expected<void, error_code> SeArchive::AddFile(u16string filePath,
                                               u16string fileName) {
   filePath = SeTableOfContent::NormalizeFilePath(filePath);
-  if (!this->m_toc.CheckParentPath(filePath))
+  if (!this->checkParentPath(filePath))
     return unexpected(SeError::TocPathIsInvalid);
 
   if (!SeTableOfContent::verifyAbsPath(fileName))
@@ -108,18 +108,112 @@ expected<void, error_code> SeArchive::RemoveFile(u16string fileName) {
   return {};
 }
 
-expected<void, error_code> SeArchive::AddDirectory(u16string fileName) {
+expected<void, error_code> SeArchive::CreateArchiveDirectory(u16string fileName) {
   fileName = SeTableOfContent::NormalizeDirectoryPath(fileName);
-  if (!this->m_toc.CheckParentPath(fileName))
+  if (!this->checkParentPath(fileName))
     return unexpected(SeError::TocPathIsInvalid);
 
-  if (this->m_toc.CheckPath(fileName))
+  if (this->checkPathExists(fileName))
     return unexpected(SeError::AddingExistingEntry);
 
-  auto job = SeJob(JobType::AddDirectory, fileName, u"");
+  auto job = SeJob(JobType::CreateArchiveDirectory, fileName, u"");
 
   if (!this->addJob(job))
     return unexpected(SeError::CannotCreateJob);
+
+  return {};
+}
+
+expected<void, error_code> SeArchive::AddDirectory(u16string filePath,
+                                                   u16string fileName) {
+  u16string diskDirPath;
+  u16string archiveParentPath;
+
+  if (SeTableOfContent::verifyAbsPath(filePath) &&
+      SeTableOfContent::isAbsPathDir(filePath)) {
+    diskDirPath = filePath;
+    archiveParentPath = fileName;
+  } else if (SeTableOfContent::verifyAbsPath(fileName) &&
+             SeTableOfContent::isAbsPathDir(fileName)) {
+    diskDirPath = fileName;
+    archiveParentPath = filePath;
+  } else {
+    if (!SeTableOfContent::verifyAbsPath(filePath) &&
+        !SeTableOfContent::verifyAbsPath(fileName))
+      return unexpected(make_error_code(errc::no_such_file_or_directory));
+    return unexpected(SeError::ExpectedDirectory);
+  }
+
+  archiveParentPath =
+      SeTableOfContent::NormalizeDirectoryPath(archiveParentPath);
+  if (archiveParentPath != u"/" && !this->checkPathExists(archiveParentPath)) {
+    return unexpected(SeError::TocPathIsInvalid);
+  }
+
+  filesystem::path diskPath(diskDirPath);
+  filesystem::path leaf = diskPath.filename();
+  if (leaf.empty() || leaf == ".") {
+    leaf = diskPath.parent_path().filename();
+  }
+  u16string dirName = leaf.u16string();
+
+  u16string baseArchiveDir;
+  u16string parentLeaf = SeTableOfContent::GetFileName(archiveParentPath);
+  if (!parentLeaf.empty() && parentLeaf == dirName) {
+    baseArchiveDir = archiveParentPath;
+  } else if (!dirName.empty()) {
+    baseArchiveDir = SeTableOfContent::CreateDirPath(archiveParentPath, dirName);
+  } else {
+    baseArchiveDir = archiveParentPath;
+  }
+
+  if (baseArchiveDir != u"/" && !this->checkPathExists(baseArchiveDir)) {
+    auto res = this->CreateArchiveDirectory(baseArchiveDir);
+    if (!res)
+      return unexpected(res.error());
+  }
+
+  error_code ec;
+  filesystem::recursive_directory_iterator it(
+      diskPath, filesystem::directory_options::skip_permission_denied, ec);
+  if (ec)
+    return unexpected(ec);
+
+  filesystem::recursive_directory_iterator endIt;
+  while (it != endIt) {
+    const auto &entry = *it;
+    error_code statusEc;
+    bool isDir = entry.is_directory(statusEc);
+    bool isReg = !isDir && entry.is_regular_file(statusEc);
+
+    if (isDir) {
+      filesystem::path rel = filesystem::relative(entry.path(), diskPath, ec);
+      if (!ec) {
+        u16string subArchiveDir = SeTableOfContent::CreateDirPath(
+            baseArchiveDir, rel.generic_u16string());
+        if (!this->checkPathExists(subArchiveDir)) {
+          auto res = this->CreateArchiveDirectory(subArchiveDir);
+          if (!res)
+            return unexpected(res.error());
+        }
+      }
+    } else if (isReg) {
+      filesystem::path rel = filesystem::relative(entry.path(), diskPath, ec);
+      if (!ec) {
+        u16string fileArchivePath = SeTableOfContent::CreateFilePath(
+            baseArchiveDir, rel.generic_u16string());
+        u16string diskFileAbsPath = entry.path().u16string();
+        auto res = this->AddFile(fileArchivePath, diskFileAbsPath);
+        if (!res)
+          return unexpected(res.error());
+      }
+    }
+
+    it.increment(ec);
+    if (ec) {
+      ec.clear();
+    }
+  }
 
   return {};
 }
@@ -316,8 +410,8 @@ expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
     case JobType::RemoveFile:
       _result = doRemoveFileJob(job, callback, stopToken);
       break;
-    case JobType::AddDirectory:
-      _result = doAddDirectoryJob(job, callback, stopToken);
+    case JobType::CreateArchiveDirectory:
+      _result = doCreateDirectoryJob(job, callback, stopToken);
       break;
     case JobType::DeleteDirectory:
       _result = doDeleteDirectoryJob(job, callback, stopToken);
@@ -751,7 +845,7 @@ expected<void, error_code> SeArchive::doRemoveFileJob(SeJob &job,
 }
 
 expected<void, error_code>
-SeArchive::doAddDirectoryJob(SeJob &job, ProgressCallback callback,
+SeArchive::doCreateDirectoryJob(SeJob &job, ProgressCallback callback,
                              stop_token stopToken) {
   job.setStatus(JobStatus::Pending);
   if (callback)
@@ -2366,6 +2460,11 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
   size_t extractedFilesCount = 0;
 
   for (const auto &fileEntry : filesToExtract) {
+
+    job.SetFileName(fileEntry.path);
+    if (callback)
+        callback(job);
+
     if (stopToken.stop_requested()) {
       job.setStatus(JobStatus::Aborted);
       if (callback)
@@ -2435,7 +2534,7 @@ bool SeArchive::verifyJobs() {
   return true;
 }
 
-bool SeArchive::addJob(const SeJob &job) {
+bool SeArchive::addJob(SeJob &job) {
   // Extraction jobs are synchronous operations and cannot be queued as archive
   // modification jobs
   if (job.m_type == JobType::ExtractFile ||
@@ -2443,13 +2542,39 @@ bool SeArchive::addJob(const SeJob &job) {
     return false;
   }
 
-  if (any_of(m_jobs.begin(), m_jobs.end(),
-             [job](const SeJob &value) { return job.m_id == value.m_id; })) {
-    return false;
-  }
+  job.m_id = this->m_jobCtr++;
 
   m_jobs.push_back(job);
   return true;
+}
+
+bool SeArchive::checkParentPath(const u16string &path) const {
+  u16string parent = SeTableOfContent::GetParentDirectory(path);
+  if (this->m_toc.CheckPath(parent))
+    return true;
+  for (const auto &job : this->m_jobs) {
+    if (job.m_type == JobType::CreateArchiveDirectory) {
+      if (SeTableOfContent::NormalizeDirectoryPath(job.m_fileName) == parent)
+        return true;
+    }
+  }
+  return false;
+}
+
+bool SeArchive::checkPathExists(const u16string &path) const {
+  u16string norm = SeTableOfContent::NormalizeArchivePath(path);
+  if (this->m_toc.CheckPath(norm))
+    return true;
+  for (const auto &job : this->m_jobs) {
+    if (job.m_type == JobType::CreateArchiveDirectory) {
+      if (SeTableOfContent::NormalizeDirectoryPath(job.m_fileName) == norm)
+        return true;
+    } else if (job.m_type == JobType::AddFile) {
+      if (SeTableOfContent::NormalizeFilePath(job.m_fileName) == norm)
+        return true;
+    }
+  }
+  return false;
 }
 
 void SeArchive::optimizeJobs() {
@@ -2571,12 +2696,12 @@ void SeArchive::optimizeJobs() {
           break;
       }
       // 2. Directory Operation Optimizations
-      else if (jobA.m_type == JobType::AddDirectory) {
+      else if (jobA.m_type == JobType::CreateArchiveDirectory) {
         for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
           auto &jobB = this->m_jobs[j];
 
           // Case 2A: Double AddDirectory
-          if (jobB.m_type == JobType::AddDirectory &&
+          if (jobB.m_type == JobType::CreateArchiveDirectory &&
               arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
             this->m_jobs.erase(this->m_jobs.begin() + j);
             changed = true;
@@ -2635,7 +2760,7 @@ void SeArchive::optimizeJobs() {
         for (size_t k = 0; k < i; ++k) {
           auto &priorJob = this->m_jobs[k];
           if ((priorJob.m_type == JobType::AddFile ||
-               priorJob.m_type == JobType::AddDirectory) &&
+               priorJob.m_type == JobType::CreateArchiveDirectory) &&
               isUnderDirectory(priorJob.m_fileName, jobA.m_fileName)) {
             if (!this->m_toc.CheckPath(priorJob.m_fileName)) {
               // Transient item inside deleted directory; erase prior add job

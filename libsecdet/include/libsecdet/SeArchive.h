@@ -73,10 +73,16 @@ public:
     /// @return 
     expected<void,error_code> RemoveFile(u16string fileName);
 
-    /// @brief Registers a Create directory job 
-    /// @param fileName Relative file path
+    /// @brief Registers a directory creation job inside the archive; You must call SaveChanges to apply
+    /// @param fileName Relative directory path inside archive (e.g. /Folder/)
     /// @return 
-    expected<void,error_code> AddDirectory(u16string fileName);
+    expected<void,error_code> CreateArchiveDirectory(u16string fileName);
+
+    /// @brief Recursively iterates through a directory on disk and registers jobs to create all subdirectories and add all files
+    /// @param filePath Directory path on disk (or archive parent directory)
+    /// @param fileName Archive parent directory (or directory path on disk)
+    /// @return 
+    expected<void,error_code> AddDirectory(u16string filePath, u16string fileName);
 
     /// @brief Registers a remove directory job, it will remove the files inside the directory completely
     /// @param fileName Relative file path
@@ -157,12 +163,15 @@ private:
     /// @brief Optimizes queued jobs by merging redundant operations, cancelling transient actions, and folding moves
     void optimizeJobs();
 
-    bool addJob(const SeJob&);
+    bool addJob(SeJob&);
+
+    bool checkParentPath(const u16string& path) const;
+    bool checkPathExists(const u16string& path) const;
 
     // Low overhead sub-routines to do archive jobs
     expected<void,error_code> doAddFileJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
     expected<void,error_code> doRemoveFileJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
-    expected<void,error_code> doAddDirectoryJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
+    expected<void,error_code> doCreateDirectoryJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
     expected<void,error_code> doDeleteDirectoryJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
     expected<void,error_code> doMoveFileJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
     expected<void,error_code> doMoveDirectoryJob(SeJob& job, ProgressCallback callback , stop_token stopToken);
@@ -178,6 +187,7 @@ private:
     SeTableOfContent m_toc;
     bool m_isReady = false;
     
+    int m_jobCtr = 0;
     unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> m_zstdCctx{ ZSTD_createCCtx(), ZSTD_freeCCtx };
 
     unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> m_zstdDctx{ ZSTD_createDCtx(), ZSTD_freeDCtx };

@@ -11,7 +11,7 @@ enum class JobType{
     None = 0,
     AddFile,
     RemoveFile,
-    AddDirectory,
+    CreateArchiveDirectory,
     DeleteDirectory,
     MoveArchiveFile,
     MoveDirectory,
@@ -43,7 +43,6 @@ public:
     SeJob() = delete;
     
     SeJob(JobType type,u16string fileName,u16string filePath): m_type(type) , m_fileName(fileName) , m_filePath(filePath){
-        m_id=getRandom(100000,120000);
     }
 
     JobStatus GetStatus() const noexcept {return this->m_status;};
@@ -54,7 +53,14 @@ public:
         return value.m_id == this->m_id;
     }
     
+    u16string GetFileName() const{
+        return this->m_fileName;
+    }
     
+    void SetFileName(u16string nwFile) {
+        this->m_fileName = nwFile;
+    }
+
     uint64_t processedBytes = 0;
     uint64_t totalBytes = 0;
     uint32_t percentage = 0;
