@@ -56,7 +56,45 @@ public:
 	expected<std::unique_ptr<AesGcmStreamSession<cryptoMode>>, error_code> createSession(
 		uint64_t fileSubkeyId,
 		const char kdfContext[KDF_CONTEXT_BYTES] = "file_enc"
-	);
+	) {
+		std::vector<unsigned char> subkey(KEY_BYTES);
+
+		// Securely derive a 256-bit key from the master key
+		if (crypto_kdf_derive_from_key(
+			subkey.data(),
+			KEY_BYTES,
+			fileSubkeyId,
+			kdfContext,
+			this->m_masterKey.data()) != 0) {
+
+			return unexpected(SeError::CRYPTOKDFFail);
+		}
+
+		// Securely and deterministically derive the 12-byte base nonce from the master key and fileSubkeyId
+		vector<unsigned char> nonceDerivation(crypto_kdf_BYTES_MIN);
+		if (crypto_kdf_derive_from_key(
+			nonceDerivation.data(),
+			crypto_kdf_BYTES_MIN,
+			fileSubkeyId,
+			"file_non",
+			this->m_masterKey.data()) != 0) {
+
+			sodium_memzero(subkey.data(), KEY_BYTES);
+			return unexpected(SeError::CRYPTOKDFFail);
+		}
+
+		vector<unsigned char> baseNonce(crypto_aead_aes256gcm_NPUBBYTES);
+		memcpy(baseNonce.data(), nonceDerivation.data(), crypto_aead_aes256gcm_NPUBBYTES);
+
+		auto session = std::make_unique<AesGcmStreamSession<cryptoMode>>(
+			subkey,
+			baseNonce
+		);
+
+		sodium_memzero(subkey.data(), KEY_BYTES);
+		sodium_memzero(nonceDerivation.data(), nonceDerivation.size());
+		return session;
+	}
 
 	expected<void,error_code> SetMasterKey(span<unsigned char> key);
 	
@@ -69,7 +107,7 @@ private:
 
 	bool m_keyRegister = false;
 
-	AesGcmContextProvider();
+	AesGcmContextProvider(){ }
 	vector<unsigned char> generateSessionKey(span<unsigned char> fileIdx);
 
 };

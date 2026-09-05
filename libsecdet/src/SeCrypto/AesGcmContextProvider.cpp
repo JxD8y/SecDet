@@ -1,35 +1,6 @@
 #include "libsecdet/SeCrypto/AesGcmContextProvider.h"
 #include "libsecdet/SeCrypto/AesGcmStreamSession.h"
 
-template <Mode cryptoMode>
-expected<std::unique_ptr<AesGcmStreamSession<cryptoMode>>, error_code> AesGcmContextProvider::createSession(
-	uint64_t fileSubkeyId,
-	const char kdfContext[KDF_CONTEXT_BYTES]
-){
-	std::vector<unsigned char> subkey{ KEY_BYTES };
-
-	// Securely derive a 256-bit key from the master key
-	if (crypto_kdf_derive_from_key(
-		subkey.data(),
-		KEY_BYTES,
-		fileSubkeyId,
-		kdfContext,
-		this->m_masterKey.data()) != 0) {
-
-		return unexpected(SeError::CRYPTOKDFFail);
-	}
-
-	vector<unsigned char> baseNonce{ crypto_aead_aes256gcm_NPUBBYTES };
-	randombytes_buf(baseNonce.data(), baseNonce.size());
-
-	auto session = std::make_unique<AesGcmStreamSession>(
-		subkey,
-		baseNonce
-	);
-
-	sodium_memzero(subkey.data(), KEY_BYTES);
-	return session;
-}
 
 expected<void, error_code> AesGcmContextProvider::SetMasterKey(span<unsigned char> key) {
 	if (key.size() < AesGcmContextProvider::KEY_BYTES) {

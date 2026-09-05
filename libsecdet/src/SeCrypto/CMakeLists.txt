@@ -14,5 +14,3 @@ endif()
 target_link_libraries(SeCrypto PRIVATE unofficial-sodium::sodium)
 
 target_include_directories(SeCrypto PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
-
-add_subdirectory(apps)
