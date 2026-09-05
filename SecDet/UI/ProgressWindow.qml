@@ -254,7 +254,7 @@ Window {
                         text: progressWindow.currentFileName
                         font.family: Colors.fontFamily
                         font.pixelSize: 11
-                        font.weight: Font.SemiBold
+                        font.weight: Font.DemiBold
                         color: Colors.textMain
                         Layout.fillWidth: true
                         elide: Text.ElideRight

@@ -166,34 +166,6 @@ Window {
         }
     }
 
-    component SleekProgressBar : Item {
-        id: pBar
-        property real value: 0.0
-
-        Layout.fillWidth: true
-        implicitHeight: 4
-
-        Rectangle {
-            anchors.fill: parent
-            radius: 2
-            color: Colors.bgElevated
-
-            Rectangle {
-                width: parent.width * Math.max(0, Math.min(pBar.value, 1.0))
-                height: parent.height
-                radius: 2
-
-                gradient: Gradient {
-                    orientation: Gradient.Horizontal
-                    GradientStop { position: 0.0; color: Colors.goldPrimary }
-                    GradientStop { position: 1.0; color: Colors.goldHover }
-                }
-
-                Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
-            }
-        }
-    }
-
     Component {
         id: treeDirectoryViewComp
 
@@ -601,7 +573,7 @@ Window {
                             text: "Project_Backup.zip"
                             font.family: Colors.fontFamily
                             font.pixelSize: 12
-                            font.weight: Font.SemiBold
+                            font.weight: Font.DemiBold
                             color: Colors.textMain
                         }
 
@@ -854,66 +826,13 @@ Window {
         }
 
         // ==========================================
-        // --- Windows 11 Bottom Status & Progress ---
+        // --- Windows 11 Bottom Multi-Part Progress Bar ---
         // ==========================================
-        ColumnLayout {
+        MultiPartProgressBar {
+            id: bottomProgressBar
             Layout.fillWidth: true
-            spacing: 6
-
-            SleekProgressBar {
-                id: pBar
-                Layout.fillWidth: true
-                value: 0.4
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 30
-                height: 30
-                color: Colors.bgSurface
-                radius: 8
-                border.color: Colors.goldBorder
-                border.width: 1
-
-                Behavior on color { ColorAnimation { duration: 200 } }
-                Behavior on border.color { ColorAnimation { duration: 200 } }
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 12
-                    anchors.rightMargin: 12
-                    spacing: 8
-
-                    // Ready Dot Status Indicator
-                    Rectangle {
-                        width: 8
-                        height: 8
-                        radius: 4
-                        color: "#4ade80"
-                        border.color: Qt.rgba(0.29, 0.87, 0.5, 0.4)
-                        border.width: 1
-                    }
-
-                    Text {
-                        id: statusText
-                        text: "Ready • 8 files loaded (12.4 MB)"
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 11
-                        font.weight: Font.Medium
-                        color: Colors.textMuted
-                        Layout.fillWidth: true
-                        elide: Text.ElideRight
-                    }
-
-                    Text {
-                        text: Math.round(pBar.value * 100) + "%"
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 11
-                        font.weight: Font.Bold
-                        color: Colors.goldPrimary
-                    }
-                }
-            }
+            Layout.preferredHeight: 34
+            implicitHeight: 34
         }
     }
 }

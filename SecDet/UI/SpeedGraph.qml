@@ -358,7 +358,7 @@ Rectangle {
                     text: root.currentTimeText
                     font.family: Colors.fontFamily
                     font.pixelSize: 8
-                    font.weight: Font.SemiBold
+                    font.weight: Font.DemiBold
                     color: Colors.textMuted
                 }
             }

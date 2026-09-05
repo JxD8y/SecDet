@@ -161,8 +161,8 @@ Page {
     // ==========================================
     component TripleToggle : Rectangle {
         id: toggleRoot
-        property int currentIndex: 1 // 0: Fast, 1: Balanced, 2: Ultra
-        property var options: ["Fast (Store)", "Balanced (Deflate)", "Ultra (LZMA2)"]
+        property int currentIndex: 1
+        property var options: ["Fast (Store)", "Balanced", "Ultra"]
         signal selected(int index)
 
         implicitWidth: 320
@@ -238,9 +238,7 @@ Page {
         anchors.margins: 14
         spacing: 12
 
-        // ==========================================
-        // --- Header: Title & Close Button ---
-        // ==========================================
+
         RowLayout {
             Layout.fillWidth: true
 
@@ -328,163 +326,80 @@ Page {
                     Layout.fillWidth: true
 
                     GoldSwitch {
-                        text: "AES-256 Encryption"
-                        checked: true
-                        Layout.fillWidth: true
-                    }
-
-                    GoldSwitch {
-                        text: "Solid Block Mode"
+                        text: "Preserve Attributes"
                         checked: false
                         Layout.fillWidth: true
                     }
-
-                    GoldCheckBox {
-                        text: "Preserve Permissions"
-                        checked: true
-                        Layout.fillWidth: true
-                    }
-
-                    GoldCheckBox {
-                        text: "Integrity Verification"
-                        checked: true
-                        Layout.fillWidth: true
-                    }
                 }
             }
         }
-
-        Rectangle {
-            id: passwordContainer
+        RowLayout {
             Layout.fillWidth: true
-            implicitHeight: 140
-            color: Colors.bgCard
-            radius: 10
-            border.color: Colors.goldBorder
-            border.width: 1
+            spacing: 12
 
-            Behavior on border.color { ColorAnimation { duration: 150 } }
-            Behavior on border.width { NumberAnimation { duration: 150 } }
+            Item { Layout.fillWidth: true }
 
-            ListModel {
-                id: passwords
-                ListElement { password_hash: "ad9a67fefa847de87753df6794a0ae466431e76ad1fb4db58fbbe836d1dde0e7" }
-                ListElement { password_hash: "2285dd09ea6ccd0ec7e7253d2f7dc10810608d45609a902b5094176974eafc44" }
+            Rectangle {
+                implicitWidth: 100
+                implicitHeight: 34
+                radius: 6
+                color: cancelArea.containsMouse ? Colors.bgHover : "transparent"
+                border.color: Colors.goldBorder
+                border.width: 1
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "Cancel"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 12
+                    font.weight: Font.Medium
+                    color: Colors.textMuted
+                }
+
+                MouseArea {
+                    id: cancelArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.closeRequested()
+                }
             }
 
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 10
-                spacing: 6
+            Rectangle {
+                implicitWidth: 130
+                implicitHeight: 34
+                radius: 6
+                color: saveArea.containsPress ? Qt.darker(Colors.goldPrimary, 1.15) : (saveArea.containsMouse ? Colors.goldHover : Colors.goldPrimary)
+
+                Behavior on color { ColorAnimation { duration: 120 } }
 
                 RowLayout {
-                    Layout.fillWidth: true
-
+                    anchors.centerIn: parent
+                    spacing: 6
                     Text {
-                        text: "key"
-                        font.family: materialIcons.name
-                        font.pixelSize: 14
-                        color: Colors.goldPrimary
-                    }
-
-                    Text {
-                        text: "Passwords"
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 10
-                        font.weight: Font.Bold
-                        color: Colors.goldPrimary
-                        Layout.fillWidth: true
-                    }
-
-                    Text {
-                        text: "info"
-                        font.family: materialIcons.name
-                        font.pixelSize: 10
-                        color: Colors.textMuted
-                        MouseArea{
-                            anchors.fill: parent
-                            onClicked:{
-                                ToolTip.show("Your archives can have multiple passcodes\nbut its necessary to put atleast one to continue.")
-                            }
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    radius: 6
-                    color: Colors.bgInput
-                    border.color: Colors.borderSubtle
-                    border.width: 1
-                    ListView {
-                        id: passwordListView
-                        anchors.fill: parent
-                        anchors.margins: 4
-                        clip: true
-                        spacing: 2
-                        model: passwords
-
-                        delegate: Rectangle {
-                            width: passwordContainer.width
-                            height: 28
-                            radius: 4
-                            color: Colors.bgHover
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Text {
-                                    text: "key"
-                                    font.family: materialIcons.name
-                                    font.pixelSize: 14
-                                    color: Colors.textMuted
-                                }
-
-                                Text {
-                                    text: model.password_hash
-                                    color: Colors.textMain
-                                    font.family: Colors.fontFamily
-                                    font.pixelSize: 11
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                }
-                            }
-                        }
-                    }
-
-                }
-                RowLayout{
-                    TextField {
-                        id: passInput
-                        Layout.fillWidth: true
-                        placeholderText: "Enter password..."
-                        placeholderTextColor: Colors.textSubtle
-                        color: Colors.textMain
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 13
-                        echoMode: showPassBtn.showPassword ? TextInput.Normal : TextInput.Password
-                        background: null
-                        onAccepted: {
-                            if (passInput.text.length > 0) {
-                                passwordDialog.acceptedPassword(passInput.text)
-                                passwordDialog.close()
-                            }
-                        }
-                    }
-                    Text{
+                        text: "\ue877" // check_circle
                         font.family: materialIcons.name
                         font.pixelSize: 16
-                        color: Colors.goldBorder
-                        text: "add"
+                        color: Colors.textOnGold
                     }
+                    Text {
+                        text: "Save Settings"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 12
+                        font.weight: Font.Bold
+                        color: Colors.textOnGold
+                    }
+                }
+
+                MouseArea {
+                    id: saveArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.saveRequested()
                 }
             }
         }
-
         // ==========================================
         // --- SECTION 3: Shannon Entropy Matrix ---
         // ==========================================
@@ -515,7 +430,7 @@ Page {
                             color: Colors.goldPrimary
                         }
                         Text {
-                            text: "SHANNON ENTROPY MATRIX"
+                            text: "SHANNON ENTROPY DISTRIB."
                             font.family: Colors.fontFamily
                             font.pixelSize: 10
                             font.weight: Font.Bold
@@ -773,77 +688,6 @@ Page {
                         font.weight: Font.Medium
                         color: Colors.textMuted
                     }
-                }
-            }
-        }
-
-        // ==========================================
-        // --- Dialog Action Buttons ---
-        // ==========================================
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 12
-
-            Item { Layout.fillWidth: true }
-
-            Rectangle {
-                implicitWidth: 100
-                implicitHeight: 34
-                radius: 6
-                color: cancelArea.containsMouse ? Colors.bgHover : "transparent"
-                border.color: Colors.goldBorder
-                border.width: 1
-
-                Text {
-                    anchors.centerIn: parent
-                    text: "Cancel"
-                    font.family: Colors.fontFamily
-                    font.pixelSize: 12
-                    font.weight: Font.Medium
-                    color: Colors.textMuted
-                }
-
-                MouseArea {
-                    id: cancelArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.closeRequested()
-                }
-            }
-
-            Rectangle {
-                implicitWidth: 130
-                implicitHeight: 34
-                radius: 6
-                color: saveArea.containsPress ? Qt.darker(Colors.goldPrimary, 1.15) : (saveArea.containsMouse ? Colors.goldHover : Colors.goldPrimary)
-
-                Behavior on color { ColorAnimation { duration: 120 } }
-
-                RowLayout {
-                    anchors.centerIn: parent
-                    spacing: 6
-                    Text {
-                        text: "\ue877" // check_circle
-                        font.family: materialIcons.name
-                        font.pixelSize: 16
-                        color: Colors.textOnGold
-                    }
-                    Text {
-                        text: "Save Settings"
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 12
-                        font.weight: Font.Bold
-                        color: Colors.textOnGold
-                    }
-                }
-
-                MouseArea {
-                    id: saveArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.saveRequested()
                 }
             }
         }
