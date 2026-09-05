@@ -52,8 +52,6 @@ public:
     static expected<SeArchive,error_code> CreateArchive(uint16_t version,uint16_t compressionLevel, bool preserveMetadata,u16string archivePath);
     static expected<SeArchive,error_code> LoadArchiveFile(u16string path);
 
-    ~SeArchive(); // there will be synchornisity objects and streams that need to be handled here
-
     // Concurrent object - disabling the copy and move ctors
 
     const SeMetadata& GetMetadata() const noexcept {
@@ -128,7 +126,7 @@ public:
     /// @brief Register a key for archive manipulation tasks
     /// @param key ASCII key string
     /// @return 
-    expected<void,error_code> RegisterKey(string& key);
+    expected<void,error_code> RegisterKey(string key);
 
     /// @brief Checks if a key exists within the current SeArchive object
     /// @return 

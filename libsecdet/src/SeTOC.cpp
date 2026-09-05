@@ -78,33 +78,56 @@ expected<SeTableOfContent,error_code> SeTableOfContent::LoadTableOfContentFromBy
     // [ENTRY N]
     // [PAD]
 
-    if(memcmp(data.data(),SE_TOC_MAGIC,4)){
+    if (data.size() < 4) {
+        return unexpected(SeError::NoTOCFound);
+    }
+
+    if (memcmp(data.data(), SE_TOC_MAGIC, 4) != 0) {
         return unexpected(SeError::InvalidTOCMagic);
     }
     
-    // Skipping Toc magic
+    // Save original bytes for m_serializedBytes
+    span<unsigned char> origData = data;
 
+    // Skipping Toc magic
     data = data.subspan(4);
 
     SeTableOfContent _toc;
 
-    while(data.size() != 0){
-        auto m_range = ranges::search(data,SE_TOC_ENTRY_PAD);
-        if(m_range.empty()){
+    const unsigned char pad[] = {0x04, 0x03, 0x4B, 0x50};
+    span<const unsigned char> pad_span(pad, 4);
+
+    while (!data.empty()) {
+        auto m_range = ranges::search(data, pad_span);
+        if (m_range.empty()) {
             break;
         }
-        size_t tEntry_sz = (size_t)(std::distance(data.begin(),m_range.begin()));
+        size_t tEntry_sz = static_cast<size_t>(std::distance(data.begin(), m_range.begin()));
+        
+        // Cross-verify with entry header size if valid to prevent false positive matches
+        if (data.size() >= sizeof(uint32_t)) {
+            uint32_t cCount = 0;
+            memcpy(&cCount, data.data(), sizeof(cCount));
+            size_t expectedSz = sizeof(uint32_t) + (static_cast<size_t>(cCount) * sizeof(char16_t)) + 40;
+            if (expectedSz <= data.size() - 4 && memcmp(data.data() + expectedSz, pad, 4) == 0) {
+                tEntry_sz = expectedSz;
+            }
+        }
+
         span<unsigned char> tEntry_bytes = data.first(tEntry_sz);
         
         auto _aEE = SeArchiveEntry::CreateFromBytes(tEntry_bytes);
-        if(!_aEE){
+        if (!_aEE) {
             return unexpected(_aEE.error());
         }
-        auto _aE = *_aEE;
-        _toc.m_entries.push_back(_aE);
+        _toc.m_entries.push_back(move(*_aEE));
         
         data = data.subspan(tEntry_sz + 4);
     }
+
+    _toc.m_serializedBytes.assign(origData.begin(), origData.end());
+    _toc.m_isReady = true;
+
     return _toc;
 }
 

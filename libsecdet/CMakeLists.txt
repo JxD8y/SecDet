@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(src)
+add_subdirectory(Tests)
 
 find_package(zstd CONFIG REQUIRED)
 
@@ -19,7 +20,7 @@ target_link_libraries(libsecdet PUBLIC
                         
 target_include_directories(libsecdet PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-target_sources(libsecdet PUBLIC 
+target_sources(libsecdet PRIVATE 
                 "src/SeArchive.cpp"
                 "src/SeMetadata.cpp"
                 "src/SeTOC.cpp")

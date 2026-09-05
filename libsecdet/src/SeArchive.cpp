@@ -76,8 +76,6 @@ expected<SeArchive, error_code> SeArchive::LoadArchiveFile(u16string path) {
   return expected<SeArchive,error_code>(in_place, metadata, toc, path, *move(_cctx));
 }
 
-SeArchive::~SeArchive() = default;
-
 bool SeArchive::IsReady() { return this->m_isReady; }
 
 expected<void, error_code> SeArchive::AddFile(u16string filePath,
@@ -175,7 +173,7 @@ expected<void, error_code> SeArchive::MoveDirectory(u16string fileName,
 }
 
 expected<void, error_code>
-SeArchive::RegisterKey(string &key) { // Master Key does not go through a KDF we
+SeArchive::RegisterKey(string key) { // Master Key does not go through a KDF we
                                       // just use its hash value
 
   vector<unsigned char> key_hash(crypto_hash_sha256_BYTES);
@@ -253,35 +251,36 @@ expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
   auto &fs = this->m_archiveStream;
   fs.seek(0);
 
-  vector<unsigned char> metadata_bytes(SE_METADATA_SIZE);
-  if (auto _sz = fs.read(metadata_bytes.data(), SE_METADATA_SIZE); !_sz) {
-    return unexpected(_sz.error());
+  if (fs.size() > SE_METADATA_SIZE) {
+      vector<unsigned char> metadata_bytes(SE_METADATA_SIZE);
+      if (auto _sz = fs.read(metadata_bytes.data(), SE_METADATA_SIZE); !_sz) {
+          return unexpected(_sz.error());
+      }
+      auto _metadata = SeMetadata::LoadMetadataFromBytes(metadata_bytes);
+      if (!_metadata)
+          return unexpected(_metadata.error());
+      SeMetadata metadata = *_metadata;
+
+      if (metadata != this->m_metadata)
+          return unexpected(SeError::ArchiveModified);
+
+      uint64_t toc_offset = metadata.m_toc_offset;
+      if (toc_offset > fs.size())
+          return unexpected(SeError::NoTOCFound);
+      if (auto _cursor = fs.seek(toc_offset); !_cursor)
+          return unexpected(_cursor.error());
+      uint64_t toc_size = fs.size() - toc_offset;
+      vector<unsigned char> toc_bytes(toc_size);
+      if (auto _read = fs.read(toc_bytes.data(), toc_size); !_read)
+          return unexpected(_read.error());
+      auto _toc = SeTableOfContent::LoadTableOfContentFromBytes(toc_bytes);
+      if (!_toc)
+          return unexpected(SeError::NoTOCFound);
+      auto fileToc = *_toc;
+      if (fileToc != this->m_toc)
+          return unexpected(SeError::ArchiveModified);
+    fs.seek(0);
   }
-  auto _metadata = SeMetadata::LoadMetadataFromBytes(metadata_bytes);
-  if (!_metadata)
-    return unexpected(_metadata.error());
-  SeMetadata metadata = *_metadata;
-
-  if (metadata != this->m_metadata)
-    return unexpected(SeError::ArchiveModified);
-
-  uint64_t toc_offset = metadata.m_toc_offset;
-  if (toc_offset > fs.size())
-    return unexpected(SeError::NoTOCFound);
-  if (auto _cursor = fs.seek(toc_offset); !_cursor)
-    return unexpected(_cursor.error());
-  uint64_t toc_size = fs.size() - toc_offset;
-  vector<unsigned char> toc_bytes(toc_size);
-  if (auto _read = fs.read(toc_bytes.data(), toc_size); !_read)
-    return unexpected(_read.error());
-  auto _toc = SeTableOfContent::LoadTableOfContentFromBytes(toc_bytes);
-  if (!_toc)
-    return unexpected(SeError::NoTOCFound);
-  auto fileToc = *_toc;
-  if (fileToc != this->m_toc)
-    return unexpected(SeError::ArchiveModified);
-
-  fs.seek(0);
 
   // Toc verified now we can start the operations
   if (!this->IsReady()) {
@@ -428,19 +427,13 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
     }
   }
 
-  SeArchiveEntry entry =
-      SeArchiveEntry::CreateFileEntry(this->m_toc.GetFileName(
-          job.m_fileName)); // Important: the header entry will have only file
-                            // name, the TOC will contains full path!
+  SeArchiveEntry entry = SeArchiveEntry::CreateFileEntry(job.m_fileName);
+
   entry.uncompressed_size = inFileStream.size();
-  entry.attributes =
-      0; // Dont know and care how to get and set file attr for now !
+  entry.attributes = 0; // Dont know and care how to get and set file attr for now !
   entry.offset = this->m_toc.getNextAvailOffset();
   entry.fileUid = getSecureRandom();
   entry.crc32 = CRC32C_INIT;
-
-  // Before doing anything we will start writing the file header ( entry
-  // placeholder in its place )
 
   if (auto _sk = this->m_archiveStream.seek(entry.offset); !_sk) {
     // either the file is not big enough or some error in the getNextAvailOffset
@@ -452,6 +445,7 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
   }
   auto entryPlaceHolderBytes = entry.Serialize();
   auto _wentryError = m_archiveStream.write(entryPlaceHolderBytes);
+
   if (!_wentryError) {
     job.setStatus(JobStatus::Failed);
     if (callback)

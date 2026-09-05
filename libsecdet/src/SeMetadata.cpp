@@ -53,3 +53,30 @@ expected<SeMetadata,error_code> SeMetadata::LoadMetadataFromBytes(span<unsigned 
     _m.m_toc_offset = toc_offset;
     return _m;
 }
+
+void SeMetadata::GetMetadataBytes(span<unsigned char> out_data) {
+    if (out_data.size() < SE_METADATA_SIZE) {
+        return;
+    }
+
+    // Offset 0..3: MAGIC (4 bytes)
+    memcpy(out_data.data(), SE_METADATA_MAGIC, 4);
+
+    // Offset 4..5: VERSION (2 bytes)
+    auto version_bytes = bit_cast<array<unsigned char, 2>>(this->m_version);
+    copy_n(version_bytes.data(), 2, out_data.data() + 4);
+
+    // Offset 6..9: COMPRESSION LEVEL (4 bytes)
+    auto compression_bytes = bit_cast<array<unsigned char, 4>>(this->m_compression_level);
+    copy_n(compression_bytes.data(), 4, out_data.data() + 6);
+
+    // Offset 10: PRESERVE METADATA (1 byte)
+    out_data[10] = this->m_preserve_metadata ? 1 : 0;
+
+    // Offset 11..18: TOC OFFSET (8 bytes)
+    auto toc_offset_bytes = bit_cast<array<unsigned char, 8>>(this->m_toc_offset);
+    copy_n(toc_offset_bytes.data(), 8, out_data.data() + 11);
+
+    this->m_isReady = true;
+}
+
