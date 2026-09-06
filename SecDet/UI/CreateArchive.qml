@@ -235,11 +235,145 @@ Dialog {
         }
     }
 
+    Component {
+        id: createTreeDirViewComp
+
+        Column {
+            id: treeComp
+            property var nodes: []
+            property int depth: 0
+            signal itemRemoved(var itemToRemove)
+
+            spacing: 2
+            width: parent ? parent.width : 0
+
+            Repeater {
+                model: treeComp.nodes
+
+                delegate: Column {
+                    width: parent.width
+                    property bool isOpen: modelData.expanded !== undefined ? modelData.expanded : true
+
+                    Rectangle {
+                        width: parent.width
+                        height: 28
+                        radius: 4
+                        color: itemMouse.containsMouse ? Colors.bgHover : "transparent"
+
+                        Behavior on color { ColorAnimation { duration: 120 } }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: (treeComp.depth * 16) + 6
+                            anchors.rightMargin: 8
+                            spacing: 6
+
+                            // Expand/Collapse Chevron for folders
+                            Text {
+                                text: modelData.isFolder ? (isOpen ? "\ue5cf" : "\ue5cc") : " "
+                                font.family: materialIcons.name
+                                font.pixelSize: 14
+                                color: Colors.textMuted
+                                visible: modelData.isFolder
+                                Layout.preferredWidth: 16
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: parent.parent.parent.parent.isOpen = !parent.parent.parent.parent.isOpen
+                                }
+                            }
+
+                            // Folder / File Icon
+                            Text {
+                                text: modelData.isFolder ? (isOpen ? "\ue2c8" : "\ue2c7") : "\ue873"
+                                font.family: materialIcons.name
+                                font.pixelSize: 16
+                                color: modelData.isFolder ? Colors.goldPrimary : Colors.textMuted
+                                Layout.preferredWidth: 18
+                            }
+
+                            // Name
+                            Text {
+                                text: modelData.name || ""
+                                color: Colors.textMain
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 11
+                                font.weight: Font.Medium
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                            }
+
+                            // Size
+                            Text {
+                                text: modelData.realSize || "-"
+                                color: Colors.textMuted
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                Layout.preferredWidth: 60
+                                horizontalAlignment: Text.AlignRight
+                            }
+
+                            // Remove item button
+                            Rectangle {
+                                width: 20
+                                height: 20
+                                radius: 4
+                                color: removeMouse.containsMouse ? Qt.rgba(0.9, 0.3, 0.3, 0.15) : "transparent"
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "\ue5cd"
+                                    font.family: materialIcons.name
+                                    font.pixelSize: 12
+                                    color: removeMouse.containsMouse ? "#ff6b6b" : Colors.textMuted
+                                }
+
+                                MouseArea {
+                                    id: removeMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: treeComp.itemRemoved(modelData)
+                                }
+                            }
+                        }
+
+                        MouseArea {
+                            id: itemMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: {
+                                if (modelData.isFolder) {
+                                    parent.parent.isOpen = !parent.parent.isOpen;
+                                }
+                            }
+                        }
+                    }
+
+                    Loader {
+                        width: parent.width
+                        visible: modelData.isFolder && parent.isOpen
+                        active: modelData.isFolder && parent.isOpen
+                        sourceComponent: createTreeDirViewComp
+                        onLoaded: {
+                            item.nodes = modelData.children || []
+                            item.depth = treeComp.depth + 1
+                            item.itemRemoved.connect((node) => treeComp.itemRemoved(node))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // --- Main Dialog Layout with ScrollView ---
     contentItem: ScrollView {
         id: scrollArea
         clip: true
         contentWidth: availableWidth
+        ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
         ColumnLayout {
             width: scrollArea.availableWidth
@@ -381,12 +515,12 @@ Dialog {
             }
 
             // ==========================================
-            // --- Drop Area & File List View ---
+            // --- Drop Area & Hierarchical File Tree View ---
             // ==========================================
             Rectangle {
                 id: filesContainer
                 Layout.fillWidth: true
-                implicitHeight: 140
+                implicitHeight: 200
                 color: Colors.bgCard
                 radius: 10
                 border.color: fileDropArea.containsDrag ? Colors.goldPrimary : Colors.goldBorder
@@ -395,10 +529,71 @@ Dialog {
                 Behavior on border.color { ColorAnimation { duration: 150 } }
                 Behavior on border.width { NumberAnimation { duration: 150 } }
 
-                ListModel {
-                    id: droppedFilesModel
-                    ListElement { fileName: "source_bundle.zip"; filePath: "C:/Projects/source_bundle.zip"; fileSize: "1.4 MB" }
-                    ListElement { fileName: "assets_manifest.json"; filePath: "C:/Projects/assets_manifest.json"; fileSize: "12 KB" }
+                property var queuedNodes: [
+                    {
+                        name: "Source Code",
+                        isFolder: true,
+                        expanded: true,
+                        children: [
+                            { name: "source_bundle.zip", isFolder: false, filePath: "C:/Projects/source_bundle.zip", realSize: "1.4 MB" },
+                            { name: "assets_manifest.json", isFolder: false, filePath: "C:/Projects/assets_manifest.json", realSize: "12 KB" }
+                        ]
+                    },
+                    {
+                        name: "Documentation",
+                        isFolder: true,
+                        expanded: false,
+                        children: [
+                            { name: "Release_Notes.pdf", isFolder: false, filePath: "C:/Projects/Release_Notes.pdf", realSize: "210 KB" },
+                            { name: "License.txt", isFolder: false, filePath: "C:/Projects/License.txt", realSize: "4 KB" }
+                        ]
+                    }
+                ]
+
+                function countFiles(nodesList) {
+                    let total = 0;
+                    if (!nodesList) return 0;
+                    for (let i = 0; i < nodesList.length; ++i) {
+                        if (nodesList[i].isFolder) {
+                            total += countFiles(nodesList[i].children);
+                        } else {
+                            total += 1;
+                        }
+                    }
+                    return total;
+                }
+
+                function collectPaths(nodesList) {
+                    let paths = [];
+                    if (!nodesList) return paths;
+                    for (let i = 0; i < nodesList.length; ++i) {
+                        if (nodesList[i].isFolder) {
+                            paths = paths.concat(collectPaths(nodesList[i].children));
+                        } else {
+                            paths.push(nodesList[i].filePath || nodesList[i].name);
+                        }
+                    }
+                    return paths;
+                }
+
+                function removeNodeRecursive(nodesList, target) {
+                    let updated = [];
+                    for (let i = 0; i < nodesList.length; ++i) {
+                        let node = nodesList[i];
+                        if (node === target) continue;
+                        if (node.isFolder && node.children) {
+                            let newNode = Object.assign({}, node);
+                            newNode.children = removeNodeRecursive(node.children, target);
+                            updated.push(newNode);
+                        } else {
+                            updated.push(node);
+                        }
+                    }
+                    return updated;
+                }
+
+                function handleRemove(target) {
+                    queuedNodes = removeNodeRecursive(queuedNodes, target);
                 }
 
                 ColumnLayout {
@@ -426,10 +621,50 @@ Dialog {
                         }
 
                         Text {
-                            text: droppedFilesModel.count + " files queued"
+                            text: filesContainer.countFiles(filesContainer.queuedNodes) + " files queued"
                             font.family: Colors.fontFamily
                             font.pixelSize: 10
                             color: Colors.textMuted
+                        }
+                    }
+
+                    // Table Column Header
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 24
+                        color: Colors.bgElevated
+                        border.color: Colors.borderSubtle
+                        border.width: 1
+                        radius: 4
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            spacing: 6
+
+                            Text {
+                                text: "Name"
+                                color: Colors.textMuted
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                font.weight: Font.DemiBold
+                                Layout.fillWidth: true
+                            }
+
+                            Rectangle { width: 1; height: 12; color: Colors.divider }
+
+                            Text {
+                                text: "Size"
+                                color: Colors.textMuted
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                font.weight: Font.DemiBold
+                                Layout.preferredWidth: 60
+                                horizontalAlignment: Text.AlignRight
+                            }
+
+                            Item { Layout.preferredWidth: 20 }
                         }
                     }
 
@@ -440,94 +675,172 @@ Dialog {
                         color: Colors.bgInput
                         border.color: Colors.borderSubtle
                         border.width: 1
+                        clip: true
 
-                        ListView {
-                            id: filesListView
+                        ScrollView {
+                            id: treeScrollView
                             anchors.fill: parent
                             anchors.margins: 4
                             clip: true
-                            spacing: 2
-                            model: droppedFilesModel
+                            contentWidth: availableWidth
 
-                            delegate: Rectangle {
-                                width: filesListView.width
-                                height: 28
-                                radius: 4
-                                color: rowMouse.containsMouse ? Colors.bgHover : "transparent"
+                            ScrollBar.vertical: ScrollBar {
+                                parent: treeScrollView
+                                x: treeScrollView.width - width - 2
+                                y: 2
+                                height: treeScrollView.height - 4
+                                policy: ScrollBar.AsNeeded
+                                width: 5
 
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 8
-                                    anchors.rightMargin: 8
-                                    spacing: 8
+                                contentItem: Rectangle {
+                                    implicitWidth: 5
+                                    radius: 2.5
+                                    color: parent.pressed ? Colors.goldHover
+                                         : parent.hovered ? Colors.goldPrimary
+                                         : (Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.35) : Qt.rgba(0.69, 0.51, 0.12, 0.35))
 
-                                    Text {
-                                        text: "\ue873" // file icon
-                                        font.family: materialIcons.name
-                                        font.pixelSize: 14
-                                        color: Colors.textMuted
-                                    }
-
-                                    Text {
-                                        text: model.fileName
-                                        color: Colors.textMain
-                                        font.family: Colors.fontFamily
-                                        font.pixelSize: 11
-                                        Layout.fillWidth: true
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Text {
-                                        text: model.fileSize
-                                        color: Colors.textMuted
-                                        font.family: Colors.fontFamily
-                                        font.pixelSize: 10
-                                    }
-
-                                    // Remove file icon button
-                                    Item {
-                                        width: 18; height: 18
-                                        Text {
-                                            anchors.centerIn: parent
-                                            text: "\ue5cd"
-                                            font.family: materialIcons.name
-                                            font.pixelSize: 12
-                                            color: removeMouse.containsMouse ? "#ff6b6b" : Colors.textMuted
-                                        }
-                                        MouseArea {
-                                            id: removeMouse
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: droppedFilesModel.remove(index)
-                                        }
-                                    }
+                                    Behavior on color { ColorAnimation { duration: 150 } }
                                 }
 
-                                MouseArea {
-                                    id: rowMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
+                                background: Rectangle {
+                                    implicitWidth: 5
+                                    color: "transparent"
+                                }
+                            }
+
+                            Loader {
+                                id: treeLoader
+                                width: parent.width
+                                sourceComponent: createTreeDirViewComp
+                                property var currentNodes: filesContainer.queuedNodes
+                                onCurrentNodesChanged: {
+                                    if (item) {
+                                        item.nodes = currentNodes;
+                                    }
+                                }
+                                onLoaded: {
+                                    item.nodes = currentNodes;
+                                    item.depth = 0;
+                                    item.itemRemoved.connect(filesContainer.handleRemove);
                                 }
                             }
                         }
                     }
                 }
 
+                // Drop Area matching MainWindow
                 DropArea {
                     id: fileDropArea
                     anchors.fill: parent
                     onEntered: (drag) => { if (drag.hasUrls) drag.acceptProposedAction(); }
                     onDropped: (drop) => {
                         if (drop.hasUrls) {
+                            let newItems = [];
                             for (let i = 0; i < drop.urls.length; ++i) {
                                 let rawUrl = drop.urls[i].toString();
-                                let fullPath = rawUrl.replace(/^file:\/\/\/?/, "");
+                                let fullPath = rawUrl;
+                                if (fullPath.startsWith("file:///")) {
+                                    if (fullPath.length >= 10 && fullPath.charAt(9) === ':') {
+                                        fullPath = fullPath.substring(8);
+                                    } else {
+                                        fullPath = fullPath.substring(7);
+                                    }
+                                } else if (fullPath.startsWith("file://")) {
+                                    fullPath = fullPath.substring(7);
+                                }
                                 fullPath = decodeURIComponent(fullPath);
                                 let name = fullPath.split("/").pop().split("\\").pop();
-                                droppedFilesModel.append({ fileName: name, filePath: fullPath, fileSize: "100 KB" });
+                                let isDir = !name.includes(".");
+                                newItems.push({
+                                    name: name,
+                                    filePath: fullPath,
+                                    isFolder: isDir,
+                                    expanded: true,
+                                    realSize: isDir ? "-" : "128 KB",
+                                    children: []
+                                });
                             }
+                            let current = filesContainer.queuedNodes.slice();
+                            filesContainer.queuedNodes = current.concat(newItems);
                             drop.acceptProposedAction();
+                        }
+                    }
+                }
+
+                // Animated Drag Overlay matching MainWindow
+                Rectangle {
+                    id: fileDragOverlay
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    radius: 9
+                    color: Colors.isDarkMode ? Qt.rgba(0.08, 0.09, 0.12, 0.92) : Qt.rgba(0.95, 0.95, 0.97, 0.92)
+                    border.color: Colors.goldHover
+                    border.width: 1
+
+                    visible: opacity > 0
+                    opacity: fileDropArea.containsDrag ? 1.0 : 0.0
+
+                    Behavior on opacity {
+                        NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                    }
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: Math.min(parent.width - 40, 280)
+                        height: 120
+                        radius: 12
+                        color: Colors.bgSurface
+                        border.color: Colors.goldBorderHi
+                        border.width: 1
+
+                        scale: fileDropArea.containsDrag ? 1.0 : 0.88
+                        Behavior on scale {
+                            NumberAnimation { duration: 200; easing.type: Easing.OutBack }
+                        }
+
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 8
+
+                            Rectangle {
+                                Layout.alignment: Qt.AlignHCenter
+                                width: 44
+                                height: 44
+                                radius: 22
+                                color: Colors.goldLight
+                                border.color: Colors.goldPrimary
+                                border.width: 1.5
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "\ue2c6" // file_upload icon
+                                    font.family: materialIcons.name
+                                    font.pixelSize: 24
+                                    color: Colors.goldHover
+                                }
+                            }
+
+                            ColumnLayout {
+                                Layout.alignment: Qt.AlignHCenter
+                                spacing: 2
+
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "Drop files to add"
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 13
+                                    font.weight: Font.Bold
+                                    color: Colors.goldHover
+                                }
+
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "Release to queue into archive"
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 10
+                                    color: Colors.textMuted
+                                }
+                            }
                         }
                     }
                 }
@@ -700,34 +1013,118 @@ Dialog {
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                     }
+
+                                    // Remove password icon button
+                                    Item {
+                                        width: 18; height: 18
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "\ue5cd"
+                                            font.family: materialIcons.name
+                                            font.pixelSize: 12
+                                            color: removePassMouse.containsMouse ? "#ff6b6b" : Colors.textMuted
+                                        }
+                                        MouseArea {
+                                            id: removePassMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: passwords.remove(index)
+                                        }
+                                    }
                                 }
                             }
                         }
 
                     }
-                    RowLayout{
-                        TextField {
-                            id: passInput
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Rectangle {
                             Layout.fillWidth: true
-                            placeholderText: "Enter password..."
-                            placeholderTextColor: Colors.textSubtle
-                            color: Colors.textMain
-                            font.family: Colors.fontFamily
-                            font.pixelSize: 13
-                            echoMode: showPassBtn.showPassword ? TextInput.Normal : TextInput.Password
-                            background: null
-                            onAccepted: {
-                                if (passInput.text.length > 0) {
-                                    passwordDialog.acceptedPassword(passInput.text)
-                                    passwordDialog.close()
+                            height: 32
+                            radius: 6
+                            color: Colors.bgInput
+                            border.color: passInput.activeFocus ? Colors.goldBorderHi : Colors.borderSubtle
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8
+                                anchors.rightMargin: 8
+                                spacing: 6
+
+                                TextField {
+                                    id: passInput
+                                    Layout.fillWidth: true
+                                    placeholderText: "Enter archive password..."
+                                    placeholderTextColor: Colors.textSubtle
+                                    color: Colors.textMain
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 12
+                                    property bool showPassword: false
+                                    echoMode: showPassword ? TextInput.Normal : TextInput.Password
+                                    background: null
+                                    selectByMouse: true
+                                    onAccepted: {
+                                        if (passInput.text.length > 0) {
+                                            passwords.append({ password_hash: passInput.text });
+                                            passInput.text = "";
+                                        }
+                                    }
+                                }
+
+                                Item {
+                                    Layout.preferredWidth: 24
+                                    Layout.preferredHeight: 24
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: passInput.showPassword ? "\ue8f5" : "\ue8f4"
+                                        font.family: materialIcons.name
+                                        font.pixelSize: 16
+                                        color: eyeMouse.containsMouse ? Colors.goldHover : Colors.textMuted
+                                    }
+
+                                    MouseArea {
+                                        id: eyeMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: passInput.showPassword = !passInput.showPassword
+                                    }
                                 }
                             }
                         }
-                        Text{
-                            font.family: materialIcons.name
-                            font.pixelSize: 16
-                            color: Colors.goldBorder
-                            text: "add"
+
+                        Rectangle {
+                            width: 32
+                            height: 32
+                            radius: 6
+                            color: addPassMouse.containsMouse ? Colors.goldLightHover : Colors.goldLight
+                            border.color: Colors.goldBorderHi
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                font.family: materialIcons.name
+                                font.pixelSize: 18
+                                color: Colors.goldPrimary
+                                text: "\ue145" // add '+'
+                            }
+
+                            MouseArea {
+                                id: addPassMouse
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (passInput.text.length > 0) {
+                                        passwords.append({ password_hash: passInput.text });
+                                        passInput.text = "";
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -808,10 +1205,7 @@ Dialog {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            let filesList = [];
-                            for (let i = 0; i < droppedFilesModel.count; ++i) {
-                                filesList.push(droppedFilesModel.get(i).filePath);
-                            }
+                            let filesList = filesContainer.collectPaths(filesContainer.queuedNodes);
                             let archiveData = {
                                 name: archiveNameInput.text,
                                 compression: compTripleToggle.options[compTripleToggle.currentIndex],

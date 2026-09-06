@@ -14,4 +14,5 @@ qt_add_qml_module(app_ui URI UI VERSION 1.0
 					ProgressWindow.qml
 					SpeedGraph.qml
 					MultiPartProgressBar.qml
+					ArchiveSettingsPage.qml
 				)

@@ -13,5 +13,7 @@ target_link_libraries(SecDet PRIVATE
 					Qt6::Core
 					Qt6::Quick
 					Qt6::Qml)
+					
 
 target_link_libraries(SecDet PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,app_ui> app_uiplugin)
+target_link_libraries(SecDet PRIVATE libsecdet)
