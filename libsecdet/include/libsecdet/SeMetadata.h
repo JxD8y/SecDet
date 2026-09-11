@@ -25,7 +25,8 @@
 
 #define SE_METADATA_MAGIC "\x7F\x53\x44\x41" // >> 0x7F SDA
 
-#define SE_METADATA_SIZE 19u
+#define SE_SALT_SIZE 16u
+#define SE_METADATA_SIZE 37u
 
 using namespace std;
 
@@ -40,7 +41,9 @@ public:
     
     uint16_t GetCompressionLevel() noexcept {return this->m_compression_level;}
     bool GetPreserveMetadata() noexcept {return this->m_preserve_metadata;}
-    
+    [[nodiscard]] uint64_t GetTOCOffset() const noexcept { return this->m_toc_offset; }
+    [[nodiscard]] uint16_t GetPVV() const noexcept { return this->m_pvv; }
+    [[nodiscard]] span<const unsigned char> GetSalt() const noexcept { return this->m_salt; }
     
     void SetCompressionLevel(uint16_t value) { 
         if(value > 0x3 || value < 0x0)
@@ -54,22 +57,29 @@ public:
         this->m_preserve_metadata = value;
         this->m_isReady = false;
     }
+    void SetPVV(uint16_t value) noexcept {
+        this->m_pvv = value;
+        this->m_isReady = false;
+    }
+    void SetSalt(span<const unsigned char> value) noexcept;
 
     bool operator==(const SeMetadata& b) const{
         return b.m_archive_file_name == this->m_archive_file_name && 
                 b.m_compression_level == this->m_compression_level &&
                 b.m_preserve_metadata == this->m_preserve_metadata &&
                 b.m_toc_offset == this->m_toc_offset &&
-                b.m_version == this->m_version;
+                b.m_version == this->m_version &&
+                b.m_pvv == this->m_pvv &&
+                b.m_salt == this->m_salt;
     }
     
     friend class SeArchive;
 
 private:
-    SeMetadata(uint16_t version,uint16_t compressionLevel, bool preserveMetadata);
+    SeMetadata(uint16_t version, uint16_t compressionLevel, bool preserveMetadata, uint16_t pvv = 0, span<const unsigned char> salt = {});
     SeMetadata() {};
    
-    // header metadata size: 19 byte
+    // header metadata size: 37 byte
     bool m_preserve_metadata = false;
     bool m_isReady = false;
 
@@ -77,6 +87,8 @@ private:
     uint32_t m_compression_level = 0x0; //Supported Values: 0x1 , 0x2 , 0x3 
     
     uint64_t m_toc_offset = 0x0;
+    uint16_t m_pvv = 0x0;
+    array<unsigned char, SE_SALT_SIZE> m_salt{};
 
     u16string m_archive_file_name = u"";
 };

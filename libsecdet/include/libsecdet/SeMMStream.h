@@ -194,6 +194,25 @@ public:
         return bytes_to_read;
     }
 
+    std::expected<size_t, std::error_code> read_at(uint64_t offset, void* dest, size_t byte_count) {
+        if (!dest || byte_count == 0) return 0;
+
+        std::lock_guard lock(m_mutex);
+        if (m_file_handle == INVALID_HANDLE_VALUE || !m_view) {
+            return std::unexpected(std::make_error_code(std::errc::bad_file_descriptor));
+        }
+
+        if (offset >= m_file_size) {
+            return 0; // EOF reached
+        }
+
+        const size_t available = m_file_size - static_cast<size_t>(offset);
+        const size_t bytes_to_read = std::min(available, byte_count);
+
+        std::memcpy(dest, m_view + offset, bytes_to_read);
+        return bytes_to_read;
+    }
+
     std::expected<size_t, std::error_code> seek(int64_t offset, SeekFrom origin = SeekFrom::Begin) {
         std::lock_guard lock(m_mutex);
         if (m_file_handle == INVALID_HANDLE_VALUE) {
@@ -222,6 +241,12 @@ public:
 
     void close() {
         std::lock_guard lock(m_mutex);
+        close_internal();
+    }
+
+    void abort() noexcept {
+        std::lock_guard lock(m_mutex);
+        m_aborted = true;
         close_internal();
     }
 
@@ -262,6 +287,7 @@ private:
     size_t m_mapped_capacity{0};
     size_t m_cursor{0};
     size_t m_granularity{65536};
+    bool m_aborted{false};
 
     static std::error_code last_error() noexcept {
         return std::error_code(static_cast<int>(GetLastError()), std::system_category());
@@ -397,26 +423,32 @@ private:
 
     void close_internal() noexcept {
         if (m_file_handle != INVALID_HANDLE_VALUE) {
-            // 1. Flush memory view
-            if (m_view) {
-                FlushViewOfFile(m_view, 0);
+            if (!m_aborted) {
+                // 1. Flush memory view
+                if (m_view) {
+                    FlushViewOfFile(m_view, 0);
+                }
             }
 
             // 2. Release mapping handles to permit SetEndOfFile
             unmap_view();
 
-            // 3. Physically truncate the file to the exact logical size
-            LARGE_INTEGER li;
-            li.QuadPart = static_cast<LONGLONG>(m_file_size);
-            if (SetFilePointerEx(m_file_handle, li, nullptr, FILE_BEGIN)) {
-                SetEndOfFile(m_file_handle);
+            if (!m_aborted) {
+                // 3. Physically truncate the file to the exact logical size
+                LARGE_INTEGER li;
+                li.QuadPart = static_cast<LONGLONG>(m_file_size);
+                if (SetFilePointerEx(m_file_handle, li, nullptr, FILE_BEGIN)) {
+                    SetEndOfFile(m_file_handle);
+                }
+
+                FlushFileBuffers(m_file_handle);
             }
 
-            FlushFileBuffers(m_file_handle);
             CloseHandle(m_file_handle);
             m_file_handle = INVALID_HANDLE_VALUE;
             m_file_size = 0;
             m_cursor = 0;
+            m_aborted = false;
         }
     }
 

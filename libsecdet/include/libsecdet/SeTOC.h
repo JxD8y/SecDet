@@ -3,7 +3,9 @@
 #include <expected>
 #include <span>
 #include <string>
+#include <mutex>
 #include <vector>
+#include <unordered_map>
 
 #include "SeCrypto/SeCryptoUtils.h"
 #include "SeError.h"
@@ -12,6 +14,19 @@ using namespace std;
 
 #define SE_TOC_MAGIC "\x7F\x54\x4F\x43"     // 7F TOC
 #define SE_TOC_ENTRY_PAD "\x04\x03\x4B\x50" // ZIP similar delimiter
+
+// Cross-platform file attribute bit flags (stored in SeArchiveEntry::attributes)
+#define SE_ATTR_DIR      0x01u  // Entry is a directory
+#define SE_ATTR_READONLY 0x02u  // File is read-only / not writable
+#define SE_ATTR_HIDDEN   0x04u  // File is hidden
+#define SE_ATTR_SYSTEM   0x08u  // System file (Windows-specific, harmless elsewhere)
+
+enum class EntryRecoveryState {
+  NotFound,       // File entry was present in the TOC but not in the parsed entries
+  FoundOk,        // File was found and parsed but was not in the TOC
+  FoundIndexed,   // File entry was found and was present in TOC
+  FoundTruncated  // File entry was found but its length was shorter than expected length
+};
 
 class SeArchive;
 
@@ -30,7 +45,7 @@ public:
     entry.path = _path;
     entry.uncompressed_size = _uncompressed_sz;
     entry.compressed_size = _compressed_sz;
-    entry.attributes = 0;
+    entry.attributes = _attributes;
     entry.offset = _offset;
     entry.crc32 = _crc32;
     entry.fileUid = getSecureRandom();
@@ -42,7 +57,7 @@ public:
 
     SeArchiveEntry entry;
     entry.path = _path;
-    entry.attributes = 1;
+    entry.attributes = SE_ATTR_DIR;
     entry.crc32 = -1;
     entry.offset = 0;
     entry.fileUid = 0;
@@ -54,13 +69,14 @@ public:
     this->fileUid = getSecureRandom();
   }
 
-  u16string path; // Relative path
   uint64_t uncompressed_size = 0;
+  u16string path; // Relative path
   uint64_t compressed_size = 0;
   uint64_t offset = 0;
   uint64_t fileUid = 0;
   uint32_t attributes = 0;
   uint32_t crc32 = 0;
+  EntryRecoveryState recoveryState = EntryRecoveryState::FoundIndexed; // In-memory recovery placeholder
 
   vector<unsigned char> Serialize();
 
@@ -72,7 +88,10 @@ public:
     return size;
   }
 
-  bool isDirectory() const { return (attributes & 0x1) != 0; }
+  bool isDirectory() const { return (attributes & SE_ATTR_DIR) != 0; }
+  bool isReadOnly()  const { return (attributes & SE_ATTR_READONLY) != 0; }
+  bool isHidden()    const { return (attributes & SE_ATTR_HIDDEN) != 0; }
+  bool isSystem()    const { return (attributes & SE_ATTR_SYSTEM) != 0; }
   // Entries should serialize their size !
   bool operator==(const SeArchiveEntry &value) const {
     if (path == value.path && offset == value.offset && crc32 == value.crc32)
@@ -87,22 +106,19 @@ public:
 class SeTableOfContent {
 
 public:
-  static expected<SeTableOfContent, error_code>
-  LoadTableOfContentFromBytes(span<unsigned char> data);
+  static expected<SeTableOfContent, error_code> LoadTableOfContentFromBytes(span<unsigned char> data);
 
   static SeTableOfContent CreateNewTableOfContent();
 
   static u16string NormalizeArchivePath(u16string path);
   static u16string NormalizeDirectoryPath(u16string path);
   static u16string NormalizeFilePath(u16string path);
+  static u16string CanonicalizePathKey(const u16string &path);
 
-  bool CheckPath(u16string) const;       // Checks if path exists whether dir or file
   static bool IsDirectory(u16string);    // Path should end with / to count as directory
-  bool CheckParentPath(u16string) const; // Check if the parent directory exist
   static u16string GetParentDirectory(u16string path);
 
   static u16string GetFileName(u16string entryPath); // if the path is: /Folder1/MyFiles/file -> file or
-  // if its /Folder1/MyFiles/ -> MyFiles
 
   static u16string CreateFilePath(u16string parentDir, u16string fileName);
 
@@ -114,9 +130,48 @@ public:
 
   static bool isAbsPathDir(u16string path);
 
+  bool CheckPath(u16string) const;       // Checks if path exists whether dir or file
 
-  // Again , any tampering with the TOC will set the is ready to false until you
-  // serialize it again
+  bool CheckParentPath(u16string) const; // Check if the parent directory exist
+
+  void rebuildPathIndex();
+
+  SeTableOfContent(const SeTableOfContent& other) {
+      std::lock_guard<mutex> lock(other.m_mutex);
+      this->m_entries = other.m_entries;
+      this->m_pathIndex = other.m_pathIndex;
+      this->m_isReady = true;
+  }
+  
+  SeTableOfContent(SeTableOfContent&& other) noexcept {
+      std::lock_guard<mutex> lock(other.m_mutex);
+      this->m_entries = move(other.m_entries);
+      this->m_pathIndex = move(other.m_pathIndex);
+      this->m_isReady = true;
+  }
+
+  SeTableOfContent& operator=(const SeTableOfContent& other) {
+      if (this == &other) 
+          return *this;
+
+      std::scoped_lock<mutex,mutex> lock(m_mutex,other.m_mutex);
+      this->m_entries = other.m_entries;
+      this->m_pathIndex = other.m_pathIndex;
+      this->m_isReady = true;
+      return *this;
+  }
+
+  SeTableOfContent& operator=(SeTableOfContent&& other) noexcept {
+      if (this == &other)
+          return *this;
+
+      std::scoped_lock<mutex, mutex> lock(m_mutex, other.m_mutex);
+      this->m_entries = move(other.m_entries);
+      this->m_pathIndex = move(other.m_pathIndex);
+      this->m_isReady = true;
+      return *this;
+  }
+
 
   expected<void, error_code> AddEntry(SeArchiveEntry);
   bool RemoveEntry(u16string);
@@ -168,5 +223,9 @@ private:
   vector<SeArchiveEntry> m_entries; // Possible high memory usage if the archive
                                     // contains too many files
   vector<unsigned char> m_serializedBytes;
+  unordered_map<u16string, size_t> m_pathIndex;
+
+  mutable std::mutex m_mutex;
+
   bool m_isReady = false;
 };

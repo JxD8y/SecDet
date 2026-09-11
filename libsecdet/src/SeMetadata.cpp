@@ -1,12 +1,24 @@
 #include "libsecdet/SeMetadata.h"
 
-SeMetadata::SeMetadata(uint16_t version,uint16_t compressionLevel, 
-                                        bool preserveMetadata):
-                                        m_version(version),
-                                        m_compression_level(compressionLevel),
-                                        m_preserve_metadata(preserveMetadata)
-{};
+SeMetadata::SeMetadata(uint16_t version, uint16_t compressionLevel, 
+                       bool preserveMetadata, uint16_t pvv,
+                       span<const unsigned char> salt):
+    m_preserve_metadata(preserveMetadata),
+    m_version(version),
+    m_compression_level(compressionLevel),
+    m_pvv(pvv)
+{
+    if (!salt.empty() && salt.size() >= SE_SALT_SIZE) {
+        copy_n(salt.begin(), SE_SALT_SIZE, this->m_salt.begin());
+    }
+}
 
+void SeMetadata::SetSalt(span<const unsigned char> value) noexcept {
+    if (value.size() >= SE_SALT_SIZE) {
+        copy_n(value.begin(), SE_SALT_SIZE, this->m_salt.begin());
+        this->m_isReady = false;
+    }
+}
 
 expected<SeMetadata,error_code> SeMetadata::LoadMetadataFromBytes(span<unsigned char> metadata_bytes){
     // The metadata is fixed length and is at begining of the file + the TOC offset
@@ -16,6 +28,8 @@ expected<SeMetadata,error_code> SeMetadata::LoadMetadataFromBytes(span<unsigned 
     // COMPRESSION LEVEL 4
     // PRESERVE METADATA 1
     // TOC OFFSET 8
+    // PVV 2
+    // SALT 16
 
     if(metadata_bytes.size() < SE_METADATA_SIZE){
         return unexpected(make_error_code(errc::invalid_argument));
@@ -49,7 +63,14 @@ expected<SeMetadata,error_code> SeMetadata::LoadMetadataFromBytes(span<unsigned 
     copy_n(metadata_bytes.data()+11,8,toc_offset_bytes.begin());
     auto toc_offset = bit_cast<uint64_t>(toc_offset_bytes); // Consumer should check the validity of toc_offset
 
-    SeMetadata _m(version,compressionLevel,preserveMetadata);
+    array<unsigned char,2> pvv_bytes;
+    copy_n(metadata_bytes.data()+19, 2, pvv_bytes.begin());
+    auto pvv = bit_cast<uint16_t>(pvv_bytes);
+
+    array<unsigned char, SE_SALT_SIZE> salt_bytes;
+    copy_n(metadata_bytes.data()+21, SE_SALT_SIZE, salt_bytes.begin());
+
+    SeMetadata _m(version, compressionLevel, preserveMetadata, pvv, salt_bytes);
     _m.m_toc_offset = toc_offset;
     return _m;
 }
@@ -76,6 +97,13 @@ void SeMetadata::GetMetadataBytes(span<unsigned char> out_data) {
     // Offset 11..18: TOC OFFSET (8 bytes)
     auto toc_offset_bytes = bit_cast<array<unsigned char, 8>>(this->m_toc_offset);
     copy_n(toc_offset_bytes.data(), 8, out_data.data() + 11);
+
+    // Offset 19..20: PVV (2 bytes)
+    auto pvv_bytes = bit_cast<array<unsigned char, 2>>(this->m_pvv);
+    copy_n(pvv_bytes.data(), 2, out_data.data() + 19);
+
+    // Offset 21..36: SALT (16 bytes)
+    copy_n(this->m_salt.data(), SE_SALT_SIZE, out_data.data() + 21);
 
     this->m_isReady = true;
 }

@@ -98,20 +98,27 @@ expected<SeTableOfContent,error_code> SeTableOfContent::LoadTableOfContentFromBy
     span<const unsigned char> pad_span(pad, 4);
 
     while (!data.empty()) {
-        auto m_range = ranges::search(data, pad_span);
-        if (m_range.empty()) {
-            break;
-        }
-        size_t tEntry_sz = static_cast<size_t>(std::distance(data.begin(), m_range.begin()));
-        
-        // Cross-verify with entry header size if valid to prevent false positive matches
+        size_t tEntry_sz = 0;
+        bool found = false;
+
+        // Fast O(1) path using entry header size verification
         if (data.size() >= sizeof(uint32_t)) {
             uint32_t cCount = 0;
             memcpy(&cCount, data.data(), sizeof(cCount));
             size_t expectedSz = sizeof(uint32_t) + (static_cast<size_t>(cCount) * sizeof(char16_t)) + 40;
             if (expectedSz <= data.size() - 4 && memcmp(data.data() + expectedSz, pad, 4) == 0) {
                 tEntry_sz = expectedSz;
+                found = true;
             }
+        }
+
+        // Fallback: search for pad if header verification failed
+        if (!found) {
+            auto m_range = ranges::search(data, pad_span);
+            if (m_range.empty()) {
+                break;
+            }
+            tEntry_sz = static_cast<size_t>(std::distance(data.begin(), m_range.begin()));
         }
 
         span<unsigned char> tEntry_bytes = data.first(tEntry_sz);
@@ -127,6 +134,7 @@ expected<SeTableOfContent,error_code> SeTableOfContent::LoadTableOfContentFromBy
 
     _toc.m_serializedBytes.assign(origData.begin(), origData.end());
     _toc.m_isReady = true;
+    _toc.rebuildPathIndex();
 
     return _toc;
 }
@@ -254,31 +262,48 @@ bool SeTableOfContent::isAbsPathDir(u16string path) {
     return filesystem::is_directory(p, err) && !err;
 }
 
+u16string SeTableOfContent::CanonicalizePathKey(const u16string &path) {
+    if (path.empty()) {
+        return u"/";
+    }
+    u16string key;
+    key.reserve(path.size() + 1);
+    key.push_back(u'/');
+    bool lastWasSlash = true;
+    for (char16_t ch : path) {
+        if (ch == u'\\' || ch == u'/') {
+            if (!lastWasSlash) {
+                key.push_back(u'/');
+                lastWasSlash = true;
+            }
+        } else {
+            key.push_back(ch);
+            lastWasSlash = false;
+        }
+    }
+    while (key.size() > 1 && key.back() == u'/') {
+        key.pop_back();
+    }
+    return key;
+}
+
+void SeTableOfContent::rebuildPathIndex() {
+    lock_guard<mutex> lock(this->m_mutex);
+    m_pathIndex.clear();
+    m_pathIndex.reserve(m_entries.size());
+    for (size_t i = 0; i < m_entries.size(); ++i) {
+        m_pathIndex[CanonicalizePathKey(m_entries[i].path)] = i;
+    }
+}
+
 bool SeTableOfContent::CheckPath(u16string path) const {
     if (path.empty())
         return false;
-    u16string norm = NormalizeArchivePath(path);
-    if (norm == u"/")
+    u16string key = CanonicalizePathKey(path);
+    if (key == u"/")
         return true;
-    bool isDir = (norm.back() == u'/');
-    for (const auto &entry : m_entries) {
-        u16string entryNorm = NormalizeArchivePath(entry.path);
-        if (entry.isDirectory() && entryNorm.back() != u'/') {
-            entryNorm.push_back(u'/');
-        } else if (!entry.isDirectory() && entryNorm.size() > 1 && entryNorm.back() == u'/') {
-            entryNorm.pop_back();
-        }
-        if (entryNorm == norm) {
-            return true;
-        }
-        if (!isDir && entry.isDirectory() && (entryNorm == norm + u'/')) {
-            return true;
-        }
-        if (isDir && !entry.isDirectory() && (norm == entryNorm + u'/')) {
-            return true;
-        }
-    }
-    return false;
+    lock_guard<mutex> lock(this->m_mutex);
+    return m_pathIndex.find(key) != m_pathIndex.end();
 }
 
 u16string SeTableOfContent::GetParentDirectory(u16string path) {
@@ -304,15 +329,17 @@ bool SeTableOfContent::CheckParentPath(u16string path) const {
 }
 
 expected<void, error_code> SeTableOfContent::AddEntry(SeArchiveEntry entry) {
+    lock_guard<mutex> lock(this->m_mutex);
     if (entry.isDirectory()) {
         entry.path = NormalizeDirectoryPath(entry.path);
     } else {
         entry.path = NormalizeFilePath(entry.path);
     }
-    if (!any_of(this->m_entries.begin(), this->m_entries.end(), [&](const SeArchiveEntry &val) {
-        return entry == val;
-    })) {
-        this->m_entries.push_back(entry);
+    u16string key = CanonicalizePathKey(entry.path);
+    if (m_pathIndex.find(key) == m_pathIndex.end()) {
+        size_t idx = m_entries.size();
+        m_entries.push_back(std::move(entry));
+        m_pathIndex[std::move(key)] = idx;
         this->m_isReady = false;
         return {};
     } else {
@@ -321,53 +348,49 @@ expected<void, error_code> SeTableOfContent::AddEntry(SeArchiveEntry entry) {
 }
 
 bool SeTableOfContent::RemoveEntry(u16string entryPath) {
-    u16string norm = NormalizeArchivePath(entryPath);
-    bool isDir = (norm.back() == u'/');
-    auto n = erase_if(this->m_entries, [&](const SeArchiveEntry &sEntry) {
-        u16string ep = NormalizeArchivePath(sEntry.path);
-        if (sEntry.isDirectory() && ep.back() != u'/') {
-            ep.push_back(u'/');
-        } else if (!sEntry.isDirectory() && ep.size() > 1 && ep.back() == u'/') {
-            ep.pop_back();
-        }
-        if (ep == norm) return true;
-        if (!isDir && sEntry.isDirectory() && (ep == norm + u'/')) return true;
-        if (isDir && !sEntry.isDirectory() && (norm == ep + u'/')) return true;
+    lock_guard<mutex> lock(this->m_mutex);
+    u16string key = CanonicalizePathKey(entryPath);
+    auto it = m_pathIndex.find(key);
+    if (it == m_pathIndex.end()) {
         return false;
-    });
+    }
+    size_t idx = it->second;
+    if (idx < m_entries.size()) {
+        m_entries.erase(m_entries.begin() + idx);
+    }
+    m_pathIndex.clear();
+    m_pathIndex.reserve(m_entries.size());
+    for (size_t i = 0; i < m_entries.size(); ++i) {
+        m_pathIndex[CanonicalizePathKey(m_entries[i].path)] = i;
+    }
     this->m_isReady = false;
-    return n > 0;
+    return true;
 }
 
 bool SeTableOfContent::RemoveEntry(SeArchiveEntry &entry) {
-    auto n = erase_if(this->m_entries, [&](const SeArchiveEntry &val) {
-        return entry == val;
-    });
+    lock_guard<mutex> lock(this->m_mutex);
+    auto it = std::find(m_entries.begin(), m_entries.end(), entry);
+    if (it == m_entries.end()) {
+        return false;
+    }
+    m_entries.erase(it);
+    m_pathIndex.clear();
+    m_pathIndex.reserve(m_entries.size());
+    for (size_t i = 0; i < m_entries.size(); ++i) {
+        m_pathIndex[CanonicalizePathKey(m_entries[i].path)] = i;
+    }
     this->m_isReady = false;
-    return n > 0;
+    return true;
 }
 
 expected<SeArchiveEntry, error_code> SeTableOfContent::GetEntry(u16string path) {
     if (path.empty())
         return unexpected(SeError::TocPathIsInvalid);
-    u16string norm = NormalizeArchivePath(path);
-    bool isDir = (norm.back() == u'/');
-    for (auto &entry : m_entries) {
-        u16string entryNorm = NormalizeArchivePath(entry.path);
-        if (entry.isDirectory() && entryNorm.back() != u'/') {
-            entryNorm.push_back(u'/');
-        } else if (!entry.isDirectory() && entryNorm.size() > 1 && entryNorm.back() == u'/') {
-            entryNorm.pop_back();
-        }
-        if (entryNorm == norm) {
-            return entry;
-        }
-        if (!isDir && entry.isDirectory() && (entryNorm == norm + u'/')) {
-            return entry;
-        }
-        if (isDir && !entry.isDirectory() && (norm == entryNorm + u'/')) {
-            return entry;
-        }
+    u16string key = CanonicalizePathKey(path);
+    lock_guard<mutex> lock(this->m_mutex);
+    auto it = m_pathIndex.find(key);
+    if (it != m_pathIndex.end() && it->second < m_entries.size()) {
+        return m_entries[it->second];
     }
     return unexpected(SeError::TocPathIsInvalid);
 }
@@ -375,29 +398,17 @@ expected<SeArchiveEntry, error_code> SeTableOfContent::GetEntry(u16string path) 
 expected<const SeArchiveEntry, error_code> SeTableOfContent::GetEntry(u16string path) const {
     if (path.empty())
         return unexpected(SeError::TocPathIsInvalid);
-    u16string norm = NormalizeArchivePath(path);
-    bool isDir = (norm.back() == u'/');
-    for (const auto &entry : m_entries) {
-        u16string entryNorm = NormalizeArchivePath(entry.path);
-        if (entry.isDirectory() && entryNorm.back() != u'/') {
-            entryNorm.push_back(u'/');
-        } else if (!entry.isDirectory() && entryNorm.size() > 1 && entryNorm.back() == u'/') {
-            entryNorm.pop_back();
-        }
-        if (entryNorm == norm) {
-            return entry;
-        }
-        if (!isDir && entry.isDirectory() && (entryNorm == norm + u'/')) {
-            return entry;
-        }
-        if (isDir && !entry.isDirectory() && (norm == entryNorm + u'/')) {
-            return entry;
-        }
+    u16string key = CanonicalizePathKey(path);
+    lock_guard<mutex> lock(this->m_mutex);
+    auto it = m_pathIndex.find(key);
+    if (it != m_pathIndex.end() && it->second < m_entries.size()) {
+        return m_entries[it->second];
     }
     return unexpected(SeError::TocPathIsInvalid);
 }
 
 vector<SeArchiveEntry> SeTableOfContent::GetEntriesFollowing(SeArchiveEntry &entry) {
+    lock_guard<mutex> lock(this->m_mutex);
     vector<SeArchiveEntry> following;
     for (const auto &e : m_entries) {
         if (!e.isDirectory() && e.offset > entry.offset) {
@@ -408,6 +419,7 @@ vector<SeArchiveEntry> SeTableOfContent::GetEntriesFollowing(SeArchiveEntry &ent
 }
 
 vector<SeArchiveEntry> SeTableOfContent::GetDirectoryFileEntries(SeArchiveEntry &dirEntry, bool recursive) {
+    lock_guard<mutex> lock(this->m_mutex);
     vector<SeArchiveEntry> result;
     u16string parentPath = NormalizeDirectoryPath(dirEntry.path);
     for (const auto &e : m_entries) {
@@ -448,6 +460,7 @@ size_t SeTableOfContent::getNextAvailOffset() {
 }
 
 expected<size_t, error_code> SeTableOfContent::Serialize() {
+    lock_guard<mutex> lock(this->m_mutex);
     m_serializedBytes.clear();
     const unsigned char magic[] = SE_TOC_MAGIC;
     m_serializedBytes.insert(m_serializedBytes.end(), magic, magic + 4);
@@ -462,6 +475,7 @@ expected<size_t, error_code> SeTableOfContent::Serialize() {
 }
 
 vector<unsigned char> SeTableOfContent::SerializeToBytes() const {
+    lock_guard<mutex> lock(this->m_mutex);
     if (m_isReady && !m_serializedBytes.empty()) {
         return m_serializedBytes;
     }

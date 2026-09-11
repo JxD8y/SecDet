@@ -1,3 +1,4 @@
+#pragma once
 /*
     Hardware accelarated CRC32 impl that uses Castagnoli polynomial 0x82F63B78
 */

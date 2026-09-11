@@ -21,6 +21,7 @@ enum class SeError{
     KeyLimitReached,
     KeyAlreadyExists,
     KeyDoesNotExist,
+    InvalidKey,
     ArchiveModified,
     OperationCanceled,
     ZstdInitiationFail,
@@ -62,6 +63,7 @@ struct SeErrorCategory: std::error_category{
             case SeError::JobNotFound: return "Requested job was not found";
             case SeError::KeyAlreadyExists: return "Key already registered in the storage";
             case SeError::KeyDoesNotExist: return "No key was found in storage";
+            case SeError::InvalidKey: return "The provided encryption key is invalid";
             case SeError::KeyLimitReached: return "Key count limit reached";
             case SeError::ConflictingJobFound: return "Found conflicting jobs";
             case SeError::ArchiveModified: return "Conflict between file TOC and internal TOC";

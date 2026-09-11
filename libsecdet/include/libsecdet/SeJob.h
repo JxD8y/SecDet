@@ -1,79 +1,71 @@
 #pragma once
-#include <string>
 #include <random>
+#include <string>
 
 using namespace std;
 
 class SeArchive;
 
-
-enum class JobType{
-    None = 0,
-    AddFile,
-    RemoveFile,
-    CreateArchiveDirectory,
-    DeleteDirectory,
-    MoveArchiveFile,
-    MoveDirectory,
-    CompressionLevelChange,
-    TestFile,
-    ExtractFile,
-    ExtractDirectory
+enum class JobType {
+  None = 0,
+  AddFile,
+  RemoveFile,
+  CreateArchiveDirectory,
+  DeleteDirectory,
+  MoveArchiveFile,
+  MoveDirectory,
+  CompressionLevelChange,
+  TestFile,
+  ExtractFile,
+  ExtractDirectory,
+  AddDirectory
 };
 
-enum class JobStatus{
-    Idle,
-    Pending,
-    Running,
-    Finished,
-    Aborted,
-    Failed
-};
+enum class JobStatus { Idle, Pending, Running, Finished, Aborted, Failed, Paused };
 
-
-inline int getRandom(int min,int max){
-    thread_local mt19937 gen(random_device{}());
-    uniform_int_distribution<int> distrib(min,max);
-    return distrib(gen);
+inline int getRandom(int min, int max) {
+  thread_local mt19937 gen(random_device{}());
+  uniform_int_distribution<int> distrib(min, max);
+  return distrib(gen);
 }
 
-class SeJob{
-    
-public: 
-    SeJob() = delete;
-    
-    SeJob(JobType type,u16string fileName,u16string filePath): m_type(type) , m_fileName(fileName) , m_filePath(filePath){
-    }
+class SeJob {
 
-    JobStatus GetStatus() const noexcept {return this->m_status;};
+public:
+  SeJob() = delete;
 
-    int GetId() const noexcept {return this->m_id;}
+  SeJob(JobType type, u16string fileName, u16string filePath)
+      : m_type(type), m_fileName(fileName), m_filePath(filePath) {}
 
-    bool operator==(const SeJob& value){
-        return value.m_id == this->m_id;
-    }
-    
-    u16string GetFileName() const{
-        return this->m_fileName;
-    }
-    
-    void SetFileName(u16string nwFile) {
-        this->m_fileName = nwFile;
-    }
+  JobStatus GetStatus() const noexcept { return this->m_status; };
+  JobStatus getStatus() const noexcept { return this->m_status; };
 
-    uint64_t processedBytes = 0;
-    uint64_t totalBytes = 0;
-    uint32_t percentage = 0;
-    
-    friend class SeArchive;
+  int GetId() const noexcept { return this->m_id; }
+
+  bool operator==(const SeJob &value) { return value.m_id == this->m_id; }
+
+  u16string GetFileName() const { return this->m_fileName; }
+
+  void SetFileName(u16string nwFile) { this->m_fileName = nwFile; }
+
+  JobType GetJobType() const noexcept { return this->m_type; }
+
+  u16string GetFilePath() const { return this->m_filePath; }
+  uint64_t processedBytes = 0;
+  uint64_t compressedBytes = 0;
+  uint64_t totalBytes = 0;
+  uint32_t percentage = 0;
+  uint32_t crc32 = 0;
+
+  friend class SeArchive;
 
 protected:
-    void setStatus(JobStatus status) noexcept { this->m_status = status; }
+  void setStatus(JobStatus status) noexcept { this->m_status = status; }
 
 private:
-    int m_id = 0;
-    JobType m_type = JobType::None;
-    u16string m_fileName;
-    u16string m_filePath;
-    JobStatus m_status = JobStatus::Idle;
+  int m_id = 0;
+  JobType m_type = JobType::None;
+  u16string m_fileName;
+  u16string m_filePath;
+  JobStatus m_status = JobStatus::Idle;
 };

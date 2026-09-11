@@ -1,23 +1,126 @@
 #include "libsecdet/SeArchive.h"
+#include "libsecdet/SeFileAttributes.h"
+#include <unordered_set>
+#include <unordered_map>
+#include <algorithm>
 
-expected<SeArchive, error_code> SeArchive::CreateArchive(uint16_t version, uint16_t compressionLevel,
-                         bool preserveMetadata, u16string archivePath) {
-  // Supported versions: 1
-  if (version > 1)
+namespace {
+    inline bool arePathsEqual(const std::u16string &p1, const std::u16string &p2) {
+      return SeTableOfContent::NormalizeArchivePath(p1) ==
+             SeTableOfContent::NormalizeArchivePath(p2);
+    }
+
+    inline std::string toHex(uint64_t val) {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%llX", static_cast<unsigned long long>(val));
+      return std::string(buf);
+    }
+
+    bool validateAndParseLocalEntry(std::span<const unsigned char> bytes,
+                                    uint64_t expectedOffset,
+                                    SeArchiveEntry &outEntry,
+                                    size_t &outHeaderSize) {
+      if (bytes.size() < 44) {
+        return false;
+      }
+
+      uint32_t cCount = 0;
+      std::memcpy(&cCount, bytes.data(), sizeof(cCount));
+      if (cCount == 0 || cCount > 4096) {
+        return false;
+      }
+
+      size_t pathBytes = static_cast<size_t>(cCount) * sizeof(char16_t);
+      size_t expectedHeaderSize = sizeof(uint32_t) + pathBytes + 40;
+      if (expectedHeaderSize > bytes.size()) {
+        return false;
+      }
+
+      const char16_t *chars = reinterpret_cast<const char16_t *>(bytes.data() + sizeof(uint32_t));
+      // In SecDet, archive paths must start with '/' or '\'
+      if (chars[0] != u'/' && chars[0] != u'\\') {
+        return false;
+      }
+
+      for (size_t i = 0; i < cCount; ++i) {
+        char16_t ch = chars[i];
+        if (ch == u'\0' || (ch < 32 && ch != u'\t')) {
+          return false;
+        }
+        if (ch == u'<' || ch == u'>' || ch == u'"' || ch == u'|' || ch == u'*' || ch == u'?') {
+          return false;
+        }
+      }
+
+      auto entryRes = SeArchiveEntry::CreateFromBytes(
+          std::span<unsigned char>(const_cast<unsigned char *>(bytes.data()), expectedHeaderSize));
+      if (!entryRes) {
+        return false;
+      }
+
+      SeArchiveEntry entry = *entryRes;
+
+      constexpr uint32_t knownAttrs = SE_ATTR_DIR | SE_ATTR_READONLY | SE_ATTR_HIDDEN | SE_ATTR_SYSTEM;
+      if ((entry.attributes & ~knownAttrs) != 0) {
+        return false;
+      }
+
+      if (entry.isDirectory()) {
+        if (entry.compressed_size != 0 || entry.uncompressed_size != 0) {
+          return false;
+        }
+      }
+
+      outEntry = std::move(entry);
+      outHeaderSize = expectedHeaderSize;
+      return true;
+    }
+} // namespace
+
+expected<SeArchive, error_code> SeArchive::CreateArchive(uint16_t version, uint16_t compressionLevel, bool preserveMetadata, u16string archivePath, string password) {
+    // Supported versions: 1
+    if (version > 1)
     return unexpected(SeError::VersionNotSupported);
-  if (compressionLevel > 0x3 || compressionLevel < 0x1)
+    if (compressionLevel > 0x3 || compressionLevel < 0x1)
     return unexpected(make_error_code(errc::invalid_argument));
-  if (!SeTableOfContent::verifyAbsPath(archivePath))
+    if (!SeTableOfContent::verifyAbsPath(archivePath))
     return unexpected(make_error_code(errc::no_such_file_or_directory));
+    if (password.empty())
+    return unexpected(SeError::CRYPTOStringWasEmpty);
 
-  auto _cctx = AesGcmContextProvider::CreateContext();
+    array<unsigned char, SE_SALT_SIZE> salt{};
+    generateSalt(salt);
 
-  if (!_cctx)
-    return unexpected(_cctx.error());
+    vector<unsigned char> master_key(AesGcmContextProvider::KEY_BYTES);
+    auto exp = deriveMasterKeyArgon2id(password, salt, master_key);
+    if (!exp) {
+      sodium_memzero(master_key.data(), master_key.size());
+      return unexpected(exp.error());
+    }
 
-  return expected<SeArchive,error_code>(in_place, SeMetadata(version, compressionLevel, preserveMetadata),
-      SeTableOfContent::CreateNewTableOfContent(), archivePath,
-      *move(_cctx));
+    auto pvvExp = calculatePVV(master_key);
+    if (!pvvExp) {
+      sodium_memzero(master_key.data(), master_key.size());
+      return unexpected(pvvExp.error());
+    }
+    uint16_t pvv = *pvvExp;
+
+    auto _cctx = AesGcmContextProvider::CreateContext();
+    if (!_cctx) {
+      sodium_memzero(master_key.data(), master_key.size());
+      return unexpected(_cctx.error());
+    }
+
+    auto setKeyRes = _cctx->SetMasterKey(master_key);
+    sodium_memzero(master_key.data(), master_key.size());
+    if (!setKeyRes)
+      return unexpected(setKeyRes.error());
+
+    SeArchive arc(SeMetadata(version, compressionLevel, preserveMetadata, pvv, salt),
+        SeTableOfContent::CreateNewTableOfContent(), archivePath,
+        *move(_cctx));
+
+    return arc;
 }
 
 expected<SeArchive, error_code> SeArchive::LoadArchiveFile(u16string path) {
@@ -29,7 +132,7 @@ expected<SeArchive, error_code> SeArchive::LoadArchiveFile(u16string path) {
   if (auto _fs = fs.open(path); !_fs)
     return unexpected(_fs.error());
 
-  fs.seek(0);
+  (void)fs.seek(0);
 
   vector<unsigned char> metadata_bytes(SE_METADATA_SIZE);
 
@@ -76,10 +179,317 @@ expected<SeArchive, error_code> SeArchive::LoadArchiveFile(u16string path) {
   return expected<SeArchive,error_code>(in_place, metadata, toc, path, *move(_cctx));
 }
 
+expected<SeArchive, error_code> SeArchive::RecoverArchiveSync(u16string path, stop_token stopToken) {
+  if (!SeTableOfContent::verifyAbsPath(path))
+    return unexpected(make_error_code(errc::no_such_file_or_directory));
+
+  MappedFileStream fs;
+  if (auto _fs = fs.open(path, FileMode::OpenExisting); !_fs)
+    return unexpected(_fs.error());
+
+  size_t fileSize = fs.size();
+  const unsigned char *dataPtr = reinterpret_cast<const unsigned char *>(fs.data());
+  if (!dataPtr && fileSize > 0)
+    return unexpected(make_error_code(errc::io_error));
+
+  string metaHealth;
+  string tocHealth;
+
+  SeMetadata metadata(1, 1, true, 0, {});
+  bool metadataValid = false;
+
+  // 1. Recover Metadata
+  if (fileSize >= SE_METADATA_SIZE) {
+    auto _meta = SeMetadata::LoadMetadataFromBytes(
+        std::span<unsigned char>(const_cast<unsigned char *>(dataPtr), SE_METADATA_SIZE));
+    if (_meta) {
+      metadata = *_meta;
+      metadataValid = true;
+      metaHealth = "Healthy (Valid Header): Magic SDA, Version " + std::to_string(metadata.m_version) +
+                   ", Compression Level " + std::to_string(metadata.m_compression_level) +
+                   ", Salt & PVV Verified";
+    }
+  }
+
+  if (!metadataValid) {
+    // If the metadata is so damaged that Salt or PVV are unreadable, refuse to open the archive
+    return unexpected(SeError::RequiredFieldMissing);
+  }
+
+  // 2. Deep search the file body for local file entry headers
+  vector<SeArchiveEntry> parsedBodyEntries;
+  size_t cur = SE_METADATA_SIZE;
+  size_t detectedTocOffset = (size_t)-1;
+  const unsigned char pad[] = {0x04, 0x03, 0x4B, 0x50};
+
+  while (cur < fileSize) {
+    if (stopToken.stop_requested())
+      return unexpected(SeError::OperationCanceled);
+
+    // Stop body scan if we reach TOC magic
+    if (cur + 4 <= fileSize && memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) {
+      detectedTocOffset = cur;
+      break;
+    }
+
+    if (metadataValid && cur == metadata.m_toc_offset && cur + 4 <= fileSize &&
+        memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) {
+      detectedTocOffset = cur;
+      break;
+    }
+
+    bool foundEntry = false;
+    SeArchiveEntry candEntry;
+    size_t candHeaderSize = 0;
+    size_t entryStartOffset = cur;
+    size_t payloadStartOffset = cur;
+
+    // Check if SE_TOC_ENTRY_PAD precedes the entry header
+    if (cur + 4 <= fileSize && memcmp(dataPtr + cur, pad, 4) == 0) {
+      std::span<const unsigned char> rem(dataPtr + cur + 4, fileSize - (cur + 4));
+      if (validateAndParseLocalEntry(rem, cur + 4, candEntry, candHeaderSize)) {
+        foundEntry = true;
+        entryStartOffset = cur;
+        payloadStartOffset = cur + 4 + candHeaderSize;
+        candEntry.offset = cur;
+      }
+    }
+
+    // Check if entry header starts directly at cur
+    if (!foundEntry && cur + 44 <= fileSize) {
+      std::span<const unsigned char> rem(dataPtr + cur, fileSize - cur);
+      if (validateAndParseLocalEntry(rem, cur, candEntry, candHeaderSize)) {
+        foundEntry = true;
+        entryStartOffset = cur;
+        payloadStartOffset = cur + candHeaderSize;
+        candEntry.offset = cur;
+      }
+    }
+
+    if (foundEntry) {
+      size_t expectedEnd = payloadStartOffset + candEntry.compressed_size;
+      // Skip optional trailing pad if present
+      if (expectedEnd + 4 <= fileSize && memcmp(dataPtr + expectedEnd, pad, 4) == 0) {
+        expectedEnd += 4;
+      }
+
+      if (payloadStartOffset + candEntry.compressed_size > fileSize) {
+        candEntry.recoveryState = EntryRecoveryState::FoundTruncated;
+        parsedBodyEntries.push_back(std::move(candEntry));
+        break;
+      } else {
+        parsedBodyEntries.push_back(std::move(candEntry));
+        cur = expectedEnd;
+        continue;
+      }
+    }
+
+    // Fast-forward to next potential boundary
+    cur++;
+    while (cur + 4 <= fileSize) {
+      if (memcmp(dataPtr + cur, pad, 4) == 0 ||
+          memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) {
+        break;
+      }
+      if (cur + 6 <= fileSize && dataPtr[cur + 4] == 0x2F && dataPtr[cur + 5] == 0x00) {
+        break;
+      }
+      cur++;
+    }
+  }
+
+  // 3. Parse TOC (how much of it was present)
+  size_t effectiveTocOffset = (size_t)-1;
+  if (detectedTocOffset != (size_t)-1) {
+    effectiveTocOffset = detectedTocOffset;
+  } else if (metadataValid && metadata.m_toc_offset >= SE_METADATA_SIZE && metadata.m_toc_offset < fileSize) {
+    effectiveTocOffset = metadata.m_toc_offset;
+  }
+
+  vector<SeArchiveEntry> tocEntries;
+  bool tocHeaderValid = false;
+  bool tocFullyRead = false;
+  size_t tocEntriesParsed = 0;
+
+  if (effectiveTocOffset < fileSize) {
+    std::span<const unsigned char> tocSpan(dataPtr + effectiveTocOffset, fileSize - effectiveTocOffset);
+    if (tocSpan.size() >= 4 && memcmp(tocSpan.data(), SE_TOC_MAGIC, 4) == 0) {
+      tocHeaderValid = true;
+      tocSpan = tocSpan.subspan(4);
+
+      std::span<const unsigned char> padSpan(pad, 4);
+
+      while (!tocSpan.empty()) {
+        if (stopToken.stop_requested())
+          return unexpected(SeError::OperationCanceled);
+
+        size_t tEntry_sz = 0;
+        bool found = false;
+
+        if (tocSpan.size() >= sizeof(uint32_t)) {
+          uint32_t cCount = 0;
+          memcpy(&cCount, tocSpan.data(), sizeof(cCount));
+          size_t expectedSz = sizeof(uint32_t) + (static_cast<size_t>(cCount) * sizeof(char16_t)) + 40;
+          if (expectedSz <= tocSpan.size() - 4 && memcmp(tocSpan.data() + expectedSz, pad, 4) == 0) {
+            tEntry_sz = expectedSz;
+            found = true;
+          }
+        }
+
+        if (!found) {
+          auto m_range = ranges::search(tocSpan, padSpan);
+          if (m_range.empty()) {
+            break;
+          }
+          tEntry_sz = static_cast<size_t>(std::distance(tocSpan.begin(), m_range.begin()));
+        }
+
+        std::span<const unsigned char> tEntry_bytes = tocSpan.first(tEntry_sz);
+        auto _aEE = SeArchiveEntry::CreateFromBytes(
+            std::span<unsigned char>(const_cast<unsigned char *>(tEntry_bytes.data()), tEntry_sz));
+        if (!_aEE) {
+          break;
+        }
+
+        tocEntries.push_back(std::move(*_aEE));
+        tocEntriesParsed++;
+
+        if (tEntry_sz + 4 <= tocSpan.size()) {
+          tocSpan = tocSpan.subspan(tEntry_sz + 4);
+        } else {
+          tocSpan = tocSpan.subspan(tocSpan.size());
+        }
+      }
+
+      if (tocSpan.empty()) {
+        tocFullyRead = true;
+      }
+    }
+  }
+
+  // 4. Reconcile entries into a new virtual TOC
+  SeTableOfContent virtualToc = SeTableOfContent::CreateNewTableOfContent();
+
+  unordered_map<u16string, SeArchiveEntry> tocMap;
+  for (auto &te : tocEntries) {
+    tocMap[SeTableOfContent::CanonicalizePathKey(te.path)] = te;
+  }
+
+  unordered_set<u16string> bodyPaths;
+  size_t foundIndexedCount = 0;
+  size_t foundOkCount = 0;
+  size_t foundTruncatedCount = 0;
+  size_t notFoundCount = 0;
+
+  for (auto &be : parsedBodyEntries) {
+    u16string key = SeTableOfContent::CanonicalizePathKey(be.path);
+    bodyPaths.insert(key);
+
+    if (be.recoveryState == EntryRecoveryState::FoundTruncated) {
+      foundTruncatedCount++;
+    } else {
+      if (tocMap.find(key) != tocMap.end()) {
+        be.recoveryState = EntryRecoveryState::FoundIndexed;
+        foundIndexedCount++;
+      } else {
+        be.recoveryState = EntryRecoveryState::FoundOk;
+        foundOkCount++;
+      }
+    }
+
+    // Auto-create parent directory entries if missing
+    u16string parentDir = SeTableOfContent::GetParentDirectory(be.path);
+    while (!parentDir.empty() && parentDir != u"/") {
+      if (!virtualToc.CheckPath(parentDir)) {
+        SeArchiveEntry dirEntry = SeArchiveEntry::CreateDirectoryEntry(parentDir);
+        dirEntry.recoveryState = EntryRecoveryState::FoundIndexed;
+        (void)virtualToc.AddEntry(dirEntry);
+      }
+      u16string nextParent = SeTableOfContent::GetParentDirectory(parentDir);
+      if (nextParent == parentDir) break;
+      parentDir = nextParent;
+    }
+
+    (void)virtualToc.AddEntry(be);
+  }
+
+  // Process entries present in TOC but NOT found in parsed body entries
+  for (auto &[key, te] : tocMap) {
+    if (bodyPaths.find(key) == bodyPaths.end()) {
+      if (te.isDirectory()) {
+        if (!virtualToc.CheckPath(te.path)) {
+          te.recoveryState = EntryRecoveryState::FoundIndexed;
+          (void)virtualToc.AddEntry(te);
+        }
+      } else {
+        te.recoveryState = EntryRecoveryState::NotFound;
+        notFoundCount++;
+        (void)virtualToc.AddEntry(te);
+      }
+    }
+  }
+
+  // 5. Generate TOC health status string
+  if (tocHeaderValid && tocFullyRead && notFoundCount == 0 && foundOkCount == 0 && foundTruncatedCount == 0) {
+    tocHealth = "Healthy (Valid TOC): All " + std::to_string(tocEntriesParsed) + " entries fully indexed";
+  } else if (!tocHeaderValid) {
+    if (effectiveTocOffset >= fileSize) {
+      tocHealth = "Damaged: TOC offset (0x" + toHex(effectiveTocOffset) + ") out of bounds; " +
+                  std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
+    } else {
+      tocHealth = "Damaged: Invalid TOC signature at offset 0x" + toHex(effectiveTocOffset) + "; " +
+                  std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
+    }
+  } else if (!tocFullyRead || foundTruncatedCount > 0 || foundOkCount > 0 || notFoundCount > 0) {
+    tocHealth = "Truncated / Damaged: EOF cut off at 0x" + toHex(fileSize) + " • " +
+                std::to_string(parsedBodyEntries.size()) + " items reconstructed (" +
+                std::to_string(foundIndexedCount) + " indexed, " +
+                std::to_string(foundOkCount) + " unindexed, " +
+                std::to_string(foundTruncatedCount) + " truncated, " +
+                std::to_string(notFoundCount) + " missing)";
+  } else {
+    tocHealth = "Recovered: " + std::to_string(parsedBodyEntries.size()) + " items reconstructed from body";
+  }
+
+  // 6. Build and return recovered SeArchive
+  auto _cctx = AesGcmContextProvider::CreateContext();
+  if (!_cctx)
+    return unexpected(_cctx.error());
+
+  metadata.m_toc_offset = virtualToc.getNextAvailOffset();
+
+  SeArchive archive(metadata, std::move(virtualToc), path, *move(_cctx));
+  archive.m_metadataHealth = std::move(metaHealth);
+  archive.m_tocHealth = std::move(tocHealth);
+
+  return archive;
+}
+
+expected<SeArchive, error_code> SeArchive::RecoverArchiveFile(u16string path) {
+  return RecoverArchiveSync(path);
+}
+
+SeTaskHandle<SeArchive> SeArchive::RecoverArchiveAsync(u16string path) {
+  auto promise = std::make_shared<std::promise<expected<SeArchive, error_code>>>();
+  auto future = promise->get_future().share();
+
+  std::jthread worker([path = std::move(path), promise](std::stop_token stopToken) {
+    try {
+      auto res = RecoverArchiveSync(path, stopToken);
+      promise->set_value(std::move(res));
+    } catch (...) {
+      promise->set_exception(std::current_exception());
+    }
+  });
+
+  return SeTaskHandle<SeArchive>(std::move(worker), std::move(future));
+}
+
 bool SeArchive::IsReady() { return this->m_isReady; }
 
 expected<void, error_code> SeArchive::AddFile(u16string filePath,
-                                              u16string fileName) {
+                                              u16string fileName,
+                                              uint64_t fileSize) {
   filePath = SeTableOfContent::NormalizeFilePath(filePath);
   if (!this->checkParentPath(filePath))
     return unexpected(SeError::TocPathIsInvalid);
@@ -88,6 +498,15 @@ expected<void, error_code> SeArchive::AddFile(u16string filePath,
     return unexpected(make_error_code(errc::no_such_file_or_directory));
 
   auto job = SeJob(JobType::AddFile, filePath, fileName);
+  if (fileSize > 0) {
+    job.totalBytes = fileSize;
+  } else {
+    error_code ec;
+    uint64_t fsz = filesystem::file_size(filesystem::path(fileName), ec);
+    if (!ec) {
+      job.totalBytes = fsz;
+    }
+  }
 
   if (!this->addJob(job))
     return unexpected(SeError::CannotCreateJob);
@@ -97,7 +516,15 @@ expected<void, error_code> SeArchive::AddFile(u16string filePath,
 
 expected<void, error_code> SeArchive::RemoveFile(u16string fileName) {
   fileName = SeTableOfContent::NormalizeFilePath(fileName);
-  if (!this->m_toc.CheckPath(fileName))
+  bool existsInToc = this->m_toc.CheckPath(fileName);
+  bool existsInJobs = false;
+  for (const auto &j : this->m_jobs) {
+    if (j.m_type == JobType::AddFile && arePathsEqual(j.m_fileName, fileName)) {
+      existsInJobs = true;
+      break;
+    }
+  }
+  if (!existsInToc && !existsInJobs)
     return unexpected(SeError::TocPathIsInvalid);
 
   auto job = SeJob(JobType::RemoveFile, fileName, u"");
@@ -124,8 +551,9 @@ expected<void, error_code> SeArchive::CreateArchiveDirectory(u16string fileName)
   return {};
 }
 
-expected<void, error_code> SeArchive::AddDirectory(u16string filePath,
-                                                   u16string fileName) {
+expected<vector<SeArchive::DiscoveredItem>, error_code>
+SeArchive::AddDirectoryWithDetails(u16string filePath, u16string fileName,
+                                   IndexProgressCallback progressCallback) {
   u16string diskDirPath;
   u16string archiveParentPath;
 
@@ -167,10 +595,20 @@ expected<void, error_code> SeArchive::AddDirectory(u16string filePath,
     baseArchiveDir = archiveParentPath;
   }
 
+  vector<DiscoveredItem> discoveredItems;
+  size_t dirCount = 0;
+  size_t fileCount = 0;
+  uint64_t totalBytes = 0;
+
   if (baseArchiveDir != u"/" && !this->checkPathExists(baseArchiveDir)) {
-    auto res = this->CreateArchiveDirectory(baseArchiveDir);
-    if (!res)
-      return unexpected(res.error());
+    DiscoveredItem rootItem;
+    rootItem.diskPath = diskPath.u16string();
+    rootItem.archiveRelPath = baseArchiveDir;
+    rootItem.name = dirName;
+    rootItem.isDirectory = true;
+    rootItem.size = 0;
+    discoveredItems.push_back(std::move(rootItem));
+    dirCount++;
   }
 
   error_code ec;
@@ -179,6 +617,14 @@ expected<void, error_code> SeArchive::AddDirectory(u16string filePath,
   if (ec)
     return unexpected(ec);
 
+  // Compute base prefix length for fast in-memory relative path slicing
+  // Completely avoids MSVC std::filesystem::relative which invokes weakly_canonical and Win32 I/O
+  std::u16string diskU16 = diskPath.u16string();
+  size_t baseLen = diskU16.size();
+  while (baseLen > 0 && (diskU16[baseLen - 1] == u'/' || diskU16[baseLen - 1] == u'\\')) {
+    baseLen--;
+  }
+
   filesystem::recursive_directory_iterator endIt;
   while (it != endIt) {
     const auto &entry = *it;
@@ -186,26 +632,52 @@ expected<void, error_code> SeArchive::AddDirectory(u16string filePath,
     bool isDir = entry.is_directory(statusEc);
     bool isReg = !isDir && entry.is_regular_file(statusEc);
 
-    if (isDir) {
-      filesystem::path rel = filesystem::relative(entry.path(), diskPath, ec);
-      if (!ec) {
-        u16string subArchiveDir = SeTableOfContent::CreateDirPath(
-            baseArchiveDir, rel.generic_u16string());
-        if (!this->checkPathExists(subArchiveDir)) {
-          auto res = this->CreateArchiveDirectory(subArchiveDir);
-          if (!res)
-            return unexpected(res.error());
-        }
+    std::u16string entryU16 = entry.path().u16string();
+    std::u16string relU16;
+    if (entryU16.size() > baseLen) {
+      size_t start = baseLen;
+      if (entryU16[start] == u'/' || entryU16[start] == u'\\') {
+        start++;
       }
-    } else if (isReg) {
-      filesystem::path rel = filesystem::relative(entry.path(), diskPath, ec);
-      if (!ec) {
-        u16string fileArchivePath = SeTableOfContent::CreateFilePath(
-            baseArchiveDir, rel.generic_u16string());
-        u16string diskFileAbsPath = entry.path().u16string();
-        auto res = this->AddFile(fileArchivePath, diskFileAbsPath);
-        if (!res)
-          return unexpected(res.error());
+      relU16 = entryU16.substr(start);
+      for (auto &ch : relU16) {
+        if (ch == u'\\') ch = u'/';
+      }
+    }
+
+    if (!relU16.empty()) {
+      if (isDir) {
+        u16string subArchiveDir =
+            SeTableOfContent::CreateDirPath(baseArchiveDir, relU16);
+        DiscoveredItem dirItem;
+        dirItem.diskPath = entryU16;
+        dirItem.archiveRelPath = subArchiveDir;
+        dirItem.name = entry.path().filename().u16string();
+        dirItem.isDirectory = true;
+        dirItem.size = 0;
+        discoveredItems.push_back(std::move(dirItem));
+        dirCount++;
+      } else if (isReg) {
+        u16string fileArchivePath =
+            SeTableOfContent::CreateFilePath(baseArchiveDir, relU16);
+
+        error_code szEc;
+        uint64_t fileSize = entry.file_size(szEc);
+        uint64_t actualSize = szEc ? 0 : fileSize;
+        totalBytes += actualSize;
+
+        DiscoveredItem fileItem;
+        fileItem.diskPath = entryU16;
+        fileItem.archiveRelPath = fileArchivePath;
+        fileItem.name = entry.path().filename().u16string();
+        fileItem.isDirectory = false;
+        fileItem.size = actualSize;
+        discoveredItems.push_back(std::move(fileItem));
+        fileCount++;
+      }
+
+      if (progressCallback && (((dirCount + fileCount) & 0xFF) == 0)) {
+        progressCallback(fileCount, dirCount);
       }
     }
 
@@ -215,12 +687,44 @@ expected<void, error_code> SeArchive::AddDirectory(u16string filePath,
     }
   }
 
+  if (progressCallback) {
+    progressCallback(fileCount, dirCount);
+  }
+
+  // Create exactly one job for the entire directory addition
+  auto job = SeJob(JobType::AddDirectory, baseArchiveDir, diskDirPath);
+  job.totalBytes = totalBytes;
+
+  if (!this->addJob(job))
+    return unexpected(SeError::CannotCreateJob);
+
+  return discoveredItems;
+}
+
+expected<void, error_code> SeArchive::AddDirectory(u16string filePath,
+                                                   u16string fileName) {
+  auto res = this->AddDirectoryWithDetails(std::move(filePath), std::move(fileName));
+  if (!res)
+    return unexpected(res.error());
   return {};
 }
 
 expected<void, error_code> SeArchive::DeleteDirectory(u16string fileName) {
   fileName = SeTableOfContent::NormalizeDirectoryPath(fileName);
-  if (fileName == u"/" || !this->m_toc.CheckPath(fileName))
+  if (fileName == u"/")
+    return unexpected(SeError::TocPathIsInvalid);
+
+  bool existsInToc = this->m_toc.CheckPath(fileName);
+  bool existsInJobs = false;
+  for (const auto &j : this->m_jobs) {
+    if ((j.m_type == JobType::CreateArchiveDirectory ||
+         j.m_type == JobType::AddDirectory) &&
+        arePathsEqual(j.m_fileName, fileName)) {
+      existsInJobs = true;
+      break;
+    }
+  }
+  if (!existsInToc && !existsInJobs)
     return unexpected(SeError::TocPathIsInvalid);
 
   auto job = SeJob(JobType::DeleteDirectory, fileName, u"");
@@ -267,37 +771,238 @@ expected<void, error_code> SeArchive::MoveDirectory(u16string fileName,
 }
 
 expected<void, error_code>
-SeArchive::RegisterKey(string key) { // Master Key does not go through a KDF we
-                                      // just use its hash value
+SeArchive::RegisterKey(string key) {
+  if (key.empty())
+    return unexpected(SeError::CRYPTOStringWasEmpty);
 
-  vector<unsigned char> key_hash(crypto_hash_sha256_BYTES);
-  auto exp = sha256String(key, key_hash);
-  if (!exp)
+  auto salt = this->m_metadata.GetSalt();
+  vector<unsigned char> candidate_key(AesGcmContextProvider::KEY_BYTES);
+  auto exp = deriveMasterKeyArgon2id(key, salt, candidate_key);
+  if (!exp) {
+    sodium_memzero(candidate_key.data(), candidate_key.size());
     return unexpected(exp.error());
+  }
 
-  this->m_cryptoCtx.SetMasterKey(
-      key_hash); // Set master key is not responsible for cleaning the left over
-                 // of masterkey
+  auto pvvExp = calculatePVV(candidate_key);
+  if (!pvvExp) {
+    sodium_memzero(candidate_key.data(), candidate_key.size());
+    return unexpected(pvvExp.error());
+  }
 
-  sodium_memzero(key_hash.data(), key_hash.size());
+  if (*pvvExp != this->m_metadata.GetPVV()) {
+    sodium_memzero(candidate_key.data(), candidate_key.size());
+    return unexpected(SeError::InvalidKey);
+  }
+
+  auto setRes = this->m_cryptoCtx.SetMasterKey(candidate_key);
+  sodium_memzero(candidate_key.data(), candidate_key.size());
+  if (!setRes)
+    return unexpected(setRes.error());
 
   return {};
 }
 
 bool SeArchive::IsKeyPresent() { return this->m_cryptoCtx.keyExists(); }
 
+expected<bool, error_code>
+SeArchive::TestKeySync(u16string entryPath, string key) {
+  auto _entry = this->m_toc.GetEntry(entryPath);
+  if (!_entry) {
+    return unexpected(_entry.error());
+  }
+  return this->TestKeySync(*_entry, std::move(key));
+}
+
+expected<bool, error_code>
+SeArchive::TestKeySync(const SeArchiveEntry &entry, string key) {
+  if (entry.isDirectory()) {
+    return true;
+  }
+  if (entry.compressed_size == 0 && entry.uncompressed_size == 0) {
+    return true;
+  }
+
+  // Ensure archive stream is open
+  if (!this->m_archiveStream.is_open()) {
+    auto _openArchive = this->m_archiveStream.open(this->m_archiveFilePath);
+    if (!_openArchive && _openArchive.error() != SeError::StreamAlreadyOpen) {
+      return unexpected(_openArchive.error());
+    }
+  }
+
+  // Read header size to locate payload
+  uint32_t cCount = 0;
+  auto rdCount = this->m_archiveStream.read_at(entry.offset, &cCount, sizeof(cCount));
+  if (!rdCount || *rdCount != sizeof(cCount)) {
+    return false;
+  }
+
+  size_t headerSize = sizeof(uint32_t) + (cCount * sizeof(char16_t)) +
+                      (4 * sizeof(uint64_t)) + (2 * sizeof(uint32_t));
+  uint64_t payloadOffset = entry.offset + headerSize;
+
+  const size_t cipherChunkSize =
+      AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE +
+      AesGcmStreamSession<Mode::Decryption>::TAG_BYTES;
+  size_t toRead = std::min(static_cast<uint64_t>(cipherChunkSize), entry.compressed_size);
+
+  if (toRead < crypto_aead_aes256gcm_ABYTES) {
+    return false;
+  }
+
+  // Thread-local scratch buffers to avoid repeated heap allocation on 10,000+ files
+  thread_local vector<unsigned char> cipherBuffer(cipherChunkSize);
+  thread_local vector<unsigned char> plainBuffer(AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE);
+
+  auto rdCipher = this->m_archiveStream.read_at(payloadOffset, cipherBuffer.data(), toRead);
+  if (!rdCipher || *rdCipher != toRead) {
+    return false;
+  }
+
+  if (key.empty()) {
+    if (!this->m_cryptoCtx.keyExists()) {
+      return false;
+    }
+    auto _cryptoSess = this->m_cryptoCtx.createSession<Mode::Decryption>(entry.fileUid);
+    if (!_cryptoSess) {
+      return false;
+    }
+    auto &cryptoSess = *_cryptoSess;
+    if (toRead == cipherChunkSize) {
+      auto res = cryptoSess->decrypt(
+          span<unsigned char>{cipherBuffer.data(), toRead}, plainBuffer);
+      return res.has_value();
+    } else {
+      auto res = cryptoSess->decrypt(
+          span<unsigned char>{cipherBuffer.data(), toRead}, plainBuffer);
+      auto fin = cryptoSess->finalizeDecryption(plainBuffer);
+      return fin.has_value();
+    }
+  } else {
+    auto salt = this->m_metadata.GetSalt();
+    vector<unsigned char> candidate_key(AesGcmContextProvider::KEY_BYTES);
+    auto exp = deriveMasterKeyArgon2id(key, salt, candidate_key);
+    if (!exp) {
+      sodium_memzero(candidate_key.data(), candidate_key.size());
+      return unexpected(exp.error());
+    }
+
+    auto pvvExp = calculatePVV(candidate_key);
+    if (!pvvExp || *pvvExp != this->m_metadata.GetPVV()) {
+      sodium_memzero(candidate_key.data(), candidate_key.size());
+      return false;
+    }
+
+    vector<unsigned char> subkey(AesGcmContextProvider::KEY_BYTES);
+    if (crypto_kdf_derive_from_key(subkey.data(), subkey.size(), entry.fileUid,
+                                   "file_enc", candidate_key.data()) != 0) {
+      sodium_memzero(candidate_key.data(), candidate_key.size());
+      return false;
+    }
+
+    vector<unsigned char> nonceDeriv(crypto_kdf_BYTES_MIN);
+    if (crypto_kdf_derive_from_key(nonceDeriv.data(), nonceDeriv.size(),
+                                   entry.fileUid, "file_non", candidate_key.data()) != 0) {
+      sodium_memzero(candidate_key.data(), candidate_key.size());
+      sodium_memzero(subkey.data(), subkey.size());
+      return false;
+    }
+
+    sodium_memzero(candidate_key.data(), candidate_key.size());
+
+    unsigned char baseNonce[crypto_aead_aes256gcm_NPUBBYTES];
+    memcpy(baseNonce, nonceDeriv.data(), sizeof(baseNonce));
+    sodium_memzero(nonceDeriv.data(), nonceDeriv.size());
+
+    unsigned long long plainLen = 0;
+    int res = crypto_aead_aes256gcm_decrypt(
+        plainBuffer.data(), &plainLen, nullptr,
+        cipherBuffer.data(), toRead,
+        nullptr, 0,
+        baseNonce, subkey.data());
+
+    sodium_memzero(subkey.data(), subkey.size());
+    return (res == 0);
+  }
+}
+
+SeTaskHandle<bool>
+SeArchive::TestKeyAsync(u16string entryPath, string key) {
+  auto promise = std::make_shared<std::promise<expected<bool, error_code>>>();
+  auto future = promise->get_future().share();
+
+  std::jthread worker([this, entryPath = std::move(entryPath),
+                       key = std::move(key), promise](std::stop_token stopToken) {
+    try {
+      auto res = this->TestKeySync(entryPath, key);
+      promise->set_value(res);
+    } catch (...) {
+      promise->set_exception(std::current_exception());
+    }
+  });
+
+  return SeTaskHandle<bool>(std::move(worker), std::move(future));
+}
+
 const vector<SeJob> &SeArchive::GetJobs() { return this->m_jobs; }
 
 expected<void, error_code> SeArchive::RemoveJob(int id) {
-  int removed = erase_if(this->m_jobs, [id](SeJob &job) {
-    if (job.m_id == id)
-      return true;
-    return false;
-  });
-  if (removed == 0)
+  for (auto it = this->m_jobs.begin(); it != this->m_jobs.end(); ++it) {
+    if (it->m_id == id) {
+      if (it->m_type == JobType::CreateArchiveDirectory ||
+          it->m_type == JobType::AddDirectory) {
+        this->m_queuedDirs.erase(SeTableOfContent::NormalizeDirectoryPath(it->m_fileName));
+      } else if (it->m_type == JobType::AddFile) {
+        this->m_queuedFiles.erase(SeTableOfContent::NormalizeFilePath(it->m_fileName));
+      }
+      this->m_jobs.erase(it);
+      return {};
+    }
+  }
+  return unexpected(SeError::JobNotFound);
+}
+
+expected<void, error_code> SeArchive::ResetJob(int id) {
+  bool found = false;
+  for (auto &job : this->m_jobs) {
+    if (job.m_id == id || (found && (job.m_status == JobStatus::Failed || job.m_status == JobStatus::Aborted))) {
+      found = true;
+      job.m_status = JobStatus::Idle;
+      job.processedBytes = 0;
+      job.compressedBytes = 0;
+      job.percentage = 0;
+    }
+  }
+  if (!found) {
+    for (auto &job : this->m_jobs) {
+      if (job.m_status == JobStatus::Failed || job.m_status == JobStatus::Aborted) {
+        job.m_status = JobStatus::Idle;
+        job.processedBytes = 0;
+        job.compressedBytes = 0;
+        job.percentage = 0;
+        found = true;
+      }
+    }
+  }
+  if (!found && id > 0)
     return unexpected(SeError::JobNotFound);
 
   return {};
+}
+
+void SeArchive::RemoveCompletedJobs() {
+  // Logic removed: completed jobs are preserved in job list
+}
+
+void SeArchive::ResetFailedJobs() {
+  for (auto &job : this->m_jobs) {
+    if (job.m_status == JobStatus::Failed || job.m_status == JobStatus::Aborted) {
+      job.m_status = JobStatus::Idle;
+      job.processedBytes = 0;
+      job.compressedBytes = 0;
+      job.percentage = 0;
+    }
+  }
 }
 
 void SeArchive::SetPreserveMetadata(bool preserve) {
@@ -306,8 +1011,6 @@ void SeArchive::SetPreserveMetadata(bool preserve) {
 }
 
 void SeArchive::SetCompressionLevel(uint32_t compressionLevel) {
-  if (this->m_metadata.m_compression_level != compressionLevel)
-    this->m_metadata.SetCompressionLevel(compressionLevel);
   this->ChangeCompressionLevel(compressionLevel);
 }
 
@@ -318,6 +1021,16 @@ SeArchive::ChangeCompressionLevel(uint32_t compressionLevel) {
 
   u16string levelStr;
   levelStr.push_back(static_cast<char16_t>(u'0' + compressionLevel));
+
+  // If an idle CompressionLevelChange job already exists in the queue, update its target level
+  for (auto &job : this->m_jobs) {
+    if (job.m_type == JobType::CompressionLevelChange &&
+        job.m_status == JobStatus::Idle) {
+      job.m_fileName = levelStr;
+      return {};
+    }
+  }
+
   SeJob job(JobType::CompressionLevelChange, levelStr, u"");
   if (!this->addJob(job))
     return unexpected(SeError::CannotCreateJob);
@@ -326,12 +1039,14 @@ SeArchive::ChangeCompressionLevel(uint32_t compressionLevel) {
 }
 
 expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
-                                                      stop_token stopToken) {
-  // ProcessCallback will be called with jobs queued in the job container
-  // Optimize queued jobs (merge duplicates, cancel transient ops, fold moves)
-  // prior to verification and execution
-  this->optimizeJobs();
+                                                      stop_token stopToken,
+                                                      SePauseToken pauseToken) {
+  // Before optimizing and verifying, reset any failed or aborted jobs from
+  // prior attempts back to Idle so recommitting changes proceeds cleanly
+  this->ResetFailedJobs();
 
+  // ProcessCallback will be called with jobs queued in the job container
+  // Jobs are pre-optimized explicitly by the caller prior to verification and execution
   if (!verifyJobs())
     return unexpected(SeError::ConflictingJobFound);
 
@@ -355,7 +1070,8 @@ expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
           return unexpected(_metadata.error());
       SeMetadata metadata = *_metadata;
 
-      if (metadata != this->m_metadata)
+      if (metadata.m_toc_offset != this->m_metadata.m_toc_offset ||
+          metadata.m_version != this->m_metadata.m_version)
           return unexpected(SeError::ArchiveModified);
 
       uint64_t toc_offset = metadata.m_toc_offset;
@@ -387,15 +1103,32 @@ expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
 
   this->m_isReady = false;
 
+  int completedJobsCount = 0;
+  bool hasFailed = false;
+  error_code failureCode{};
+
   for (int i{0}; i < this->m_jobs.size(); i++) {
 
     auto &job = this->m_jobs[i];
 
-    if (stopToken.stop_requested())
-      return unexpected(SeError::OperationCanceled);
+    pauseToken.wait_if_paused(stopToken);
 
-    if (job.m_status != JobStatus::Idle)
-      return unexpected(SeError::JobIsNotIdle);
+    if (stopToken.stop_requested()) {
+      hasFailed = true;
+      failureCode = SeError::OperationCanceled;
+      break;
+    }
+
+    if (job.m_status == JobStatus::Finished) {
+      completedJobsCount++;
+      continue;
+    }
+
+    if (job.m_status != JobStatus::Idle) {
+      hasFailed = true;
+      failureCode = SeError::JobIsNotIdle;
+      break;
+    }
 
     // WARN: this level of job seperation will introduce overhead with archives
     // that have complex file system -> jobs should be able to merge
@@ -405,33 +1138,76 @@ expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
     case JobType::None:
       return unexpected(SeError::InvalidJob);
     case JobType::AddFile:
-      _result = doAddFileJob(job, callback, stopToken);
+      _result = doAddFileJob(job, callback, stopToken, pauseToken);
       break;
     case JobType::RemoveFile:
-      _result = doRemoveFileJob(job, callback, stopToken);
+      _result = doRemoveFileJob(job, callback, stopToken, pauseToken);
       break;
     case JobType::CreateArchiveDirectory:
-      _result = doCreateDirectoryJob(job, callback, stopToken);
+      _result = doCreateDirectoryJob(job, callback, stopToken, pauseToken);
+      break;
+    case JobType::AddDirectory:
+      _result = doAddDirectoryJob(job, callback, stopToken, pauseToken);
       break;
     case JobType::DeleteDirectory:
-      _result = doDeleteDirectoryJob(job, callback, stopToken);
+      _result = doDeleteDirectoryJob(job, callback, stopToken, pauseToken);
       break;
     case JobType::MoveArchiveFile:
-      _result = doMoveFileJob(job, callback, stopToken);
+      _result = doMoveFileJob(job, callback, stopToken, pauseToken);
       break;
     case JobType::MoveDirectory:
-      _result = doMoveDirectoryJob(job, callback, stopToken);
+      _result = doMoveDirectoryJob(job, callback, stopToken, pauseToken);
       break;
     case JobType::CompressionLevelChange:
-      _result = doChangeCompressionLevel(job, callback, stopToken);
+      _result = doChangeCompressionLevel(job, callback, stopToken, pauseToken);
       break;
     case JobType::TestFile:
-      _result = doTestFile(job, callback, stopToken);
+      _result = doTestFile(job, callback, stopToken, pauseToken);
       break;
     }
 
-    if (!_result) // whatever happen here we should fix the TOC then exit
-      return unexpected(_result.error());
+    if (!_result) {
+      hasFailed = true;
+      failureCode = _result.error();
+      break;
+    } else {
+      completedJobsCount++;
+    }
+  }
+
+  // If a failure or cancellation occurred:
+  if (hasFailed) {
+    for (auto &j : this->m_jobs) {
+      if (j.m_status == JobStatus::Running) {
+        j.setStatus(JobStatus::Aborted);
+      }
+    }
+
+    // 1. If any jobs completed successfully before the failure, commit their TOC and metadata to disk!
+    if (completedJobsCount > 0) {
+      size_t newTocOffset = this->m_toc.getNextAvailOffset();
+      auto _ser = this->m_toc.Serialize();
+      if (_ser) {
+        auto tocBytes = this->m_toc.GetTOCBytes();
+        if (auto _sk = this->m_archiveStream.seek(newTocOffset); _sk) {
+          if (auto _wr = this->m_archiveStream.write(tocBytes.data(), tocBytes.size()); _wr) {
+            this->m_archiveStream.truncate(newTocOffset + tocBytes.size());
+            this->m_metadata.m_toc_offset = newTocOffset;
+            vector<unsigned char> metaBytes(SE_METADATA_SIZE);
+            this->m_metadata.GetMetadataBytes(metaBytes);
+            if (auto _skMeta = this->m_archiveStream.seek(0); _skMeta) {
+              this->m_archiveStream.write(metaBytes.data(), metaBytes.size());
+              this->m_archiveStream.flush();
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Mark archive ready so subsequent recommit or actions can proceed
+    this->m_isReady = true;
+
+    return unexpected(failureCode);
   }
 
   // Persist updated TOC and Metadata to disk
@@ -470,26 +1246,31 @@ expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
 SeTaskHandle<void> SeArchive::SaveChangesAsync(ProgressCallback callback) {
   auto promise = std::make_shared<std::promise<expected<void, error_code>>>();
   auto future = promise->get_future().share();
+  auto pauseState = std::make_shared<SePauseState>();
+  SePauseToken pauseToken(pauseState);
 
   std::jthread worker([this, callback = std::move(callback),
-                       promise](std::stop_token stopToken) {
+                       promise, pauseToken](std::stop_token stopToken) {
     try {
-      auto res = this->SaveChangesSync(callback, stopToken);
+      auto res = this->SaveChangesSync(callback, stopToken, pauseToken);
       promise->set_value(res);
     } catch (...) {
       promise->set_exception(std::current_exception());
     }
   });
 
-  return SeTaskHandle<void>(std::move(worker), std::move(future));
+  return SeTaskHandle<void>(std::move(worker), std::move(future), std::move(pauseState));
 }
 
 // @Private
 
 expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
                                                    ProgressCallback callback,
-                                                   stop_token stopToken) {
+                                                   stop_token stopToken,
+                                                   SePauseToken pauseToken) {
   job.m_status = JobStatus::Pending;
+
+  pauseToken.wait_if_paused(stopToken);
 
   if (stopToken.stop_requested()) {
     job.setStatus(JobStatus::Aborted);
@@ -524,7 +1305,10 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
   SeArchiveEntry entry = SeArchiveEntry::CreateFileEntry(job.m_fileName);
 
   entry.uncompressed_size = inFileStream.size();
-  entry.attributes = 0; // Dont know and care how to get and set file attr for now !
+  entry.attributes = 0;
+  if (this->m_metadata.GetPreserveMetadata()) {
+    entry.attributes = se::GetFileAttributes(job.m_filePath);
+  }
   entry.offset = this->m_toc.getNextAvailOffset();
   entry.fileUid = getSecureRandom();
   entry.crc32 = CRC32C_INIT;
@@ -590,6 +1374,7 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
   job.setStatus(JobStatus::Running);
   job.totalBytes = inFileStream.size();
   job.processedBytes = 0;
+  job.compressedBytes = 0;
   job.percentage = 0;
 
   if (callback)
@@ -597,6 +1382,16 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
 
   size_t processedBytes = 0;
   while (!isLastChunk) {
+
+    pauseToken.wait_if_paused(stopToken, [&]() {
+      job.setStatus(JobStatus::Paused);
+      if (callback)
+        callback(job);
+    }, [&]() {
+      job.setStatus(JobStatus::Running);
+      if (callback)
+        callback(job);
+    });
 
     if (stopToken.stop_requested()) {
       this->m_archiveStream.seek(entry.offset);
@@ -622,6 +1417,24 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
     bool finished = false;
 
     while (!finished) {
+      pauseToken.wait_if_paused(stopToken, [&]() {
+        job.setStatus(JobStatus::Paused);
+        if (callback)
+          callback(job);
+      }, [&]() {
+        job.setStatus(JobStatus::Running);
+        if (callback)
+          callback(job);
+      });
+
+      if (stopToken.stop_requested()) {
+        this->m_archiveStream.seek(entry.offset);
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+          callback(job);
+        return unexpected(SeError::OperationCanceled);
+      }
+
       ZSTD_outBuffer outBuff = {outBuffer.data(), writeSz, 0};
 
       size_t remaining =
@@ -647,6 +1460,7 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
 
           // Status report
           job.processedBytes = processedBytes;
+          job.compressedBytes = entry.compressed_size;
           job.percentage = inFileStream.size() == 0
                                ? 100
                                : static_cast<uint32_t>((processedBytes * 100) /
@@ -735,7 +1549,9 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
 
   job.setStatus(JobStatus::Finished);
   job.processedBytes = inFileStream.size();
+  job.compressedBytes = entry.compressed_size;
   job.percentage = 100;
+  job.crc32 = entry.crc32;
   if (callback)
     callback(job);
 
@@ -744,9 +1560,11 @@ expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
 
 expected<void, error_code> SeArchive::doRemoveFileJob(SeJob &job,
                                                       ProgressCallback callback,
-                                                      stop_token stopToken) {
+                                                      stop_token stopToken,
+                                                      SePauseToken pauseToken) {
 
   job.setStatus(JobStatus::Pending);
+  pauseToken.wait_if_paused(stopToken);
   if (callback)
     callback(job);
   if (stopToken.stop_requested()) {
@@ -764,90 +1582,75 @@ expected<void, error_code> SeArchive::doRemoveFileJob(SeJob &job,
       callback(job);
     return unexpected(_entError.error());
   }
-  auto &entry = *_entError;
+  auto entry = *_entError;
 
   auto inFileEntrySize = entry.GetDiskSize();
-  // Move files that are in front of the requested file entry.compressedSize +
-  // entrysize backward then truncate
   auto frontEntries = this->m_toc.GetEntriesFollowing(entry);
 
-  if (frontEntries.size() == 0) {
-    job.setStatus(JobStatus::Running);
-    if (callback)
-      callback(job);
-    // No front entries
-    // Only trunking
-    if (auto _err = this->m_archiveStream.truncate(
-            this->m_archiveStream.size() - inFileEntrySize);
-        !_err) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
+  job.setStatus(JobStatus::Running);
+  if (callback)
+    callback(job);
 
-      return unexpected(_err.error());
-    }
-
-    job.setStatus(JobStatus::Finished);
-    if (callback)
-      callback(job);
-
-    return {};
-  } else {
-    // Files are in front of entry
-    // Pushing them back one by one until the last one!
-
-    // The front entries does not return entries sorted by their offset!
-    job.setStatus(JobStatus::Running);
-    if (callback)
-      callback(job);
-
+  if (!frontEntries.empty() && inFileEntrySize > 0) {
     sort(frontEntries.begin(), frontEntries.end(),
-         [](SeArchiveEntry &a, SeArchiveEntry &b) {
+         [](const SeArchiveEntry &a, const SeArchiveEntry &b) {
            return a.offset < b.offset;
          });
 
-    size_t shifted = 0;
+    for (size_t i = 0; i < frontEntries.size(); i++) {
+      pauseToken.wait_if_paused(stopToken);
+      if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+          callback(job);
+        return unexpected(SeError::OperationCanceled);
+      }
 
-    for (int i{0}; i < frontEntries.size();
-         i++) { // cancelation token will be ignored here; else it would be too
-                // time consuming to revert everything back to before!
       auto &frontEnt = frontEntries[i];
 
-      job.percentage = (i / frontEntries.size()) * 100;
+      job.percentage = static_cast<uint32_t>((i * 100) / frontEntries.size());
       if (callback)
         callback(job);
 
       size_t entrySize = frontEnt.GetDiskSize();
-
-      if (auto _err = this->m_archiveStream.shift_bytes(
-              shifted + entry.offset, frontEnt.offset, entrySize);
-          !_err) {
-        job.setStatus(JobStatus::Failed);
-        if (callback)
-          callback(job);
-
-        return unexpected(_err.error());
+      if (entrySize > 0) {
+        size_t targetOffset = frontEnt.offset - inFileEntrySize;
+        if (auto _err = this->m_archiveStream.shift_bytes(
+                targetOffset, frontEnt.offset, entrySize);
+            !_err) {
+          job.setStatus(JobStatus::Failed);
+          if (callback)
+            callback(job);
+          return unexpected(_err.error());
+        }
       }
 
-      frontEnt.offset = shifted + entry.offset;
-      this->m_toc.RemoveEntry(frontEnt);
-      this->m_toc.AddEntry(frontEnt);
-      shifted += entrySize;
+      // Update the offset of frontEnt in m_toc
+      for (auto &tocEnt : this->m_toc.m_entries) {
+        if (!tocEnt.isDirectory() && tocEnt.path == frontEnt.path) {
+          tocEnt.offset -= inFileEntrySize;
+          break;
+        }
+      }
     }
-
-    this->m_toc.RemoveEntry(entry);
-
-    job.setStatus(JobStatus::Finished);
-    if (callback)
-      callback(job);
-    return {};
   }
+
+  // Always remove the deleted entry from m_toc
+  this->m_toc.RemoveEntry(entry.path);
+
+  job.percentage = 100;
+  job.setStatus(JobStatus::Finished);
+  if (callback)
+    callback(job);
+  return {};
 }
 
 expected<void, error_code>
 SeArchive::doCreateDirectoryJob(SeJob &job, ProgressCallback callback,
-                             stop_token stopToken) {
+                             stop_token stopToken,
+                             SePauseToken pauseToken) {
   job.setStatus(JobStatus::Pending);
+  pauseToken.wait_if_paused(stopToken);
   if (callback)
     callback(job);
 
@@ -879,10 +1682,226 @@ SeArchive::doCreateDirectoryJob(SeJob &job, ProgressCallback callback,
 }
 
 expected<void, error_code>
+SeArchive::doAddDirectoryJob(SeJob &job, ProgressCallback callback,
+                             stop_token stopToken,
+                             SePauseToken pauseToken) {
+  job.setStatus(JobStatus::Pending);
+  pauseToken.wait_if_paused(stopToken);
+  if (callback)
+    callback(job);
+
+  if (stopToken.stop_requested()) {
+    job.setStatus(JobStatus::Aborted);
+    if (callback)
+      callback(job);
+    return unexpected(SeError::OperationCanceled);
+  }
+
+  u16string baseArchiveDir =
+      SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
+  u16string diskDirPath = job.m_filePath;
+
+  if (!SeTableOfContent::verifyAbsPath(diskDirPath) ||
+      !SeTableOfContent::isAbsPathDir(diskDirPath)) {
+    job.setStatus(JobStatus::Failed);
+    if (callback)
+      callback(job);
+    return unexpected(SeError::ExpectedDirectory);
+  }
+
+  if (baseArchiveDir != u"/" && !this->m_toc.CheckParentPath(baseArchiveDir)) {
+    job.setStatus(JobStatus::Failed);
+    if (callback)
+      callback(job);
+    return unexpected(SeError::TocPathIsInvalid);
+  }
+
+  // Ensure base archive directory entry exists in TOC
+  if (baseArchiveDir != u"/" && !this->m_toc.CheckPath(baseArchiveDir)) {
+    SeArchiveEntry baseEntry =
+        SeArchiveEntry::CreateDirectoryEntry(baseArchiveDir);
+    if (auto _err = this->m_toc.AddEntry(baseEntry); !_err) {
+      job.setStatus(JobStatus::Failed);
+      if (callback)
+        callback(job);
+      return unexpected(_err.error());
+    }
+  }
+
+  filesystem::path diskPath(diskDirPath);
+  std::u16string diskU16 = diskPath.u16string();
+  size_t baseLen = diskU16.size();
+  while (baseLen > 0 &&
+         (diskU16[baseLen - 1] == u'/' || diskU16[baseLen - 1] == u'\\')) {
+    baseLen--;
+  }
+
+  error_code ec;
+  filesystem::recursive_directory_iterator it(
+      diskPath, filesystem::directory_options::skip_permission_denied, ec);
+  if (ec) {
+    job.setStatus(JobStatus::Failed);
+    if (callback)
+      callback(job);
+    return unexpected(ec);
+  }
+
+  struct PendingSubDir {
+    u16string archivePath;
+  };
+  struct PendingSubFile {
+    u16string archivePath;
+    u16string diskPath;
+    uint64_t fileSize;
+  };
+
+  vector<PendingSubDir> pendingDirs;
+  vector<PendingSubFile> pendingFiles;
+  uint64_t totalBytes = 0;
+
+  filesystem::recursive_directory_iterator endIt;
+  while (it != endIt) {
+    const auto &entry = *it;
+    error_code statusEc;
+    bool isDir = entry.is_directory(statusEc);
+    bool isReg = !isDir && entry.is_regular_file(statusEc);
+
+    std::u16string entryU16 = entry.path().u16string();
+    std::u16string relU16;
+    if (entryU16.size() > baseLen) {
+      size_t start = baseLen;
+      if (entryU16[start] == u'/' || entryU16[start] == u'\\') {
+        start++;
+      }
+      relU16 = entryU16.substr(start);
+      for (auto &ch : relU16) {
+        if (ch == u'\\')
+          ch = u'/';
+      }
+    }
+
+    if (!relU16.empty()) {
+      if (isDir) {
+        u16string subArchiveDir =
+            SeTableOfContent::CreateDirPath(baseArchiveDir, relU16);
+        pendingDirs.push_back({subArchiveDir});
+      } else if (isReg) {
+        u16string fileArchivePath =
+            SeTableOfContent::CreateFilePath(baseArchiveDir, relU16);
+        error_code szEc;
+        uint64_t sz = entry.file_size(szEc);
+        uint64_t fileSize = szEc ? 0 : sz;
+        totalBytes += fileSize;
+        pendingFiles.push_back({fileArchivePath, entryU16, fileSize});
+      }
+    }
+
+    it.increment(ec);
+    if (ec)
+      ec.clear();
+  }
+
+  // Create subdirectories in TOC via doCreateDirectoryJob
+  for (const auto &d : pendingDirs) {
+    if (!this->m_toc.CheckPath(d.archivePath)) {
+      job.SetFileName(d.archivePath);
+      // doCreateDirectoryJob reads job.m_fileName for the directory path
+      auto _dirResult = this->doCreateDirectoryJob(job, nullptr, stopToken, pauseToken);
+      if (!_dirResult) {
+        // Propagate abort/failure status already set by doCreateDirectoryJob
+        if (callback)
+          callback(job);
+        return unexpected(_dirResult.error());
+      }
+    }
+  }
+
+  if (stopToken.stop_requested()) {
+    job.setStatus(JobStatus::Aborted);
+    if (callback)
+      callback(job);
+    return unexpected(SeError::OperationCanceled);
+  }
+
+  job.setStatus(JobStatus::Running);
+  job.totalBytes = totalBytes;
+  job.processedBytes = 0;
+  job.compressedBytes = 0;
+  job.percentage = (totalBytes == 0) ? 100 : 0;
+  if (callback)
+    callback(job);
+
+  if (pendingFiles.empty()) {
+    job.SetFileName(baseArchiveDir);
+    job.setStatus(JobStatus::Finished);
+    job.percentage = 100;
+    if (callback)
+      callback(job);
+    return {};
+  }
+
+  uint64_t cumulativeProcessed = 0;
+  uint64_t cumulativeCompressed = 0;
+
+  for (const auto &pf : pendingFiles) {
+    // Update current processing file in the job so UI updates accurately!
+    job.SetFileName(pf.archivePath);
+    job.m_filePath = pf.diskPath;
+
+    // Wrap the callback to translate per-file progress into cumulative
+    // directory-level progress while preserving filename and percentage reporting
+    uint64_t baseProcessed = cumulativeProcessed;
+    uint64_t baseCompressed = cumulativeCompressed;
+
+    ProgressCallback wrappedCallback = nullptr;
+    if (callback) {
+      wrappedCallback = [&](const SeJob &j) {
+        // Create a copy to apply cumulative directory progress adjustments
+        SeJob adjusted = j;
+        adjusted.processedBytes = baseProcessed + j.processedBytes;
+        adjusted.compressedBytes = baseCompressed + j.compressedBytes;
+        adjusted.totalBytes = totalBytes;
+        adjusted.percentage = (totalBytes > 0)
+                           ? static_cast<uint32_t>(std::min(100ULL, (adjusted.processedBytes * 100) / totalBytes))
+                           : 100;
+        callback(adjusted);
+      };
+    }
+
+    auto _fileResult = this->doAddFileJob(job, wrappedCallback, stopToken, pauseToken);
+
+    if (!_fileResult) {
+      // Status (Failed/Aborted) already set by doAddFileJob
+      return unexpected(_fileResult.error());
+    }
+
+    // After doAddFileJob finishes, accumulate per-file totals into cumulative
+    cumulativeProcessed += job.processedBytes;
+    cumulativeCompressed += job.compressedBytes;
+
+    // Restore Running status for the next file (doAddFileJob sets Finished)
+    job.setStatus(JobStatus::Running);
+  }
+
+  // Finished all files in directory! Restore job's base directory name and mark finished
+  job.SetFileName(baseArchiveDir);
+  job.setStatus(JobStatus::Finished);
+  job.processedBytes = totalBytes;
+  job.compressedBytes = cumulativeCompressed;
+  job.percentage = 100;
+  if (callback)
+    callback(job);
+
+  return {};
+}
+
+expected<void, error_code>
 SeArchive::doDeleteDirectoryJob(SeJob &job, ProgressCallback callback,
-                                stop_token stopToken) {
+                                stop_token stopToken,
+                                SePauseToken pauseToken) {
 
   job.setStatus(JobStatus::Pending);
+  pauseToken.wait_if_paused(stopToken);
   if (callback)
     callback(job);
 
@@ -914,67 +1933,57 @@ SeArchive::doDeleteDirectoryJob(SeJob &job, ProgressCallback callback,
   job.setStatus(JobStatus::Running);
   if (callback)
     callback(job);
-  if (dirEntries.size() == 0) {
-    // Removing empty directory
 
-    this->m_toc.RemoveEntry(dir);
-
-    job.setStatus(JobStatus::Finished);
-    if (callback)
-      callback(job);
-    return {};
-  } else {
-    // Removing files
-
-    for (int i{0}; i < dirEntries.size();
-         i++) { // Same as doRemoveFile no stopToken is processed here cause
-                // makes the reverting task harder!
-
-      auto fileEntry = dirEntries[i];
-
-      job.percentage =
-          static_cast<uint32_t>((i * 100) / dirEntries.size());
+  for (size_t i = 0; i < dirEntries.size(); i++) {
+    pauseToken.wait_if_paused(stopToken);
+    if (stopToken.stop_requested()) {
+      job.setStatus(JobStatus::Aborted);
       if (callback)
         callback(job);
-
-      if (fileEntry.isDirectory()) {
-        SeJob jDirDel(JobType::DeleteDirectory, fileEntry.path, u"");
-        auto _remove = doDeleteDirectoryJob(jDirDel, nullptr, stopToken);
-        if (!_remove) {
-          job.setStatus(JobStatus::Failed);
-          if (callback)
-            callback(job);
-          return unexpected(_remove.error());
-        }
-      } else {
-        SeJob jFileRemove(JobType::RemoveFile, fileEntry.path, u"");
-        auto _remove = doRemoveFileJob(
-            jFileRemove, nullptr,
-            stopToken); // no need for callback since we are the reporter!
-        if (!_remove) {
-          job.setStatus(JobStatus::Failed);
-          if (callback)
-            callback(job);
-          return unexpected(_remove.error());
-        }
-      }
+      return unexpected(SeError::OperationCanceled);
     }
 
-    this->m_toc.RemoveEntry(dir);
-    job.setStatus(JobStatus::Finished);
+    auto fileEntry = dirEntries[i];
+
+    job.percentage = static_cast<uint32_t>((i * 100) / dirEntries.size());
     if (callback)
       callback(job);
-    return {};
+
+    if (fileEntry.isDirectory()) {
+      SeJob jDirDel(JobType::DeleteDirectory, fileEntry.path, u"");
+      auto _remove = doDeleteDirectoryJob(jDirDel, nullptr, stopToken, pauseToken);
+      if (!_remove) {
+        job.setStatus(_remove.error() == SeError::OperationCanceled ? JobStatus::Aborted : JobStatus::Failed);
+        if (callback)
+          callback(job);
+        return unexpected(_remove.error());
+      }
+    } else {
+      SeJob jFileRemove(JobType::RemoveFile, fileEntry.path, u"");
+      auto _remove = doRemoveFileJob(jFileRemove, nullptr, stopToken, pauseToken);
+      if (!_remove) {
+        job.setStatus(_remove.error() == SeError::OperationCanceled ? JobStatus::Aborted : JobStatus::Failed);
+        if (callback)
+          callback(job);
+        return unexpected(_remove.error());
+      }
+    }
   }
+
+  this->m_toc.RemoveEntry(dir.path);
+  job.percentage = 100;
+  job.setStatus(JobStatus::Finished);
+  if (callback)
+    callback(job);
+  return {};
 }
 
 expected<void, error_code> SeArchive::doMoveFileJob(SeJob &job,
                                                     ProgressCallback callback,
-                                                    stop_token stopToken) {
-  // File header entries are just file name and not needed to be moved around
-  // upon the file moves!
-
+                                                    stop_token stopToken,
+                                                    SePauseToken pauseToken) {
   job.setStatus(JobStatus::Pending);
+  pauseToken.wait_if_paused(stopToken);
   if (callback)
     callback(job);
 
@@ -984,10 +1993,8 @@ expected<void, error_code> SeArchive::doMoveFileJob(SeJob &job,
       callback(job);
     return unexpected(SeError::OperationCanceled);
   }
-  // Assuming the job as registered & file name is src , file path is dst
 
   auto _ent = this->m_toc.GetEntry(job.m_fileName);
-
   if (!_ent) {
     job.setStatus(JobStatus::Failed);
     if (callback)
@@ -1002,27 +2009,34 @@ expected<void, error_code> SeArchive::doMoveFileJob(SeJob &job,
   auto entry = *_ent;
 
   // Verifying the destination and constructing path
-
   auto fileName = this->m_toc.GetFileName(entry.path);
 
   if (!this->m_toc.CheckPath(job.m_filePath) ||
       !this->m_toc.IsDirectory(job.m_filePath)) {
-    // Sloppiness at job verification can cause this
     job.setStatus(JobStatus::Failed);
     if (callback)
       callback(job);
     return unexpected(SeError::TocPathIsInvalid);
   }
 
-  auto finalPath = this->m_toc.CreateFilePath(
-      job.m_filePath, fileName); // No need to retrieve the dest directory entry
+  auto finalPath = this->m_toc.CreateFilePath(job.m_filePath, fileName);
 
-  this->m_toc.RemoveEntry(entry);
+  u16string normOldPath = SeTableOfContent::NormalizeFilePath(job.m_fileName);
+  u16string normNewPath = SeTableOfContent::NormalizeFilePath(finalPath);
 
-  entry.path = finalPath;
+  if (normOldPath != normNewPath) {
+    for (auto &tocEnt : this->m_toc.m_entries) {
+      if (!tocEnt.isDirectory() &&
+          SeTableOfContent::NormalizeFilePath(tocEnt.path) == normOldPath) {
+        tocEnt.path = normNewPath;
+        break;
+      }
+    }
+    this->m_toc.rebuildPathIndex();
+    this->m_toc.m_isReady = false;
+  }
 
-  this->m_toc.AddEntry(entry);
-
+  job.percentage = 100;
   job.setStatus(JobStatus::Finished);
   if (callback)
     callback(job);
@@ -1031,9 +2045,11 @@ expected<void, error_code> SeArchive::doMoveFileJob(SeJob &job,
 
 expected<void, error_code>
 SeArchive::doMoveDirectoryJob(SeJob &job, ProgressCallback callback,
-                              stop_token stopToken) {
+                              stop_token stopToken,
+                              SePauseToken pauseToken) {
 
   job.setStatus(JobStatus::Pending);
+  pauseToken.wait_if_paused(stopToken);
   if (callback)
     callback(job);
 
@@ -1063,61 +2079,51 @@ SeArchive::doMoveDirectoryJob(SeJob &job, ProgressCallback callback,
   }
   auto entry = *_ent;
 
-  auto newDirPath = this->m_toc.CreateDirPath(
-      job.m_filePath, this->m_toc.GetFileName(entry.path));
+  u16string oldDirPath = SeTableOfContent::NormalizeDirectoryPath(entry.path);
+  u16string dirBaseName = this->m_toc.GetFileName(oldDirPath);
+  u16string newDirPath = this->m_toc.CreateDirPath(job.m_filePath, dirBaseName);
 
-  auto entrySubs = this->m_toc.GetDirectoryFileEntries(entry);
-
-  if (entrySubs.size() == 0) {
-    this->m_toc.RemoveEntry(entry);
-    entry.path = newDirPath;
-    this->m_toc.AddEntry(entry);
-
-    job.setStatus(JobStatus::Finished);
+  if (newDirPath.starts_with(oldDirPath) && newDirPath != oldDirPath) {
+    job.setStatus(JobStatus::Failed);
     if (callback)
       callback(job);
-    return {};
-  } else {
+    return unexpected(SeError::TocPathIsInvalid);
+  }
 
-    for (int i{0}; i < entrySubs.size(); i++) {
+  job.setStatus(JobStatus::Running);
+  if (callback)
+    callback(job);
 
-      auto subEntry = entrySubs[i];
-
-      if (subEntry.isDirectory()) {
-        SeJob jMove(JobType::MoveDirectory, subEntry.path, newDirPath);
-        auto _move = doMoveDirectoryJob(jMove, nullptr, stopToken);
-        if (!_move) {
-          job.setStatus(JobStatus::Failed);
-          if (callback)
-            callback(job);
-          return unexpected(_move.error());
-        }
-      } else {
-        SeJob jMove(JobType::MoveArchiveFile, subEntry.path, newDirPath);
-        auto _move = doMoveFileJob(jMove, nullptr, stopToken);
-        if (!_move) {
-          job.setStatus(JobStatus::Failed);
-          if (callback)
-            callback(job);
-          return unexpected(_move.error());
-        }
+  if (newDirPath != oldDirPath) {
+    for (auto &tocEnt : this->m_toc.m_entries) {
+      u16string normEntryPath =
+          tocEnt.isDirectory()
+              ? SeTableOfContent::NormalizeDirectoryPath(tocEnt.path)
+              : SeTableOfContent::NormalizeFilePath(tocEnt.path);
+      if (normEntryPath == oldDirPath) {
+        tocEnt.path = newDirPath;
+      } else if (normEntryPath.starts_with(oldDirPath)) {
+        u16string subRel = normEntryPath.substr(oldDirPath.size());
+        tocEnt.path = newDirPath + subRel;
       }
     }
-    this->m_toc.RemoveEntry(entry);
-    entry.path = newDirPath;
-    this->m_toc.AddEntry(entry);
-
-    job.setStatus(JobStatus::Finished);
-    if (callback)
-      callback(job);
-    return {};
+    this->m_toc.rebuildPathIndex();
+    this->m_toc.m_isReady = false;
   }
+
+  job.percentage = 100;
+  job.setStatus(JobStatus::Finished);
+  if (callback)
+    callback(job);
+  return {};
 }
 
 expected<void, error_code> SeArchive::doChangeCompressionLevel(
     SeJob &job, ProgressCallback callback,
-    stop_token stopToken) {
+    stop_token stopToken,
+    SePauseToken pauseToken) {
   job.setStatus(JobStatus::Pending);
+  pauseToken.wait_if_paused(stopToken);
   if (callback)
     callback(job);
 
@@ -1191,6 +2197,7 @@ expected<void, error_code> SeArchive::doChangeCompressionLevel(
   job.setStatus(JobStatus::Running);
   job.totalBytes = totalBytesAllFiles;
   job.processedBytes = 0;
+  job.compressedBytes = 0;
   job.percentage = 0;
   if (callback)
     callback(job);
@@ -1450,6 +2457,7 @@ expected<void, error_code> SeArchive::doChangeCompressionLevel(
           totalProcessedBytes += decomOut.pos;
 
           job.processedBytes = totalProcessedBytes;
+          job.compressedBytes = fileCompressedBytes;
           job.percentage =
               totalBytesAllFiles == 0
                   ? 100
@@ -1555,6 +2563,7 @@ expected<void, error_code> SeArchive::doChangeCompressionLevel(
         totalProcessedBytes += decomOut.pos;
 
         job.processedBytes = totalProcessedBytes;
+        job.compressedBytes = fileCompressedBytes;
         job.percentage =
             totalBytesAllFiles == 0
                 ? 100
@@ -1731,7 +2740,7 @@ expected<void, error_code> SeArchive::doChangeCompressionLevel(
       error_code revEc;
       filesystem::rename(backupPath, origPath, revEc);
       cleanupOnFailure();
-      this->m_archiveStream.open(this->m_archiveFilePath);
+      (void)this->m_archiveStream.open(this->m_archiveFilePath);
       job.setStatus(JobStatus::Failed);
       if (callback)
         callback(job);
@@ -1757,6 +2766,7 @@ expected<void, error_code> SeArchive::doChangeCompressionLevel(
 
   job.setStatus(JobStatus::Finished);
   job.processedBytes = totalBytesAllFiles;
+  job.compressedBytes = totalBytesAllFiles;
   job.percentage = 100;
   if (callback)
     callback(job);
@@ -1766,8 +2776,10 @@ expected<void, error_code> SeArchive::doChangeCompressionLevel(
 
 expected<void, error_code> SeArchive::doTestFile(SeJob &job,
                                                  ProgressCallback callback,
-                                                 stop_token stopToken) {
+                                                 stop_token stopToken,
+                                                 SePauseToken pauseToken) {
   job.setStatus(JobStatus::Pending);
+  pauseToken.wait_if_paused(stopToken);
   if (callback)
     callback(job);
 
@@ -1893,17 +2905,20 @@ expected<void, error_code> SeArchive::doTestFile(SeJob &job,
   job.setStatus(JobStatus::Running);
   job.totalBytes = entry.uncompressed_size;
   job.processedBytes = 0;
+  job.compressedBytes = 0;
   job.percentage = 0;
   if (callback)
     callback(job);
 
   uint64_t calculatedUncompressedSize = 0;
+  uint64_t totalReadCipherBytes = 0;
   uint32_t currentCrc = CRC32C_INIT;
 
   auto decompressAndProcess =
       [&](span<const unsigned char> plain) -> expected<void, error_code> {
     ZSTD_inBuffer inBuff = {plain.data(), plain.size(), 0};
     while (inBuff.pos < inBuff.size) {
+      pauseToken.wait_if_paused(stopToken);
       if (stopToken.stop_requested()) {
         job.setStatus(JobStatus::Aborted);
         if (callback)
@@ -1926,6 +2941,7 @@ expected<void, error_code> SeArchive::doTestFile(SeJob &job,
         currentCrc = crc32c_update(currentCrc, outBuff.dst, outBuff.pos);
 
         job.processedBytes = calculatedUncompressedSize;
+        job.compressedBytes = totalReadCipherBytes;
         job.percentage =
             entry.uncompressed_size == 0
                 ? 100
@@ -1940,6 +2956,7 @@ expected<void, error_code> SeArchive::doTestFile(SeJob &job,
 
   uint64_t remainingCipher = entry.compressed_size;
   while (remainingCipher > 0) {
+    pauseToken.wait_if_paused(stopToken);
     if (stopToken.stop_requested()) {
       job.setStatus(JobStatus::Aborted);
       if (callback)
@@ -1961,6 +2978,7 @@ expected<void, error_code> SeArchive::doTestFile(SeJob &job,
       break;
     }
 
+    totalReadCipherBytes += *_rd;
     remainingCipher -= *_rd;
 
     auto _cryptoResult = cryptoSess->decrypt(
@@ -2024,7 +3042,7 @@ expected<void, error_code> SeArchive::doTestFile(SeJob &job,
   // Verify CRC and uncompressed size against TOC entry
   if (currentCrc != entry.crc32 ||
       calculatedUncompressedSize != entry.uncompressed_size) {
-    job.setStatus(JobStatus::Finished);
+    job.setStatus(JobStatus::Failed);
     if (callback)
       callback(job);
     return unexpected(SeError::CrcChecksumFailed);
@@ -2032,6 +3050,7 @@ expected<void, error_code> SeArchive::doTestFile(SeJob &job,
 
   job.setStatus(JobStatus::Finished);
   job.processedBytes = calculatedUncompressedSize;
+  job.compressedBytes = entry.compressed_size;
   job.percentage = 100;
   if (callback)
     callback(job);
@@ -2039,9 +3058,42 @@ expected<void, error_code> SeArchive::doTestFile(SeJob &job,
   return {};
 }
 
+expected<bool, error_code>
+SeArchive::TestFileSync(u16string fileName, ProgressCallback callback,
+                        stop_token stopToken, SePauseToken pauseToken) {
+  SeJob job(JobType::TestFile, fileName, u"");
+  auto res = this->doTestFile(job, callback, stopToken, pauseToken);
+  if (!res) {
+    return unexpected(res.error());
+  }
+  return true;
+}
+
+SeTaskHandle<bool>
+SeArchive::TestFileAsync(u16string fileName, ProgressCallback callback) {
+  auto promise = std::make_shared<std::promise<expected<bool, error_code>>>();
+  auto future = promise->get_future().share();
+  auto pauseState = std::make_shared<SePauseState>();
+  SePauseToken pauseToken(pauseState);
+
+  std::jthread worker([this, fileName = std::move(fileName),
+                       callback = std::move(callback),
+                       promise, pauseToken](std::stop_token stopToken) {
+    try {
+      auto res = this->TestFileSync(fileName, callback, stopToken, pauseToken);
+      promise->set_value(res);
+    } catch (...) {
+      promise->set_exception(std::current_exception());
+    }
+  });
+
+  return SeTaskHandle<bool>(std::move(worker), std::move(future), std::move(pauseState));
+}
+
 expected<size_t, error_code>
 SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
-                           ProgressCallback callback, stop_token stopToken) {
+                           ProgressCallback callback, stop_token stopToken,
+                           SePauseToken pauseToken) {
   // Only directory output path are allowed
   // Job handling is internal to this function no registration required
   SeJob job(JobType::ExtractFile, fileName, outputPath);
@@ -2054,6 +3106,21 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
     if (callback)
       callback(job);
     return unexpected(SeError::ExpectedDirectory);
+  }
+
+  if (pauseToken.wait_if_paused(stopToken,
+          [&]() {
+            job.setStatus(JobStatus::Paused);
+            if (callback) callback(job);
+          },
+          [&]() {
+            job.setStatus(JobStatus::Running);
+            if (callback) callback(job);
+          })) {
+    job.setStatus(JobStatus::Aborted);
+    if (callback)
+      callback(job);
+    return unexpected(SeError::OperationCanceled);
   }
 
   if (stopToken.stop_requested()) {
@@ -2183,18 +3250,37 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
   job.setStatus(JobStatus::Running);
   job.totalBytes = entry.uncompressed_size;
   job.processedBytes = 0;
+  job.compressedBytes = 0;
   job.percentage = 0;
   if (callback)
     callback(job);
 
   uint64_t totalExtractedBytes = 0;
+  uint64_t totalReadCipherBytes = 0;
   uint32_t currentCrc = CRC32C_INIT;
 
   auto decompressAndWrite =
       [&](span<const unsigned char> plain) -> expected<void, error_code> {
     ZSTD_inBuffer inBuff = {plain.data(), plain.size(), 0};
     while (inBuff.pos < inBuff.size) {
+      if (pauseToken.wait_if_paused(stopToken,
+              [&]() {
+                job.setStatus(JobStatus::Paused);
+                if (callback) callback(job);
+              },
+              [&]() {
+                job.setStatus(JobStatus::Running);
+                if (callback) callback(job);
+              })) {
+        outFs.abort();
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+          callback(job);
+        return unexpected(SeError::OperationCanceled);
+      }
+
       if (stopToken.stop_requested()) {
+        outFs.abort();
         job.setStatus(JobStatus::Aborted);
         if (callback)
           callback(job);
@@ -2224,6 +3310,7 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
         currentCrc = crc32c_update(currentCrc, outBuff.dst, outBuff.pos);
 
         job.processedBytes = totalExtractedBytes;
+        job.compressedBytes = totalReadCipherBytes;
         job.percentage =
             entry.uncompressed_size == 0
                 ? 100
@@ -2238,7 +3325,24 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
 
   uint64_t remainingCipher = entry.compressed_size;
   while (remainingCipher > 0) {
+    if (pauseToken.wait_if_paused(stopToken,
+            [&]() {
+              job.setStatus(JobStatus::Paused);
+              if (callback) callback(job);
+            },
+            [&]() {
+              job.setStatus(JobStatus::Running);
+              if (callback) callback(job);
+            })) {
+      outFs.abort();
+      job.setStatus(JobStatus::Aborted);
+      if (callback)
+        callback(job);
+      return unexpected(SeError::OperationCanceled);
+    }
+
     if (stopToken.stop_requested()) {
+      outFs.abort();
       job.setStatus(JobStatus::Aborted);
       if (callback)
         callback(job);
@@ -2259,6 +3363,7 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
       break;
     }
 
+    totalReadCipherBytes += *_rd;
     remainingCipher -= *_rd;
 
     auto _cryptoResult = cryptoSess->decrypt(
@@ -2324,12 +3429,13 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
 
   // Finalize compression and output stream
   ZSTD_DCtx_reset(this->m_zstdDctx.get(), ZSTD_reset_session_only);
-  outFs.flush();
+  (void)outFs.flush();
 
   currentCrc = crc32c_finalize(currentCrc);
 
   job.setStatus(JobStatus::Finished);
   job.processedBytes = totalExtractedBytes;
+  job.compressedBytes = entry.compressed_size;
   job.percentage = 100;
   if (callback)
     callback(job);
@@ -2337,10 +3443,36 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
   return totalExtractedBytes;
 }
 
+SeTaskHandle<size_t>
+SeArchive::ExtractFileAsync(u16string fileName, u16string outputPath,
+                            ProgressCallback callback) {
+  auto pauseState = std::make_shared<SePauseState>();
+  SePauseToken pauseToken(pauseState);
+  auto promise = std::make_shared<std::promise<expected<size_t, error_code>>>();
+  auto future = promise->get_future().share();
+
+  std::jthread worker([this, fileName = std::move(fileName),
+                       outputPath = std::move(outputPath),
+                       callback = std::move(callback),
+                       pauseToken,
+                       promise](std::stop_token stopToken) {
+    try {
+      auto res =
+          this->ExtractFileSync(fileName, outputPath, callback, stopToken, pauseToken);
+      promise->set_value(res);
+    } catch (...) {
+      promise->set_exception(std::current_exception());
+    }
+  });
+
+  return SeTaskHandle<size_t>(std::move(worker), std::move(future), std::move(pauseState));
+}
+
 expected<size_t, error_code>
 SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
                                 ProgressCallback callback,
-                                stop_token stopToken) {
+                                stop_token stopToken,
+                                SePauseToken pauseToken) {
   u16string normDir = SeTableOfContent::NormalizeDirectoryPath(fileName);
   SeJob job(JobType::ExtractDirectory, normDir, outputPath);
   job.setStatus(JobStatus::Pending);
@@ -2353,6 +3485,21 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
     if (callback)
       callback(job);
     return unexpected(SeError::ExpectedDirectory);
+  }
+
+  if (pauseToken.wait_if_paused(stopToken,
+          [&]() {
+            job.setStatus(JobStatus::Paused);
+            if (callback) callback(job);
+          },
+          [&]() {
+            job.setStatus(JobStatus::Running);
+            if (callback) callback(job);
+          })) {
+    job.setStatus(JobStatus::Aborted);
+    if (callback)
+      callback(job);
+    return unexpected(SeError::OperationCanceled);
   }
 
   if (stopToken.stop_requested()) {
@@ -2437,6 +3584,21 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
 
   // Create subdirectories on disk
   for (const auto &dirEntry : dirsToExtract) {
+    if (pauseToken.wait_if_paused(stopToken,
+            [&]() {
+              job.setStatus(JobStatus::Paused);
+              if (callback) callback(job);
+            },
+            [&]() {
+              job.setStatus(JobStatus::Running);
+              if (callback) callback(job);
+            })) {
+      job.setStatus(JobStatus::Aborted);
+      if (callback)
+        callback(job);
+      return unexpected(SeError::OperationCanceled);
+    }
+
     if (stopToken.stop_requested()) {
       job.setStatus(JobStatus::Aborted);
       if (callback)
@@ -2465,6 +3627,21 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
     if (callback)
         callback(job);
 
+    if (pauseToken.wait_if_paused(stopToken,
+            [&]() {
+              job.setStatus(JobStatus::Paused);
+              if (callback) callback(job);
+            },
+            [&]() {
+              job.setStatus(JobStatus::Running);
+              if (callback) callback(job);
+            })) {
+      job.setStatus(JobStatus::Aborted);
+      if (callback)
+        callback(job);
+      return unexpected(SeError::OperationCanceled);
+    }
+
     if (stopToken.stop_requested()) {
       job.setStatus(JobStatus::Aborted);
       if (callback)
@@ -2490,10 +3667,35 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
       targetDirStr += u'/';
     }
 
+    // Emit active running status for the current file before extraction begins
+    job.SetFileName(fileEntry.path);
+    job.processedBytes = extractedFilesCount;
+    job.percentage = filesToExtract.empty()
+                         ? 0
+                         : static_cast<uint32_t>((extractedFilesCount * 100) /
+                                                 filesToExtract.size());
+    job.setStatus(JobStatus::Running);
+    if (callback)
+      callback(job);
+
+    auto fileProgressCb = [&](const SeJob &fileSubJob) {
+      if (fileSubJob.GetStatus() == JobStatus::Paused) {
+        job.setStatus(JobStatus::Paused);
+        if (callback) callback(job);
+      } else if (fileSubJob.GetStatus() == JobStatus::Running && job.GetStatus() == JobStatus::Paused) {
+        job.setStatus(JobStatus::Running);
+        if (callback) callback(job);
+      }
+    };
+
     auto _extractRes =
-        this->ExtractFileSync(fileEntry.path, targetDirStr, nullptr, stopToken);
+        this->ExtractFileSync(fileEntry.path, targetDirStr, callback ? ProgressCallback(fileProgressCb) : nullptr, stopToken, pauseToken);
     if (!_extractRes) {
-      job.setStatus(JobStatus::Failed);
+      if (_extractRes.error() == SeError::OperationCanceled) {
+        job.setStatus(JobStatus::Aborted);
+      } else {
+        job.setStatus(JobStatus::Failed);
+      }
       if (callback)
         callback(job);
       return unexpected(_extractRes.error());
@@ -2509,6 +3711,7 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
       callback(job);
   }
 
+  job.SetFileName(normDir);
   job.setStatus(JobStatus::Finished);
   job.processedBytes = extractedFilesCount;
   job.percentage = 100;
@@ -2516,6 +3719,31 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
     callback(job);
 
   return extractedFilesCount;
+}
+
+SeTaskHandle<size_t>
+SeArchive::ExtractDirectoryAsync(u16string fileName, u16string outputPath,
+                                 ProgressCallback callback) {
+  auto pauseState = std::make_shared<SePauseState>();
+  SePauseToken pauseToken(pauseState);
+  auto promise = std::make_shared<std::promise<expected<size_t, error_code>>>();
+  auto future = promise->get_future().share();
+
+  std::jthread worker([this, fileName = std::move(fileName),
+                       outputPath = std::move(outputPath),
+                       callback = std::move(callback),
+                       pauseToken,
+                       promise](std::stop_token stopToken) {
+    try {
+      auto res =
+          this->ExtractDirectorySync(fileName, outputPath, callback, stopToken, pauseToken);
+      promise->set_value(res);
+    } catch (...) {
+      promise->set_exception(std::current_exception());
+    }
+  });
+
+  return SeTaskHandle<size_t>(std::move(worker), std::move(future), std::move(pauseState));
 }
 
 bool SeArchive::verifyJobs() {
@@ -2544,56 +3772,78 @@ bool SeArchive::addJob(SeJob &job) {
 
   job.m_id = this->m_jobCtr++;
 
+  if (job.m_type == JobType::CreateArchiveDirectory ||
+      job.m_type == JobType::AddDirectory) {
+    this->m_queuedDirs.insert(SeTableOfContent::NormalizeDirectoryPath(job.m_fileName));
+  } else if (job.m_type == JobType::AddFile) {
+    this->m_queuedFiles.insert(SeTableOfContent::NormalizeFilePath(job.m_fileName));
+  }
+
   m_jobs.push_back(job);
   return true;
 }
 
-bool SeArchive::checkParentPath(const u16string &path) const {
-  u16string parent = SeTableOfContent::GetParentDirectory(path);
-  if (this->m_toc.CheckPath(parent))
-    return true;
-  for (const auto &job : this->m_jobs) {
-    if (job.m_type == JobType::CreateArchiveDirectory) {
-      if (SeTableOfContent::NormalizeDirectoryPath(job.m_fileName) == parent)
-        return true;
+void SeArchive::rebuildQueuedPathSets() {
+  this->m_queuedDirs.clear();
+  this->m_queuedFiles.clear();
+  for (const auto &j : this->m_jobs) {
+    if (j.m_type == JobType::CreateArchiveDirectory ||
+        j.m_type == JobType::AddDirectory) {
+      this->m_queuedDirs.insert(SeTableOfContent::NormalizeDirectoryPath(j.m_fileName));
+    } else if (j.m_type == JobType::AddFile) {
+      this->m_queuedFiles.insert(SeTableOfContent::NormalizeFilePath(j.m_fileName));
     }
   }
-  return false;
+}
+
+bool SeArchive::checkParentPath(const u16string &path) const {
+  u16string parent = SeTableOfContent::GetParentDirectory(path);
+  if (parent == u"/")
+    return true;
+  if (this->m_queuedDirs.find(parent) != this->m_queuedDirs.end())
+    return true;
+  for (const auto &d : this->m_queuedDirs) {
+    if (parent.starts_with(d))
+      return true;
+  }
+  return this->m_toc.CheckPath(parent);
 }
 
 bool SeArchive::checkPathExists(const u16string &path) const {
   u16string norm = SeTableOfContent::NormalizeArchivePath(path);
-  if (this->m_toc.CheckPath(norm))
+  if (norm == u"/")
     return true;
-  for (const auto &job : this->m_jobs) {
-    if (job.m_type == JobType::CreateArchiveDirectory) {
-      if (SeTableOfContent::NormalizeDirectoryPath(job.m_fileName) == norm)
-        return true;
-    } else if (job.m_type == JobType::AddFile) {
-      if (SeTableOfContent::NormalizeFilePath(job.m_fileName) == norm)
-        return true;
-    }
+
+  u16string dirNorm = norm;
+  if (dirNorm.back() != u'/') {
+    dirNorm.push_back(u'/');
   }
-  return false;
+  u16string fileNorm = norm;
+  while (fileNorm.size() > 1 && fileNorm.back() == u'/') {
+    fileNorm.pop_back();
+  }
+
+  if (this->m_queuedDirs.find(dirNorm) != this->m_queuedDirs.end() ||
+      this->m_queuedFiles.find(fileNorm) != this->m_queuedFiles.end()) {
+    return true;
+  }
+  return this->m_toc.CheckPath(norm);
 }
 
-void SeArchive::optimizeJobs() {
-  auto arePathsEqual = [](const u16string &p1, const u16string &p2) -> bool {
-    return SeTableOfContent::NormalizeArchivePath(p1) ==
-           SeTableOfContent::NormalizeArchivePath(p2);
-  };
+vector<int> SeArchive::optimizeJobs() {
+  if (this->m_jobs.empty()) {
+    return {};
+  }
 
-  auto isUnderDirectory = [](const u16string &child,
-                             const u16string &parentDir) -> bool {
-    u16string normParent = SeTableOfContent::NormalizeDirectoryPath(parentDir);
-    u16string normChild = SeTableOfContent::NormalizeArchivePath(child);
-    return normChild.size() > normParent.size() &&
-           normChild.starts_with(normParent);
-  };
+  vector<int> originalJobIds;
+  originalJobIds.reserve(this->m_jobs.size());
+  for (const auto &j : this->m_jobs) {
+    originalJobIds.push_back(j.GetId());
+  }
 
   // --- Pass 1: Deduplicate CompressionLevelChange jobs ---
   // If multiple compression changes are queued in a single transaction, keep
-  // only the latest one.
+  // only the latest one and place it at the beginning of the transaction queue.
   int lastCompressionIdx = -1;
   for (int i = 0; i < static_cast<int>(this->m_jobs.size()); ++i) {
     if (this->m_jobs[i].m_type == JobType::CompressionLevelChange) {
@@ -2605,259 +3855,361 @@ void SeArchive::optimizeJobs() {
     filtered.reserve(this->m_jobs.size());
     filtered.push_back(move(this->m_jobs[lastCompressionIdx]));
     for (int i = 0; i < static_cast<int>(this->m_jobs.size()); ++i) {
-      if (this->m_jobs[i].m_type != JobType::CompressionLevelChange) {
+      if (this->m_jobs[i].m_type != JobType::CompressionLevelChange &&
+          this->m_jobs[i].m_type != JobType::None) {
         filtered.push_back(move(this->m_jobs[i]));
       }
     }
     this->m_jobs = move(filtered);
   }
 
-  // --- Pass 2: Iterative I/O Optimizer Loop ---
-  // Simulates an I/O request scheduler: merges repeated jobs, cancels transient
-  // additions/removals, eliminates redundant directory additions/deletions, and
-  // folds move operations until a fixpoint is reached.
-  bool changed = true;
-  while (changed) {
-    changed = false;
+  const size_t numJobs = this->m_jobs.size();
 
-    for (size_t i = 0; i < this->m_jobs.size(); ++i) {
-      auto &jobA = this->m_jobs[i];
+  // --- Pass 2: Upfront Path Canonicalization (O(N * L)) ---
+  // Pre-normalize all paths once to avoid dynamic allocations during matching.
+  struct JobPaths {
+    u16string target;    // Primary normalized archive path
+    u16string secondary; // Destination directory for moves, or source disk path for AddFile
+  };
 
-      // 1. File Operation Optimizations
-      if (jobA.m_type == JobType::AddFile) {
-        for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
-          auto &jobB = this->m_jobs[j];
+  vector<JobPaths> paths(numJobs);
 
-          // Case 1A: Double AddFile on same archive destination
-          // AddFile(P, disk1) followed by AddFile(P, disk2) -> drop jobA (disk2
-          // overwrites disk1)
-          if (jobB.m_type == JobType::AddFile &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            this->m_jobs.erase(this->m_jobs.begin() + i);
-            changed = true;
-            break;
-          }
+  for (size_t i = 0; i < numJobs; ++i) {
+    auto &job = this->m_jobs[i];
+    if (job.m_type == JobType::None)
+      continue;
 
-          // Case 1B: AddFile followed by RemoveFile on same archive path
-          if (jobB.m_type == JobType::RemoveFile &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            if (!this->m_toc.CheckPath(jobA.m_fileName)) {
-              // File was transient (created and deleted within this uncommitted
-              // queue session). Both jobs cancel out completely!
-              this->m_jobs.erase(this->m_jobs.begin() +
-                                 j); // Erase later job first
-              this->m_jobs.erase(this->m_jobs.begin() + i);
-            } else {
-              // File already existed in TOC originally. The AddFile was an
-              // overwrite, but RemoveFile means it should be deleted. Drop
-              // AddFile, keep RemoveFile.
-              this->m_jobs.erase(this->m_jobs.begin() + i);
-            }
-            changed = true;
-            break;
-          }
+    switch (job.m_type) {
+    case JobType::AddFile:
+      paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
+      paths[i].secondary = job.m_filePath;
+      job.m_fileName = paths[i].target;
+      break;
+    case JobType::RemoveFile:
+      paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
+      job.m_fileName = paths[i].target;
+      break;
+    case JobType::CreateArchiveDirectory:
+    case JobType::AddDirectory:
+      paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
+      job.m_fileName = paths[i].target;
+      break;
+    case JobType::DeleteDirectory:
+      paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
+      job.m_fileName = paths[i].target;
+      break;
+    case JobType::MoveArchiveFile:
+      paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
+      paths[i].secondary = SeTableOfContent::NormalizeDirectoryPath(job.m_filePath);
+      job.m_fileName = paths[i].target;
+      job.m_filePath = paths[i].secondary;
+      break;
+    case JobType::MoveDirectory:
+      paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
+      paths[i].secondary = SeTableOfContent::NormalizeDirectoryPath(job.m_filePath);
+      job.m_fileName = paths[i].target;
+      job.m_filePath = paths[i].secondary;
+      break;
+    default:
+      break;
+    }
+  }
 
-          // Case 1C: AddFile followed by MoveArchiveFile
-          // AddFile(src, disk) followed by MoveArchiveFile(src, dstDir) ->
-          // Directly AddFile(dstDir/fileName, disk) and eliminate
-          // MoveArchiveFile.
-          if (jobB.m_type == JobType::MoveArchiveFile &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            u16string fileName =
-                SeTableOfContent::GetFileName(jobA.m_fileName);
-            u16string targetPath =
-                SeTableOfContent::CreateFilePath(jobB.m_filePath, fileName);
-            jobA.m_fileName = targetPath;
-            this->m_jobs.erase(this->m_jobs.begin() + j);
-            changed = true;
-            break;
-          }
-        }
-        if (changed)
-          break;
-      } else if (jobA.m_type == JobType::RemoveFile) {
-        for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
-          auto &jobB = this->m_jobs[j];
-          // Case 1D: Duplicate RemoveFile
-          if (jobB.m_type == JobType::RemoveFile &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            this->m_jobs.erase(this->m_jobs.begin() + j);
-            changed = true;
-            break;
-          }
-          // If an AddFile occurs on same path, stop scanning (valid sequence:
-          // delete old, add new)
-          if (jobB.m_type == JobType::AddFile &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            break;
-          }
-        }
-        if (changed)
-          break;
+  // --- Pass 3: Chronological State Machine Simulation (O(N * L)) ---
+  unordered_map<u16string, int> activeFileJobs;
+  unordered_map<u16string, int> activeDirJobs;
+  unordered_map<u16string, int> pendingFileDeletes;
+  unordered_map<u16string, int> pendingDirDeletes;
+  unordered_set<u16string> deletedDirectories;
+
+  activeFileJobs.reserve(numJobs);
+  activeDirJobs.reserve(numJobs / 4);
+
+  for (size_t i = 0; i < numJobs; ++i) {
+    auto &job = this->m_jobs[i];
+    if (job.m_type == JobType::None)
+      continue;
+
+    // --- File Operations ---
+    if (job.m_type == JobType::AddFile) {
+      const auto &p = paths[i].target;
+      auto it = activeFileJobs.find(p);
+      if (it != activeFileJobs.end()) {
+        int priorIdx = it->second;
+        // Case 1A: Double AddFile on same archive destination -> drop prior add
+        this->m_jobs[priorIdx].m_type = JobType::None;
+        it->second = static_cast<int>(i);
+      } else {
+        activeFileJobs[p] = static_cast<int>(i);
       }
-      // 2. Directory Operation Optimizations
-      else if (jobA.m_type == JobType::CreateArchiveDirectory) {
-        for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
-          auto &jobB = this->m_jobs[j];
+      pendingFileDeletes.erase(p);
+    } else if (job.m_type == JobType::RemoveFile) {
+      const auto &p = paths[i].target;
+      auto it = activeFileJobs.find(p);
+      if (it != activeFileJobs.end()) {
+        int priorIdx = it->second;
+        auto &priorJob = this->m_jobs[priorIdx];
 
-          // Case 2A: Double AddDirectory
-          if (jobB.m_type == JobType::CreateArchiveDirectory &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            this->m_jobs.erase(this->m_jobs.begin() + j);
-            changed = true;
-            break;
+        if (priorJob.m_type == JobType::AddFile) {
+          // Case 1B: AddFile followed by RemoveFile
+          if (!this->m_toc.CheckPath(p)) {
+            // Transient file -> both cancel out
+            priorJob.m_type = JobType::None;
+            job.m_type = JobType::None;
+          } else {
+            // Pre-existed in TOC -> drop AddFile overwrite, keep RemoveFile
+            priorJob.m_type = JobType::None;
+            pendingFileDeletes[p] = static_cast<int>(i);
           }
-
-          // Case 2B: AddDirectory followed by DeleteDirectory
-          if (jobB.m_type == JobType::DeleteDirectory &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            if (!this->m_toc.CheckPath(jobA.m_fileName)) {
-              // Transient directory created & deleted in same batch -> cancel
-              // both out!
-              this->m_jobs.erase(this->m_jobs.begin() + j);
-              this->m_jobs.erase(this->m_jobs.begin() + i);
-            } else {
-              // Pre-existed in TOC -> drop redundant Add, keep Delete
-              this->m_jobs.erase(this->m_jobs.begin() + i);
-            }
-            changed = true;
-            break;
-          }
-
-          // Case 2C: AddDirectory followed by MoveDirectory
-          // AddDirectory(src) followed by MoveDirectory(src, dstDir) ->
-          // Directly AddDirectory(dstDir/srcName) and eliminate MoveDirectory
-          if (jobB.m_type == JobType::MoveDirectory &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            u16string dirName =
-                SeTableOfContent::GetFileName(jobA.m_fileName);
-            u16string targetPath =
-                SeTableOfContent::CreateDirPath(jobB.m_filePath, dirName);
-            jobA.m_fileName = targetPath;
-            this->m_jobs.erase(this->m_jobs.begin() + j);
-            changed = true;
-            break;
-          }
-        }
-        if (changed)
-          break;
-      } else if (jobA.m_type == JobType::DeleteDirectory) {
-        // Case 2D: Duplicate DeleteDirectory
-        for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
-          auto &jobB = this->m_jobs[j];
-          if (jobB.m_type == JobType::DeleteDirectory &&
-              arePathsEqual(jobA.m_fileName, jobB.m_fileName)) {
-            this->m_jobs.erase(this->m_jobs.begin() + j);
-            changed = true;
-            break;
-          }
-        }
-        if (changed)
-          break;
-
-        // Case 2E: DeleteDirectory subsumes newly added files/dirs inside this
-        // directory
-        for (size_t k = 0; k < i; ++k) {
-          auto &priorJob = this->m_jobs[k];
-          if ((priorJob.m_type == JobType::AddFile ||
-               priorJob.m_type == JobType::CreateArchiveDirectory) &&
-              isUnderDirectory(priorJob.m_fileName, jobA.m_fileName)) {
-            if (!this->m_toc.CheckPath(priorJob.m_fileName)) {
-              // Transient item inside deleted directory; erase prior add job
-              this->m_jobs.erase(this->m_jobs.begin() + k);
-              changed = true;
-              break;
-            }
-          }
-        }
-        if (changed)
-          break;
-      }
-      // 3. Move Operation Merging & Folding
-      else if (jobA.m_type == JobType::MoveArchiveFile) {
-        // jobA: move from jobA.m_fileName (source file) to directory
-        // jobA.m_filePath
-        u16string fileBaseName =
-            SeTableOfContent::GetFileName(jobA.m_fileName);
-        u16string destFile =
-            SeTableOfContent::CreateFilePath(jobA.m_filePath, fileBaseName);
-
-        for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
-          auto &jobB = this->m_jobs[j];
-
-          // Case 3A: MoveArchiveFile followed by MoveArchiveFile (Chained move)
-          if (jobB.m_type == JobType::MoveArchiveFile &&
-              arePathsEqual(destFile, jobB.m_fileName)) {
-            u16string origDir =
-                SeTableOfContent::GetParentDirectory(jobA.m_fileName);
-            // Check for round-trip move (moved back to original directory)
-            if (arePathsEqual(origDir, jobB.m_filePath)) {
-              // Net move is a no-op! Both moves cancel out completely.
-              this->m_jobs.erase(this->m_jobs.begin() + j);
-              this->m_jobs.erase(this->m_jobs.begin() + i);
-            } else {
-              // Chain: update jobA destination directory to jobB destination
-              // directory
-              jobA.m_filePath = jobB.m_filePath;
-              this->m_jobs.erase(this->m_jobs.begin() + j);
-            }
-            changed = true;
-            break;
-          }
-
+          activeFileJobs.erase(it);
+        } else if (priorJob.m_type == JobType::MoveArchiveFile) {
           // Case 3B: MoveArchiveFile followed by RemoveFile on destination
-          if (jobB.m_type == JobType::RemoveFile &&
-              arePathsEqual(destFile, jobB.m_fileName)) {
-            jobA.m_type = JobType::RemoveFile;
-            jobA.m_filePath.clear();
-            this->m_jobs.erase(this->m_jobs.begin() + j);
-            changed = true;
-            break;
+          priorJob.m_type = JobType::RemoveFile;
+          priorJob.m_filePath.clear();
+          job.m_type = JobType::None;
+          activeFileJobs.erase(it);
+          pendingFileDeletes[priorJob.m_fileName] = priorIdx;
+        }
+      } else {
+        auto delIt = pendingFileDeletes.find(p);
+        if (delIt != pendingFileDeletes.end()) {
+          // Case 1D: Duplicate RemoveFile
+          job.m_type = JobType::None;
+        } else {
+          pendingFileDeletes[p] = static_cast<int>(i);
+        }
+      }
+    } else if (job.m_type == JobType::MoveArchiveFile) {
+      const auto &src = paths[i].target;
+      const auto &dstDir = paths[i].secondary;
+      u16string fileName = SeTableOfContent::GetFileName(src);
+      u16string dstFile = SeTableOfContent::NormalizeFilePath(
+          SeTableOfContent::CreateFilePath(dstDir, fileName));
+
+      auto it = activeFileJobs.find(src);
+      if (it != activeFileJobs.end()) {
+        int priorIdx = it->second;
+        auto &priorJob = this->m_jobs[priorIdx];
+
+        if (priorJob.m_type == JobType::AddFile) {
+          // Case 1C: AddFile followed by MoveArchiveFile
+          priorJob.m_fileName = dstFile;
+          paths[priorIdx].target = dstFile;
+          job.m_type = JobType::None;
+
+          activeFileJobs.erase(it);
+          activeFileJobs[dstFile] = priorIdx;
+        } else if (priorJob.m_type == JobType::MoveArchiveFile) {
+          // Case 3A: Chained move (A -> B -> C)
+          u16string origDir = SeTableOfContent::GetParentDirectory(priorJob.m_fileName);
+          if (origDir == dstDir) {
+            // Round-trip move cancelled out
+            priorJob.m_type = JobType::None;
+            job.m_type = JobType::None;
+            activeFileJobs.erase(it);
+          } else {
+            priorJob.m_filePath = dstDir;
+            paths[priorIdx].secondary = dstDir;
+            job.m_type = JobType::None;
+
+            activeFileJobs.erase(it);
+            activeFileJobs[dstFile] = priorIdx;
           }
         }
-        if (changed)
-          break;
-      } else if (jobA.m_type == JobType::MoveDirectory) {
-        // jobA: move directory from jobA.m_fileName to directory
-        // jobA.m_filePath
-        u16string dirBaseName =
-            SeTableOfContent::GetFileName(jobA.m_fileName);
-        u16string destDir =
-            SeTableOfContent::CreateDirPath(jobA.m_filePath, dirBaseName);
+      } else {
+        activeFileJobs[dstFile] = static_cast<int>(i);
+      }
+    }
 
-        for (size_t j = i + 1; j < this->m_jobs.size(); ++j) {
-          auto &jobB = this->m_jobs[j];
+    // --- Directory Operations ---
+    else if (job.m_type == JobType::CreateArchiveDirectory ||
+             job.m_type == JobType::AddDirectory) {
+      const auto &d = paths[i].target;
+      auto it = activeDirJobs.find(d);
+      if (it != activeDirJobs.end()) {
+        // Case 2A: Double AddDirectory
+        job.m_type = JobType::None;
+      } else {
+        activeDirJobs[d] = static_cast<int>(i);
+      }
+      pendingDirDeletes.erase(d);
+    } else if (job.m_type == JobType::DeleteDirectory) {
+      const auto &d = paths[i].target;
+      deletedDirectories.insert(d);
 
-          // Case 4A: Chained directory moves
-          if (jobB.m_type == JobType::MoveDirectory &&
-              arePathsEqual(destDir, jobB.m_fileName)) {
-            u16string origParentDir =
-                SeTableOfContent::GetParentDirectory(jobA.m_fileName);
-            if (arePathsEqual(origParentDir, jobB.m_filePath)) {
-              // Round-trip move cancelled out
-              this->m_jobs.erase(this->m_jobs.begin() + j);
-              this->m_jobs.erase(this->m_jobs.begin() + i);
-            } else {
-              jobA.m_filePath = jobB.m_filePath;
-              this->m_jobs.erase(this->m_jobs.begin() + j);
-            }
-            changed = true;
-            break;
+      auto it = activeDirJobs.find(d);
+      if (it != activeDirJobs.end()) {
+        int priorIdx = it->second;
+        auto &priorJob = this->m_jobs[priorIdx];
+
+        if (priorJob.m_type == JobType::CreateArchiveDirectory ||
+            priorJob.m_type == JobType::AddDirectory) {
+          // Case 2B: AddDirectory followed by DeleteDirectory
+          if (!this->m_toc.CheckPath(d)) {
+            // Transient directory -> both cancel out
+            priorJob.m_type = JobType::None;
+            job.m_type = JobType::None;
+          } else {
+            priorJob.m_type = JobType::None;
+            pendingDirDeletes[d] = static_cast<int>(i);
           }
-
+          activeDirJobs.erase(it);
+        } else if (priorJob.m_type == JobType::MoveDirectory) {
           // Case 4B: MoveDirectory followed by DeleteDirectory
-          if (jobB.m_type == JobType::DeleteDirectory &&
-              arePathsEqual(destDir, jobB.m_fileName)) {
-            jobA.m_type = JobType::DeleteDirectory;
-            jobA.m_filePath.clear();
-            this->m_jobs.erase(this->m_jobs.begin() + j);
-            changed = true;
-            break;
+          priorJob.m_type = JobType::DeleteDirectory;
+          priorJob.m_filePath.clear();
+          job.m_type = JobType::None;
+          activeDirJobs.erase(it);
+          deletedDirectories.insert(priorJob.m_fileName);
+          pendingDirDeletes[priorJob.m_fileName] = priorIdx;
+        }
+      } else {
+        auto delIt = pendingDirDeletes.find(d);
+        if (delIt != pendingDirDeletes.end()) {
+          // Case 2D: Duplicate DeleteDirectory
+          job.m_type = JobType::None;
+        } else {
+          pendingDirDeletes[d] = static_cast<int>(i);
+        }
+      }
+    } else if (job.m_type == JobType::MoveDirectory) {
+      const auto &src = paths[i].target;
+      const auto &dstDir = paths[i].secondary;
+      u16string dirName = SeTableOfContent::GetFileName(src);
+      u16string dstPath = SeTableOfContent::NormalizeDirectoryPath(
+          SeTableOfContent::CreateDirPath(dstDir, dirName));
+
+      auto it = activeDirJobs.find(src);
+      if (it != activeDirJobs.end()) {
+        int priorIdx = it->second;
+        auto &priorJob = this->m_jobs[priorIdx];
+
+        if (priorJob.m_type == JobType::CreateArchiveDirectory ||
+            priorJob.m_type == JobType::AddDirectory) {
+          // Case 2C: AddDirectory followed by MoveDirectory
+          priorJob.m_fileName = dstPath;
+          paths[priorIdx].target = dstPath;
+          job.m_type = JobType::None;
+
+          activeDirJobs.erase(it);
+          activeDirJobs[dstPath] = priorIdx;
+        } else if (priorJob.m_type == JobType::MoveDirectory) {
+          // Case 4A: Chained directory moves
+          u16string origParentDir = SeTableOfContent::GetParentDirectory(priorJob.m_fileName);
+          if (origParentDir == dstDir) {
+            priorJob.m_type = JobType::None;
+            job.m_type = JobType::None;
+            activeDirJobs.erase(it);
+          } else {
+            priorJob.m_filePath = dstDir;
+            paths[priorIdx].secondary = dstDir;
+            job.m_type = JobType::None;
+
+            activeDirJobs.erase(it);
+            activeDirJobs[dstPath] = priorIdx;
           }
         }
-        if (changed)
-          break;
+      } else {
+        activeDirJobs[dstPath] = static_cast<int>(i);
       }
     }
   }
+
+  // --- Pass 4: Directory Deletion Subsumption (O(N * L)) ---
+  // Invert check: verify if any ancestor directory of a transient job is in deletedDirectories.
+  if (!deletedDirectories.empty()) {
+    for (size_t i = 0; i < numJobs; ++i) {
+      auto &job = this->m_jobs[i];
+      if (job.m_type != JobType::AddFile &&
+          job.m_type != JobType::CreateArchiveDirectory &&
+          job.m_type != JobType::AddDirectory) {
+        continue;
+      }
+
+      const auto &itemPath = paths[i].target;
+      if (this->m_toc.CheckPath(itemPath)) {
+        continue; // Pre-existed in TOC
+      }
+
+      u16string currParent = SeTableOfContent::GetParentDirectory(itemPath);
+      while (!currParent.empty()) {
+        if (deletedDirectories.count(currParent)) {
+          job.m_type = JobType::None;
+          break;
+        }
+        if (currParent == u"/") {
+          break;
+        }
+        currParent = SeTableOfContent::GetParentDirectory(currParent);
+      }
+    }
+  }
+
+  // --- Pass 5: Topological Depth-Ordered Orphan Pruning (O(N * L)) ---
+  unordered_set<u16string> validDirectories;
+  validDirectories.insert(u"/");
+
+  vector<pair<int, u16string>> activeDirs;
+  activeDirs.reserve(activeDirJobs.size());
+  for (size_t i = 0; i < numJobs; ++i) {
+    if (this->m_jobs[i].m_type == JobType::CreateArchiveDirectory ||
+        this->m_jobs[i].m_type == JobType::AddDirectory) {
+      activeDirs.emplace_back(static_cast<int>(i), paths[i].target);
+    }
+  }
+
+  std::sort(activeDirs.begin(), activeDirs.end(),
+            [](const auto &a, const auto &b) {
+              size_t depthA = std::count(a.second.begin(), a.second.end(), u'/');
+              size_t depthB = std::count(b.second.begin(), b.second.end(), u'/');
+              return depthA < depthB;
+            });
+
+  for (const auto &dirItem : activeDirs) {
+    u16string parent = SeTableOfContent::GetParentDirectory(dirItem.second);
+    bool parentValid = (parent == u"/" ||
+                        validDirectories.count(parent) ||
+                        this->m_toc.CheckPath(parent));
+    if (parentValid) {
+      validDirectories.insert(dirItem.second);
+    } else {
+      this->m_jobs[dirItem.first].m_type = JobType::None;
+    }
+  }
+
+  // Prune orphan AddFile jobs
+  for (size_t i = 0; i < numJobs; ++i) {
+    if (this->m_jobs[i].m_type == JobType::AddFile) {
+      u16string parent = SeTableOfContent::GetParentDirectory(paths[i].target);
+      bool parentValid = (parent == u"/" ||
+                          validDirectories.count(parent) ||
+                          this->m_toc.CheckPath(parent));
+      if (!parentValid) {
+        this->m_jobs[i].m_type = JobType::None;
+      }
+    }
+  }
+
+  // --- Final Pass: In-Place Erase and ID Tracking (O(N)) ---
+  erase_if(this->m_jobs, [](const SeJob &job) {
+    return job.m_type == JobType::None;
+  });
+
+  this->rebuildQueuedPathSets();
+
+  unordered_set<int> remainingIds;
+  remainingIds.reserve(this->m_jobs.size());
+  for (const auto &j : this->m_jobs) {
+    remainingIds.insert(j.GetId());
+  }
+
+  vector<int> deletedIds;
+  deletedIds.reserve(originalJobIds.size() - this->m_jobs.size());
+  for (int id : originalJobIds) {
+    if (remainingIds.find(id) == remainingIds.end()) {
+      deletedIds.push_back(id);
+    }
+  }
+
+  return deletedIds;
 }
