@@ -1,14 +1,24 @@
 #include <qcoreapplication.h>
 #include <qqmlapplicationengine.h>
 #include <qguiapplication.h>
-#include <expected>
+#include <qqmlcontext.h>
 
-#include <libsecdet/SeArchive.h>
+#include "ArchiveInterface.h"
+#include "SeFileEntryObject.h"
+#include "SeJobObject.h"
+#include "SeMetadataObject.h"
 
 int main(int argc, char** argv) {
 	QGuiApplication app(argc, argv);
 
 	QQmlApplicationEngine engine;
+
+	ArchiveInterface archiveInterface;
+	engine.rootContext()->setContextProperty("archiveInterface", &archiveInterface);
+
+	qmlRegisterUncreatableType<SeFileEntryObject>("SecDet.Backend", 1, 0, "SeFileEntry", "Created by backend");
+	qmlRegisterUncreatableType<SeJobObject>("SecDet.Backend", 1, 0, "SeJobObject", "Created by backend");
+	qmlRegisterUncreatableType<SeMetadataObject>("SecDet.Backend", 1, 0, "SeMetadataObject", "Created by backend");
 
 	engine.loadFromModule("UI", "MainWindow");
 
