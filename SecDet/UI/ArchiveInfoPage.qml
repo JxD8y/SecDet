@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls.Basic as Basic
 import QtQuick.Layouts
 import QtQuick.Effects
 import UI
@@ -17,60 +18,218 @@ Page {
         color: "transparent"
     }
 
-    signal closeRequested()
-    signal regionSelected(var region, int index)
+    signal closeRequested
+    signal itemNavigated(string path, bool isFolder)
 
-    // ==========================================
-    // --- Public API for File Map & Shannon Entropy ---
-    // ==========================================
-    property var fileMapRegions: defaultRegions
+    property bool internalNavigationSync: false
 
-    // Built-in presets to easily demo / test dynamic byte scaling across different scales
-    readonly property var defaultRegions: [
-        { name: "Archive Header",          size: 512,        entropy: 2.15, crc32: "0x8A10F4D2", type: "header" },
-        { name: "Metadata Directory",      size: 16384,      entropy: 4.62, crc32: "0x3F88B110", type: "metadata" },
-        { name: "LZMA Stream #1",          size: 14889779,   entropy: 7.85, crc32: "0xD415982B", type: "compressed" },
-        { name: "AES-256 Vault Payload",   size: 50331648,   entropy: 7.99, crc32: "0x77EE01C9", type: "encrypted" },
-        { name: "File Index Table",        size: 4096,       entropy: 5.10, crc32: "0x12C0DE9A", type: "index" },
-        { name: "Digital Sig & Hashes",    size: 256,        entropy: 6.90, crc32: "0xFA990311", type: "signature" },
-        { name: "Archive Footer (EOCD)",   size: 128,        entropy: 1.40, crc32: "0x0B52AC71", type: "footer" }
-    ]
+    function notifyNavigation(path, isFolder) {
+        if (internalNavigationSync) return;
+        root.itemNavigated(path, isFolder);
+    }
 
-    readonly property var presetGigabyte: [
-        { name: "Boot Block / MBR",        size: 512,        entropy: 1.80, crc32: "0x2A4C9100", type: "header" },
-        { name: "Allocation Table",        size: 67108864,   entropy: 4.20, crc32: "0x7E3100AF", type: "index" },
-        { name: "Encrypted Volume",        size: 4831838208, entropy: 7.99, crc32: "0x99CD5412", type: "encrypted" },
-        { name: "ECC Parity Blocks",       size: 293601280,  entropy: 6.15, crc32: "0x489BEE22", type: "parity" },
-        { name: "Journal Checkpoint",      size: 131072,     entropy: 3.45, crc32: "0x10A97C55", type: "metadata" },
-        { name: "Volume Trailer",          size: 256,        entropy: 1.10, crc32: "0x88FE1299", type: "footer" }
-    ]
+    function navigateToItem(itemPath, isFolder) {
+        if (typeof sunburstCard !== "undefined" && sunburstCard) {
+            internalNavigationSync = true;
+            sunburstCard.navigateToFileMapItem(itemPath, isFolder);
+            internalNavigationSync = false;
+        }
+    }
 
-    readonly property var presetKilobyte: [
-        { name: "Magic Header",            size: 16,         entropy: 2.80, crc32: "0x53454344", type: "header" },
-        { name: "Config Schema JSON",      size: 1840,       entropy: 4.35, crc32: "0x8192ABCD", type: "metadata" },
-        { name: "State Blob (Zstd)",       size: 33177,      entropy: 7.60, crc32: "0x66554433", type: "compressed" },
-        { name: "HMAC Auth Token",         size: 256,        entropy: 6.70, crc32: "0xFEEDFACE", type: "security" },
-        { name: "Checksum Postscript",     size: 4,          entropy: 0.50, crc32: "0xC001D00D", type: "footer" }
-    ]
-
-    readonly property var presetFragmented: [
-        { name: "Master Header",           size: 256,        entropy: 2.05, crc32: "0xA1B2C3D4", type: "header" },
-        { name: "Dictionary Index",        size: 8192,       entropy: 5.30, crc32: "0xB2C3D4E5", type: "index" },
-        { name: "Segment #1 (Raw)",        size: 524288,     entropy: 3.75, crc32: "0xC3D4E5F6", type: "raw" },
-        { name: "Segment #2 (LZ4)",        size: 4194304,    entropy: 7.10, crc32: "0xD4E5F6A7", type: "compressed" },
-        { name: "Checkpoint Chunk",        size: 64,         entropy: 1.20, crc32: "0xE5F6A7B8", type: "checkpoint" },
-        { name: "Segment #3 (ChaCha20)",   size: 18874368,   entropy: 7.99, crc32: "0xF6A7B8C9", type: "encrypted" },
-        { name: "Padding Zeroes",          size: 1024,       entropy: 0.05, crc32: "0x00000000", type: "padding" },
-        { name: "Segment #4 (Media)",      size: 8388608,    entropy: 6.45, crc32: "0xA7B8C9D0", type: "media" },
-        { name: "Security Certificate",    size: 2048,       entropy: 6.85, crc32: "0xB8C9D0E1", type: "security" },
-        { name: "Manifest & End Record",   size: 128,        entropy: 1.50, crc32: "0xC9D0E1F2", type: "footer" }
-    ]
+    readonly property bool hasActiveArchive: typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.hasArchive
 
     FontLoader {
         id: materialIcons
         source: "Fonts/MaterialIconsRound-Regular.otf"
     }
 
+    // Settings State & Tracking
+    property int pendingCompressionLevel: (hasActiveArchive && archiveInterface.metadata) ? archiveInterface.metadata.compressionLevel : 2
+    property bool pendingPreserveMetadata: (hasActiveArchive && archiveInterface.metadata) ? archiveInterface.metadata.preserveMetadata : true
+    property bool settingsSavedFeedback: false
+
+    readonly property bool hasSettingsChanges: {
+        if (!hasActiveArchive || !archiveInterface || !archiveInterface.metadata) return false;
+        return (pendingCompressionLevel !== archiveInterface.metadata.compressionLevel) ||
+               (pendingPreserveMetadata !== archiveInterface.metadata.preserveMetadata);
+    }
+
+    onVisibleChanged: {
+        if (visible && hasActiveArchive && archiveInterface && archiveInterface.metadata) {
+            root.reloadSettings();
+            root.settingsSavedFeedback = false;
+        }
+    }
+
+    function reloadSettings() {
+        if (hasActiveArchive && archiveInterface && archiveInterface.metadata) {
+            root.pendingCompressionLevel = archiveInterface.metadata.compressionLevel;
+            root.pendingPreserveMetadata = archiveInterface.metadata.preserveMetadata;
+            if (typeof compToggle !== "undefined" && compToggle) {
+                compToggle.currentIndex = Math.max(0, Math.min(2, archiveInterface.metadata.compressionLevel - 1));
+            }
+        }
+    }
+
+    Connections {
+        target: (hasActiveArchive && archiveInterface && archiveInterface.metadata) ? archiveInterface.metadata : null
+        function onMetadataChanged() {
+            root.reloadSettings();
+        }
+    }
+
+    Timer {
+        id: settingsFeedbackTimer
+        interval: 2500
+        repeat: false
+        onTriggered: {
+            root.settingsSavedFeedback = false;
+        }
+    }
+
+    // ==========================================
+    // --- Custom Component: Fluent Segmented Toggle ---
+    // ==========================================
+    component TripleToggle : Rectangle {
+        id: toggleRoot
+        property int currentIndex: 1
+        property var options: ["Fast (Store)", "Balanced", "Ultra"]
+        property bool isControlEnabled: true
+        signal selected(int index)
+
+        implicitWidth: 320
+        implicitHeight: 30
+        radius: 6
+        color: isControlEnabled ? Colors.bgInput : Qt.rgba(0.1, 0.1, 0.12, 0.6)
+        border.color: isControlEnabled ? Colors.goldBorder : Colors.borderSubtle
+        border.width: 1
+
+        Rectangle {
+            id: activePill
+            width: (toggleRoot.width - 6) / Math.max(1, toggleRoot.options.length)
+            height: toggleRoot.height - 6
+            y: 3
+            x: 3 + toggleRoot.currentIndex * width
+            radius: 4
+            color: toggleRoot.isControlEnabled ? Colors.goldLight : Qt.rgba(1, 1, 1, 0.06)
+            border.color: toggleRoot.isControlEnabled ? Colors.goldBorderHi : Colors.borderSubtle
+            border.width: 1
+
+            Behavior on x { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+        }
+
+        RowLayout {
+            anchors.fill: parent
+            spacing: 0
+
+            Repeater {
+                model: toggleRoot.options
+
+                Item {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: modelData
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 10
+                        font.weight: toggleRoot.currentIndex === index ? Font.Bold : Font.Medium
+                        color: toggleRoot.currentIndex === index
+                             ? (toggleRoot.isControlEnabled ? Colors.goldHover : Colors.textSubtle)
+                             : Colors.textMuted
+
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: toggleRoot.isControlEnabled
+                        cursorShape: toggleRoot.isControlEnabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: {
+                            toggleRoot.currentIndex = index
+                            toggleRoot.selected(index)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // --- Custom Component: Fluent Gold Switch ---
+    // ==========================================
+    component GoldSwitch : Item {
+        id: swRoot
+        property string text: ""
+        property bool checked: false
+        property bool isControlEnabled: true
+        signal toggled(bool isChecked)
+
+        implicitWidth: swRow.implicitWidth
+        implicitHeight: Math.max(20, swRow.implicitHeight)
+
+        RowLayout {
+            id: swRow
+            anchors.fill: parent
+            spacing: 8
+
+            Text {
+                text: swRoot.text
+                color: swRoot.isControlEnabled ? Colors.textMain : Colors.textSubtle
+                font.family: Colors.fontFamily
+                font.pixelSize: 11
+                font.weight: Font.Medium
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                elide: Text.ElideRight
+            }
+
+            Rectangle {
+                id: track
+                width: 32
+                height: 18
+                radius: 9
+                Layout.alignment: Qt.AlignVCenter
+                color: swRoot.checked
+                     ? (swRoot.isControlEnabled ? Colors.goldLightHover : Qt.rgba(1, 1, 1, 0.08))
+                     : Colors.bgInput
+                border.color: swRoot.checked
+                            ? (swRoot.isControlEnabled ? Colors.goldBorderHi : Colors.borderSubtle)
+                            : (swRoot.isControlEnabled ? Colors.goldBorder : Colors.borderSubtle)
+                border.width: 1
+
+                Behavior on color { ColorAnimation { duration: 120 } }
+
+                Rectangle {
+                    id: thumb
+                    width: 12
+                    height: 12
+                    radius: 6
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: swRoot.checked ? parent.width - width - 3 : 3
+                    color: swRoot.checked
+                         ? (swRoot.isControlEnabled ? Colors.goldPrimary : Colors.textSubtle)
+                         : Colors.textMuted
+
+                    Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                }
+            }
+        }
+
+        MouseArea {
+            id: swArea
+            anchors.fill: parent
+            enabled: swRoot.isControlEnabled
+            hoverEnabled: swRoot.isControlEnabled
+            cursorShape: swRoot.isControlEnabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: {
+                swRoot.checked = !swRoot.checked
+                swRoot.toggled(swRoot.checked)
+            }
+        }
+    }
 
     Rectangle {
         id: dialogFrame
@@ -80,8 +239,16 @@ Page {
         border.color: Colors.goldBorder
         border.width: 1
 
-        Behavior on color { ColorAnimation { duration: 200 } }
-        Behavior on border.color { ColorAnimation { duration: 200 } }
+        Behavior on color {
+            ColorAnimation {
+                duration: 200
+            }
+        }
+        Behavior on border.color {
+            ColorAnimation {
+                duration: 200
+            }
+        }
     }
 
     ColumnLayout {
@@ -89,21 +256,23 @@ Page {
         anchors.margins: 14
         spacing: 12
 
-
+        // ==========================================
+        // --- Top Bar: Title & Close Button ---
+        // ==========================================
         RowLayout {
             Layout.fillWidth: true
 
             RowLayout {
                 spacing: 8
                 Text {
-                    text: "info"
+                    text: "\ue88e" // info
                     font.family: materialIcons.name
                     font.pixelSize: 20
                     color: Colors.goldPrimary
                 }
 
                 Text {
-                    text: "Archive Info"
+                    text: root.hasActiveArchive ? ("Archive Info • " + archiveInterface.archiveFileName) : "Archive Info"
                     font.family: Colors.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Bold
@@ -111,11 +280,15 @@ Page {
                 }
             }
 
-            Item { Layout.fillWidth: true }
+            Item {
+                Layout.fillWidth: true
+            }
 
             // Close Button
             Rectangle {
-                width: 26; height: 26; radius: 13
+                width: 26
+                height: 26
+                radius: 13
                 color: closeMouse.containsMouse ? Qt.rgba(0.9, 0.3, 0.3, 0.2) : "transparent"
                 border.color: closeMouse.containsMouse ? "#d9534f" : Colors.goldBorder
                 border.width: 1
@@ -137,32 +310,156 @@ Page {
             }
         }
 
+        // ==========================================
+        // --- Empty State: When no archive is loaded ---
+        // ==========================================
+        Item {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: !root.hasActiveArchive
+
+            ColumnLayout {
+                anchors.centerIn: parent
+                spacing: 14
+
+                Rectangle {
+                    Layout.alignment: Qt.AlignHCenter
+                    width: 68
+                    height: 68
+                    radius: 34
+                    color: Colors.goldLight
+                    border.color: Colors.goldBorder
+                    border.width: 1
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "\ue2c7" // folder_open
+                        font.family: materialIcons.name
+                        font.pixelSize: 32
+                        color: Colors.goldPrimary
+                    }
+                }
+
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "Load an archive first"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 15
+                    font.weight: Font.Bold
+                    color: Colors.textMain
+                }
+
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "Open or create an archive to inspect its metadata and space savings distribution."
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 11
+                    color: Colors.textMuted
+                }
+            }
+        }
 
         // ==========================================
-        // --- SECTION 3: Shannon Entropy File Map ---
+        // --- Archive Active State ---
+        // ==========================================
+        // Live Metadata Overview Strip
+        Rectangle {
+            Layout.fillWidth: true
+            height: 36
+            radius: 8
+            color: Colors.bgCard
+            border.color: Colors.borderSubtle
+            border.width: 1
+            visible: root.hasActiveArchive
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 12
+
+                Text {
+                    text: (root.hasActiveArchive && archiveInterface.metadata) ? ("Files: " + archiveInterface.metadata.fileCount) : "Files: 0"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 11
+                    color: Colors.textMain
+                }
+                Rectangle {
+                    width: 1
+                    height: 14
+                    color: Colors.divider
+                }
+                Text {
+                    text: (root.hasActiveArchive && archiveInterface.metadata) ? ("Folders: " + archiveInterface.metadata.folderCount) : "Folders: 0"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 11
+                    color: Colors.textMain
+                }
+                Rectangle {
+                    width: 1
+                    height: 14
+                    color: Colors.divider
+                }
+                Text {
+                    text: (root.hasActiveArchive && archiveInterface.metadata) ? ("Size: " + archiveInterface.metadata.formattedTotalRealSize) : "Size: 0 B"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 11
+                    color: Colors.textMain
+                }
+                Rectangle {
+                    width: 1
+                    height: 14
+                    color: Colors.divider
+                }
+                Text {
+                    text: (root.hasActiveArchive && archiveInterface.metadata) ? ("Savings: " + archiveInterface.metadata.overallRatio) : "Savings: 0%"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 11
+                    font.weight: Font.Bold
+                    color: Colors.goldPrimary
+                }
+                Rectangle {
+                    width: 1
+                    height: 14
+                    color: Colors.divider
+                }
+                Text {
+                    text: (root.hasActiveArchive && archiveInterface.metadata) ? ("Profile: " + archiveInterface.metadata.compressionPresetName) : "Profile: Standard"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 11
+                    color: Colors.goldHover
+                }
+                Item {
+                    Layout.fillWidth: true
+                }
+            }
+        }
+
+        // ==========================================
+        // --- Radial Sunburst Donut File Map Card ---
         // ==========================================
         Rectangle {
-            id: entropyCard
+            id: sunburstCard
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: 280
+            Layout.preferredHeight: 380
             color: Colors.bgSurface
             radius: 10
             border.color: Colors.goldBorder
             border.width: 1
             clip: true
+            visible: root.hasActiveArchive
 
-            // State & Configuration
-            property bool adaptiveScaling: true
-            property int hoveredIndex: -1
-            property int selectedIndex: 3
-            readonly property int activeIndex: hoveredIndex >= 0 ? hoveredIndex : (selectedIndex >= 0 && selectedIndex < computedRegions.length ? selectedIndex : 0)
-            property int currentPresetIndex: 0
-            readonly property var presetList: [root.defaultRegions, root.presetGigabyte, root.presetKilobyte, root.presetFragmented]
-            readonly property var presetNames: ["SecDet (MB)", "Large (GB)", "Config (KB)", "Fragments (10)"]
+            // Navigation & Drill-Down State
+            property string currentPath: "/"
+            property var currentData: null
+            property var hoveredSector: null
+            property var selectedSector: null
+            readonly property var activeItem: hoveredSector || selectedSector || (currentData ? currentData.hub : null)
+
             property bool copyFeedback: false
 
-            // Hidden clipboard helper for CRC32 & region data copy
             TextInput {
                 id: clipboardHelper
                 visible: false
@@ -172,212 +469,107 @@ Page {
                 id: copyFeedbackTimer
                 interval: 1400
                 repeat: false
-                onTriggered: entropyCard.copyFeedback = false
+                onTriggered: sunburstCard.copyFeedback = false
             }
 
             function copyToClipboard(text) {
                 clipboardHelper.text = text;
                 clipboardHelper.selectAll();
                 clipboardHelper.copy();
-                entropyCard.copyFeedback = true;
+                sunburstCard.copyFeedback = true;
                 copyFeedbackTimer.restart();
             }
 
-            // Distinguishable Sleek Color Palette (Cyan, Emerald, Amber, Violet, Rose, Blue, Orange, Magenta, Mint, Lime)
-            readonly property var colorPalette: [
-                "#00d2ff", // Neon Cyan
-                "#10b981", // Emerald Tech Green
-                "#f59e0b", // Imperial Amber
-                "#8b5cf6", // Electric Violet
-                "#f43f5e", // Crimson Rose
-                "#0ea5e9", // Sky Blue
-                "#fb923c", // Vibrant Tangerine
-                "#e879f9", // Neon Orchid
-                "#14b8a6", // Mint Teal
-                "#84cc16"  // Electric Lime
-            ]
-
-            function getRegionColor(index, region) {
-                if (region && region.color) return region.color;
-                return colorPalette[index % colorPalette.length];
-            }
-
-            // Dynamic Byte Formatter (Byte -> KB -> MB -> GB -> TB)
-            function formatBytes(bytes) {
-                if (bytes === undefined || bytes === null || isNaN(bytes)) return "0 B";
-                if (bytes <= 0) return "0 B";
-                if (bytes < 1024) return Math.round(bytes) + " B";
-                var k = 1024;
-                var sizes = ["B", "KB", "MB", "GB", "TB"];
-                var i = Math.floor(Math.log(bytes) / Math.log(k));
-                i = Math.max(0, Math.min(sizes.length - 1, i));
-                var val = bytes / Math.pow(k, i);
-                var decimals = (val >= 100 || i === 0) ? 0 : (val >= 10 ? 1 : 2);
-                return val.toFixed(decimals) + " " + sizes[i];
-            }
-
-            function formatHex(val) {
-                if (val === undefined || val === null) return "0x00000000";
-                if (typeof val === "string") {
-                    if (val.startsWith("0x") || val.startsWith("0X")) return val.toUpperCase();
-                    var num = parseInt(val, 16);
-                    if (!isNaN(num)) val = num;
+            function refreshData() {
+                if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.hasArchive) {
+                    currentData = archiveInterface.getSunburstData(currentPath);
+                } else {
+                    currentData = null;
                 }
-                var hex = Number(val).toString(16).toUpperCase();
-                while (hex.length < 8) hex = "0" + hex;
-                return "0x" + hex;
+                sunburstCanvas.requestPaint();
             }
 
-            function getEntropyCategory(h) {
-                if (h >= 7.75) return { label: "Encrypted / Max Random", color: "#10b981", icon: "\ue897" }; // lock
-                if (h >= 6.4)  return { label: "Compressed / High", color: "#00d2ff", icon: "\ue871" }; // view_quilt
-                if (h >= 4.0)  return { label: "Structured / Medium", color: "#f59e0b", icon: "\ue869" }; // build / code
-                if (h >= 1.5)  return { label: "Text / Low Entropy", color: "#38bdf8", icon: "\ue873" }; // description
-                return { label: "Uniform / Null Padding", color: "#8e919e", icon: "\ue836" }; // radio_button_unchecked
+            function drillDown(targetPath) {
+                if (!targetPath) return;
+                currentPath = targetPath;
+                hoveredSector = null;
+                selectedSector = null;
+                refreshData();
+                root.notifyNavigation(targetPath, true);
             }
 
-            // Total File Size & Weighted Average Entropy
-            readonly property real totalFileSize: {
-                var r = root.fileMapRegions;
-                if (!r || r.length === 0) return 0;
-                var tot = 0;
-                for (var i = 0; i < r.length; ++i) tot += Math.max(0, r[i].size || 0);
-                return tot;
-            }
-
-            readonly property real averageEntropy: {
-                var r = root.fileMapRegions;
-                if (!r || r.length === 0) return 0.0;
-                var tot = 0;
-                var sumEnt = 0;
-                for (var i = 0; i < r.length; ++i) {
-                    var s = Math.max(0, r[i].size || 0);
-                    tot += s;
-                    sumEnt += Math.max(0.0, Math.min(8.0, r[i].entropy || 0.0)) * s;
+            function zoomOut() {
+                if (currentData && currentData.hub && currentData.hub.parentPath !== undefined) {
+                    currentPath = currentData.hub.parentPath || "/";
+                } else {
+                    currentPath = "/";
                 }
-                return tot > 0 ? (sumEnt / tot) : 0.0;
+                hoveredSector = null;
+                selectedSector = null;
+                refreshData();
+                root.notifyNavigation(currentPath, true);
             }
 
-            // Region layout computation with adaptive small-section magnification
-            readonly property var computedRegions: {
-                var raw = root.fileMapRegions;
-                var availW = Math.max(20, plotContainer.width);
-                var isAdaptive = entropyCard.adaptiveScaling;
+            function navigateToFileMapItem(itemPath, isFolder) {
+                if (!itemPath) return;
+                var normPath = itemPath;
+                if (!normPath.startsWith("/")) normPath = "/" + normPath;
 
-                if (!raw || raw.length === 0) return [];
-                var N = raw.length;
-                var totalBytes = entropyCard.totalFileSize;
-                if (totalBytes <= 0) totalBytes = 1;
-
-                var items = [];
-                var curOffset = 0;
-                var weightSum = 0;
-
-                for (var j = 0; j < N; ++j) {
-                    var r = raw[j];
-                    var s = Math.max(0, r.size || 0);
-                    var ent = Math.max(0.0, Math.min(8.0, r.entropy !== undefined ? r.entropy : 0.0));
-                    var crc = formatHex(r.crc32);
-                    var col = getRegionColor(j, r);
-                    var startOff = curOffset;
-                    var endOff = curOffset + s;
-                    curOffset = endOff;
-
-                    // Power weight to compress scale differences while preserving dominance
-                    var w = Math.pow(s > 0 ? s : 1, 0.45);
-                    weightSum += w;
-
-                    items.push({
-                        name: r.name || ("Region #" + (j + 1)),
-                        size: s,
-                        entropy: ent,
-                        crc32: crc,
-                        color: col,
-                        type: r.type || "chunk",
-                        startOffset: startOff,
-                        endOffset: endOff,
-                        linearRatio: s / totalBytes,
-                        sqrtWeight: w
-                    });
-                }
-
-                var result = [];
-                if (isAdaptive) {
-                    // Small section enlargement: guaranteed minimum visual width
-                    var minW = Math.min(36, Math.max(24, Math.floor((availW * 0.42) / N)));
-                    var baseTotal = N * minW;
-                    var flexW = Math.max(0, availW - baseTotal);
-
-                    var currentX = 0;
-                    for (var k = 0; k < N; ++k) {
-                        var it = items[k];
-                        var flexShare = weightSum > 0 ? (it.sqrtWeight / weightSum) * flexW : 0;
-                        var wActual = minW + flexShare;
-
-                        // Ensure last item completes the container width exactly
-                        if (k === N - 1) {
-                            wActual = Math.max(minW, availW - currentX);
-                        }
-
-                        var linW = it.linearRatio * availW;
-                        var isEnlarged = (wActual > linW * 1.5) && (it.size < totalBytes * 0.15);
-
-                        result.push({
-                            index: k,
-                            name: it.name,
-                            size: it.size,
-                            entropy: it.entropy,
-                            crc32: it.crc32,
-                            color: it.color,
-                            type: it.type,
-                            startOffset: it.startOffset,
-                            endOffset: it.endOffset,
-                            percent: (it.linearRatio * 100).toFixed(1),
-                            visualX: currentX,
-                            visualWidth: wActual,
-                            isEnlarged: isEnlarged,
-                            enlargeRatio: linW > 0 ? (wActual / linW).toFixed(1) : "1.0"
-                        });
-                        currentX += wActual;
+                if (isFolder) {
+                    if (!normPath.endsWith("/")) normPath = normPath + "/";
+                    if (currentPath !== normPath) {
+                        currentPath = normPath;
+                        hoveredSector = null;
+                        selectedSector = null;
+                        refreshData();
                     }
                 } else {
-                    // True Scale: Linear byte ratio
-                    var curX = 0;
-                    for (var m = 0; m < N; ++m) {
-                        var item = items[m];
-                        var wLin = Math.max(3, item.linearRatio * availW);
-                        if (m === N - 1) {
-                            wLin = Math.max(3, availW - curX);
+                    var lastSlash = normPath.lastIndexOf("/");
+                    var parentFolder = (lastSlash <= 0) ? "/" : normPath.substring(0, lastSlash + 1);
+                    if (currentPath !== parentFolder) {
+                        currentPath = parentFolder;
+                        hoveredSector = null;
+                        selectedSector = null;
+                        refreshData();
+                    }
+
+                    if (currentData) {
+                        var found = null;
+                        var r1 = currentData.ring1 || [];
+                        for (var i = 0; i < r1.length; ++i) {
+                            if (r1[i].path === normPath || r1[i].path === itemPath) {
+                                found = r1[i];
+                                break;
+                            }
                         }
-                        result.push({
-                            index: m,
-                            name: item.name,
-                            size: item.size,
-                            entropy: item.entropy,
-                            crc32: item.crc32,
-                            color: item.color,
-                            type: item.type,
-                            startOffset: item.startOffset,
-                            endOffset: item.endOffset,
-                            percent: (item.linearRatio * 100).toFixed(1),
-                            visualX: curX,
-                            visualWidth: wLin,
-                            isEnlarged: false,
-                            enlargeRatio: "1.0"
-                        });
-                        curX += wLin;
+                        if (!found && currentData.ring2) {
+                            var r2 = currentData.ring2;
+                            for (var j = 0; j < r2.length; ++j) {
+                                if (r2[j].path === normPath || r2[j].path === itemPath) {
+                                    found = r2[j];
+                                    break;
+                                }
+                            }
+                        }
+                        selectedSector = found;
+                        sunburstCanvas.requestPaint();
                     }
                 }
-                return result;
             }
 
-            readonly property var activeRegion: {
-                var list = computedRegions;
-                var idx = activeIndex;
-                if (list && list.length > 0 && idx >= 0 && idx < list.length) {
-                    return list[idx];
+            Component.onCompleted: {
+                refreshData();
+            }
+
+            Connections {
+                target: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface : null
+                function onArchiveTreeChanged() {
+                    sunburstCard.refreshData();
                 }
-                return null;
+                function onArchiveLoadedChanged() {
+                    sunburstCard.currentPath = "/";
+                    sunburstCard.refreshData();
+                }
             }
 
             ColumnLayout {
@@ -385,9 +577,7 @@ Page {
                 anchors.margins: 10
                 spacing: 8
 
-                // ==========================================
-                // --- Top Header: Title, Metric Badge & Controls ---
-                // ==========================================
+                // Header Row: Title, Breadcrumb Pills, Reset to Root Button
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 6
@@ -395,13 +585,13 @@ Page {
                     RowLayout {
                         spacing: 6
                         Text {
-                            text: "\ue880" // analytics
+                            text: "\ue880" // analytics / pie
                             font.family: materialIcons.name
                             font.pixelSize: 16
                             color: Colors.goldPrimary
                         }
                         Text {
-                            text: "FILE MAP & SHANNON ENTROPY"
+                            text: "RADIAL FILE MAP"
                             font.family: Colors.fontFamily
                             font.pixelSize: 10
                             font.weight: Font.Bold
@@ -409,635 +599,558 @@ Page {
                         }
                     }
 
-                    // Summary Badge (File size & Average Entropy)
-                    Rectangle {
-                        implicitWidth: badgeRow.implicitWidth + 12
-                        implicitHeight: 20
-                        radius: 10
-                        color: Colors.goldLight
-                        border.color: Colors.goldBorderHi
-                        border.width: 1
+                    // Breadcrumbs Flow / Row
+                    Flickable {
+                        id: breadcrumbFlickable
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 22
+                        contentWidth: breadcrumbRow.implicitWidth
+                        contentHeight: 22
+                        boundsBehavior: Flickable.StopAtBounds
+                        clip: true
 
                         RowLayout {
-                            id: badgeRow
-                            anchors.centerIn: parent
-                            spacing: 5
-                            Rectangle { width: 6; height: 6; radius: 3; color: "#4ade80" }
-                            Text {
-                                text: entropyCard.formatBytes(entropyCard.totalFileSize) + " • Avg: " + entropyCard.averageEntropy.toFixed(2) + " Bits/B"
-                                font.family: Colors.fontFamily
-                                font.pixelSize: 9
-                                font.weight: Font.Bold
-                                color: Colors.goldHover
+                            id: breadcrumbRow
+                            spacing: 4
+
+                            Repeater {
+                                model: (sunburstCard.currentData && sunburstCard.currentData.breadcrumbs) ? sunburstCard.currentData.breadcrumbs : []
+
+                                Rectangle {
+                                    implicitWidth: bText.implicitWidth + 12
+                                    implicitHeight: 20
+                                    radius: 4
+                                    color: bMouse.containsMouse ? Colors.bgHover : (index === (sunburstCard.currentData.breadcrumbs.length - 1) ? Colors.goldLight : "transparent")
+                                    border.color: index === (sunburstCard.currentData.breadcrumbs.length - 1) ? Colors.goldBorderHi : Colors.goldBorder
+                                    border.width: 1
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 3
+                                        Text {
+                                            visible: index === 0
+                                            text: "\ue88a" // home
+                                            font.family: materialIcons.name
+                                            font.pixelSize: 10
+                                            color: Colors.goldPrimary
+                                        }
+                                        Text {
+                                            id: bText
+                                            text: modelData.name
+                                            font.family: Colors.fontFamily
+                                            font.pixelSize: 9
+                                            font.weight: index === (sunburstCard.currentData.breadcrumbs.length - 1) ? Font.Bold : Font.Normal
+                                            color: index === (sunburstCard.currentData.breadcrumbs.length - 1) ? Colors.goldHover : Colors.textMuted
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: bMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            sunburstCard.drillDown(modelData.path);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
 
-                    Item { Layout.fillWidth: true }
-
-                    // Preset Switcher Pill (Cycle demo presets across B/KB/MB/GB)
+                    // Reset / Up Button
                     Rectangle {
-                        implicitWidth: presetRow.implicitWidth + 10
+                        visible: sunburstCard.currentPath !== "/" && sunburstCard.currentPath !== ""
+                        implicitWidth: 22
                         implicitHeight: 22
-                        radius: 5
-                        color: presetMouse.containsPress ? Qt.darker(Colors.bgInput, 1.1) : (presetMouse.containsMouse ? Colors.bgHover : Colors.bgInput)
+                        radius: 4
+                        color: upMouse.containsMouse ? Colors.bgHover : Colors.bgInput
                         border.color: Colors.goldBorder
                         border.width: 1
 
-                        RowLayout {
-                            id: presetRow
+                        Text {
                             anchors.centerIn: parent
-                            spacing: 4
-                            Text {
-                                text: "\ue53b" // layers
-                                font.family: materialIcons.name
-                                font.pixelSize: 11
-                                color: Colors.goldPrimary
-                            }
-                            Text {
-                                text: entropyCard.presetNames[entropyCard.currentPresetIndex]
-                                font.family: Colors.fontFamily
-                                font.pixelSize: 9
-                                font.weight: Font.Medium
-                                color: Colors.textMain
-                            }
+                            text: "\ue5d8" // arrow_upward
+                            font.family: materialIcons.name
+                            font.pixelSize: 13
+                            color: Colors.goldPrimary
                         }
 
                         MouseArea {
-                            id: presetMouse
+                            id: upMouse
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                entropyCard.currentPresetIndex = (entropyCard.currentPresetIndex + 1) % entropyCard.presetList.length;
-                                root.fileMapRegions = entropyCard.presetList[entropyCard.currentPresetIndex];
-                                entropyCard.hoveredIndex = -1;
-                                entropyCard.selectedIndex = 0;
-                            }
-                        }
-                    }
-
-                    // Adaptive vs True Scale View Toggle
-                    Rectangle {
-                        implicitWidth: modeRow.implicitWidth + 10
-                        implicitHeight: 22
-                        radius: 5
-                        color: modeMouse.containsMouse ? Colors.bgHover : (entropyCard.adaptiveScaling ? Colors.goldLight : Colors.bgInput)
-                        border.color: entropyCard.adaptiveScaling ? Colors.goldBorderHi : Colors.goldBorder
-                        border.width: 1
-
-                        RowLayout {
-                            id: modeRow
-                            anchors.centerIn: parent
-                            spacing: 4
-                            Text {
-                                text: entropyCard.adaptiveScaling ? "\ue429" : "\ue8ee" // tune / aspect_ratio
-                                font.family: materialIcons.name
-                                font.pixelSize: 11
-                                color: entropyCard.adaptiveScaling ? Colors.goldHover : Colors.textMuted
-                            }
-                            Text {
-                                text: entropyCard.adaptiveScaling ? "Adaptive" : "True Scale"
-                                font.family: Colors.fontFamily
-                                font.pixelSize: 9
-                                font.weight: Font.Bold
-                                color: entropyCard.adaptiveScaling ? Colors.goldHover : Colors.textMuted
-                            }
-                        }
-
-                        MouseArea {
-                            id: modeMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                entropyCard.adaptiveScaling = !entropyCard.adaptiveScaling;
-                            }
+                            onClicked: sunburstCard.zoomOut()
                         }
                     }
                 }
 
-                // ==========================================
-                // --- Central Plot: Shannon Entropy Y-Axis & File Map Bars ---
-                // ==========================================
-                RowLayout {
+                // Main Center Area: Sunburst Canvas
+                Item {
+                    id: canvasContainer
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.minimumHeight: 125
-                    spacing: 6
+                    Layout.minimumHeight: 150
 
-                    // Y-Axis Labels Column (Shannon Entropy 0.0 to 8.0 bits/byte)
-                    Item {
-                        id: yAxisColumn
-                        Layout.preferredWidth: 32
-                        Layout.fillHeight: true
+                    Canvas {
+                        id: sunburstCanvas
+                        anchors.fill: parent
+                        renderStrategy: Canvas.Threaded
+                        antialiasing: true
 
-                        Text {
-                            anchors.top: parent.top
-                            anchors.right: parent.right
-                            anchors.rightMargin: 4
-                            text: "8.0"
-                            font.family: Colors.fontFamily
-                            font.pixelSize: 8
-                            font.weight: Font.Bold
-                            color: Colors.textMuted
-                        }
+                        onPaint: {
+                            var ctx = getContext("2d");
+                            if (typeof ctx.reset === "function") {
+                                ctx.reset();
+                            } else if (typeof ctx.resetTransform === "function") {
+                                ctx.resetTransform();
+                            }
+                            ctx.clearRect(0, 0, width, height);
 
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.verticalCenterOffset: -parent.height * 0.25
-                            anchors.right: parent.right
-                            anchors.rightMargin: 4
-                            text: "6.0"
-                            font.family: Colors.fontFamily
-                            font.pixelSize: 8
-                            color: Colors.textSubtle
-                        }
+                            var data = sunburstCard.currentData;
+                            if (!data || !data.hub) {
+                                return;
+                            }
 
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.right: parent.right
-                            anchors.rightMargin: 4
-                            text: "4.0"
-                            font.family: Colors.fontFamily
-                            font.pixelSize: 8
-                            color: Colors.textSubtle
-                        }
+                            var cx = width / 2;
+                            var cy = height / 2;
+                            var maxR = Math.min(cx, cy) - 6;
+                            if (maxR < 30) return;
 
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.verticalCenterOffset: parent.height * 0.25
-                            anchors.right: parent.right
-                            anchors.rightMargin: 4
-                            text: "2.0"
-                            font.family: Colors.fontFamily
-                            font.pixelSize: 8
-                            color: Colors.textSubtle
-                        }
+                            var r0 = maxR * 0.32; // Center hub radius
+                            var r1 = maxR * 0.36; // Ring 1 inner
+                            var r2 = maxR * 0.65; // Ring 1 outer
+                            var r3 = maxR * 0.69; // Ring 2 inner
+                            var r4 = maxR * 0.98; // Ring 2 outer
 
-                        Text {
-                            anchors.bottom: parent.bottom
-                            anchors.right: parent.right
-                            anchors.rightMargin: 4
-                            text: "0.0"
-                            font.family: Colors.fontFamily
-                            font.pixelSize: 8
-                            font.weight: Font.Bold
-                            color: Colors.textMuted
+                            var toRad = function(deg) {
+                                return (deg - 90) * Math.PI / 180;
+                            };
+
+                            // --- 1. Draw Ring 2 (Grandchildren) ---
+                            var r2Items = data.ring2 || [];
+                            for (var j = 0; j < r2Items.length; ++j) {
+                                var it2 = r2Items[j];
+                                var sweep2 = it2.sweepAngle;
+                                if (sweep2 <= 0.05) continue;
+                                var gap2 = Math.min(0.35, sweep2 * 0.15);
+                                var sA2 = toRad(it2.startAngle + gap2);
+                                var eA2 = toRad(it2.endAngle - gap2);
+
+                                var isHov2 = (sunburstCard.hoveredSector && sunburstCard.hoveredSector.path === it2.path);
+                                var isSel2 = (sunburstCard.selectedSector && sunburstCard.selectedSector.path === it2.path);
+
+                                ctx.beginPath();
+                                ctx.arc(cx, cy, r4, sA2, eA2, false);
+                                ctx.arc(cx, cy, r3, eA2, sA2, true);
+                                ctx.closePath();
+
+                                var baseColor2 = it2.color || "#64748B";
+                                if (isHov2 || isSel2) {
+                                    ctx.fillStyle = baseColor2;
+                                    ctx.strokeStyle = "#ffffff";
+                                    ctx.lineWidth = 1.5;
+                                } else {
+                                    ctx.fillStyle = Qt.rgba(Qt.color(baseColor2).r, Qt.color(baseColor2).g, Qt.color(baseColor2).b, 0.45);
+                                    ctx.strokeStyle = Qt.rgba(0, 0, 0, 0.3);
+                                    ctx.lineWidth = 0.5;
+                                }
+                                ctx.fill();
+                                ctx.stroke();
+                            }
+
+                            // --- 2. Draw Ring 1 (Direct Children) ---
+                            var r1Items = data.ring1 || [];
+                            for (var i = 0; i < r1Items.length; ++i) {
+                                var it1 = r1Items[i];
+                                var sweep1 = it1.sweepAngle;
+                                if (sweep1 <= 0.05) continue;
+                                var gap1 = Math.min(0.45, sweep1 * 0.15);
+                                var sA1 = toRad(it1.startAngle + gap1);
+                                var eA1 = toRad(it1.endAngle - gap1);
+
+                                var isHov1 = (sunburstCard.hoveredSector && sunburstCard.hoveredSector.path === it1.path);
+                                var isSel1 = (sunburstCard.selectedSector && sunburstCard.selectedSector.path === it1.path);
+
+                                ctx.beginPath();
+                                ctx.arc(cx, cy, r2, sA1, eA1, false);
+                                ctx.arc(cx, cy, r1, eA1, sA1, true);
+                                ctx.closePath();
+
+                                var baseColor1 = it1.color || "#D4AF37";
+                                if (isHov1 || isSel1) {
+                                    ctx.fillStyle = baseColor1;
+                                    ctx.strokeStyle = "#ffffff";
+                                    ctx.lineWidth = 2.0;
+                                } else {
+                                    ctx.fillStyle = Qt.rgba(Qt.color(baseColor1).r, Qt.color(baseColor1).g, Qt.color(baseColor1).b, 0.75);
+                                    ctx.strokeStyle = Qt.rgba(0, 0, 0, 0.4);
+                                    ctx.lineWidth = 1.0;
+                                }
+                                ctx.fill();
+                                ctx.stroke();
+                            }
+
+                            // --- 3. Draw Center Hub ---
+                            var isHubHov = sunburstCard.hoveredSector && sunburstCard.hoveredSector.path === data.hub.path;
+                            ctx.beginPath();
+                            ctx.arc(cx, cy, r0, 0, Math.PI * 2, false);
+                            ctx.closePath();
+
+                            var hubGrad = ctx.createRadialGradient(cx, cy, 5, cx, cy, r0);
+                            hubGrad.addColorStop(0.0, isHubHov ? Qt.rgba(0.83, 0.69, 0.22, 0.25) : (Colors.isDarkMode ? "#171a24" : "#f1f3f9"));
+                            hubGrad.addColorStop(1.0, Colors.isDarkMode ? "#0d0f15" : "#e5e8f0");
+                            ctx.fillStyle = hubGrad;
+                            ctx.fill();
+
+                            ctx.strokeStyle = isHubHov ? Colors.goldHover : Colors.goldBorder;
+                            ctx.lineWidth = isHubHov ? 2.0 : 1.0;
+                            ctx.stroke();
                         }
                     }
 
-                    // Main Plot Area
+                    // Center Hub HTML/QML Overlays (Icon, Name, Formatted Size, Savings)
                     Item {
-                        id: plotContainer
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
+                        anchors.centerIn: parent
+                        width: Math.min(parent.width, parent.height) * 0.30
+                        height: width
                         clip: true
 
-                        // Plot Background Frame
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 6
-                            color: Colors.isDarkMode ? "#0d0f15" : "#f6f7fa"
-                            border.color: Colors.goldBorder
-                            border.width: 1
-                        }
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 1
 
-                        // Horizontal Reference Guidelines (8.0, 6.0, 4.0, 2.0, 0.0)
-                        Column {
-                            anchors.fill: parent
-                            anchors.margins: 1
-                            spacing: (parent.height - 4) / 4
-                            Repeater {
-                                model: 5
-                                Rectangle {
-                                    width: plotContainer.width
-                                    height: 1
-                                    color: index === 0 || index === 4 ? Colors.divider : Qt.rgba(1, 1, 1, 0.04)
-                                }
-                            }
-                        }
-
-                        // Stepped Plateaus / Bars for each Region
-                        Repeater {
-                            model: entropyCard.computedRegions
-
-                            Item {
-                                id: barWrapper
-                                x: modelData.visualX
-                                y: 1
-                                width: Math.max(2, modelData.visualWidth)
-                                height: plotContainer.height - 2
-
-                                readonly property bool isCurrent: entropyCard.activeIndex === index
-                                readonly property bool hasFocus: entropyCard.hoveredIndex >= 0 ? isCurrent : true
-
-                                Rectangle {
-                                    id: barPlateau
-                                    anchors.bottom: parent.bottom
-                                    width: parent.width
-                                    height: Math.max(4, (modelData.entropy / 8.0) * parent.height)
-                                    radius: 2
-
-                                    // Distinguished color fill with sleek vertical gradient
-                                    gradient: Gradient {
-                                        GradientStop {
-                                            position: 0.0
-                                            color: {
-                                                var c = Qt.color(modelData.color);
-                                                return barWrapper.isCurrent ? Qt.rgba(c.r, c.g, c.b, 0.70)
-                                                                            : (barWrapper.hasFocus ? Qt.rgba(c.r, c.g, c.b, 0.38)
-                                                                                                    : Qt.rgba(c.r, c.g, c.b, 0.18));
-                                            }
-                                        }
-                                        GradientStop {
-                                            position: 1.0
-                                            color: {
-                                                var c = Qt.color(modelData.color);
-                                                return barWrapper.isCurrent ? Qt.rgba(c.r, c.g, c.b, 0.28)
-                                                                            : (barWrapper.hasFocus ? Qt.rgba(c.r, c.g, c.b, 0.12)
-                                                                                                    : Qt.rgba(c.r, c.g, c.b, 0.04));
-                                            }
-                                        }
-                                    }
-
-                                    // Glowing Top Capline (Exact Entropy Level Indicator)
-                                    Rectangle {
-                                        anchors.top: parent.top
-                                        anchors.left: parent.left
-                                        anchors.right: parent.right
-                                        height: barWrapper.isCurrent ? 3 : 2
-                                        color: barWrapper.isCurrent ? "#ffffff" : modelData.color
-                                        radius: 1
-
-                                        Behavior on height { NumberAnimation { duration: 120 } }
-                                        Behavior on color { ColorAnimation { duration: 120 } }
-                                    }
-
-                                    // Right Boundary Divider separating each region distinctly
-                                    Rectangle {
-                                        anchors.top: parent.top
-                                        anchors.bottom: parent.bottom
-                                        anchors.right: parent.right
-                                        width: 1
-                                        color: Qt.rgba(1, 1, 1, 0.18)
-                                    }
-
-                                    // In-Bar Label (Displays Entropy & Name if width allows)
-                                    Item {
-                                        anchors.fill: parent
-                                        visible: modelData.visualWidth >= 38 && barPlateau.height >= 26
-
-                                        ColumnLayout {
-                                            anchors.centerIn: parent
-                                            spacing: 1
-
-                                            Text {
-                                                Layout.alignment: Qt.AlignHCenter
-                                                text: modelData.entropy.toFixed(1)
-                                                font.family: Colors.fontFamily
-                                                font.pixelSize: 9
-                                                font.weight: Font.Bold
-                                                color: barWrapper.isCurrent ? "#ffffff" : modelData.color
-                                            }
-
-                                            Text {
-                                                Layout.alignment: Qt.AlignHCenter
-                                                text: modelData.name
-                                                font.family: Colors.fontFamily
-                                                font.pixelSize: 8
-                                                color: Colors.textMuted
-                                                elide: Text.ElideRight
-                                                Layout.maximumWidth: barWrapper.width - 6
-                                                visible: modelData.visualWidth >= 60 && barPlateau.height >= 40
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Interactive Click & Hover Area for Bar
-                                MouseArea {
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onEntered: entropyCard.hoveredIndex = index
-                                    onExited: {
-                                        if (entropyCard.hoveredIndex === index) {
-                                            entropyCard.hoveredIndex = -1;
-                                        }
-                                    }
-                                    onClicked: {
-                                        entropyCard.selectedIndex = index;
-                                        root.regionSelected(modelData, index);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ==========================================
-                // --- Dynamic X-Axis Byte Scale Bar ---
-                // ==========================================
-                Item {
-                    id: xAxisRuler
-                    Layout.fillWidth: true
-                    height: 20
-
-                    RowLayout {
-                        anchors.fill: parent
-                        spacing: 0
-
-                        // Spacer matching Y-axis column width
-                        Item {
-                            Layout.preferredWidth: 32
-                            Layout.fillHeight: true
                             Text {
-                                anchors.centerIn: parent
-                                text: "Bytes"
-                                font.family: Colors.fontFamily
-                                font.pixelSize: 8
-                                color: Colors.textSubtle
-                            }
-                        }
-
-                        // Graduated Byte Axis
-                        Item {
-                            id: xAxisScale
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-
-                            // Baseline Axis Line
-                            Rectangle {
-                                anchors.top: parent.top
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                height: 1
-                                color: Colors.divider
-                            }
-
-                            // Dynamic byte ticks at region boundaries
-                            Repeater {
-                                model: entropyCard.computedRegions
-
-                                Item {
-                                    x: modelData.visualX
-                                    y: 0
-                                    width: modelData.visualWidth
-                                    height: xAxisScale.height
-
-                                    readonly property bool isHovered: entropyCard.activeIndex === index
-                                    readonly property bool showLabel: index === 0 || modelData.visualWidth >= 44 || index === entropyCard.computedRegions.length - 1 || isHovered
-
-                                    // Boundary Tick Mark
-                                    Rectangle {
-                                        anchors.top: parent.top
-                                        anchors.left: parent.left
-                                        width: 1
-                                        height: 4
-                                        color: isHovered ? Colors.goldHover : Colors.divider
-                                    }
-
-                                    // Dynamic Byte Value Label (B, KB, MB, GB)
-                                    Text {
-                                        anchors.top: parent.top
-                                        anchors.topMargin: 5
-                                        anchors.left: parent.left
-                                        anchors.leftMargin: index === 0 ? 2 : -10
-                                        text: entropyCard.formatBytes(modelData.startOffset)
-                                        font.family: Colors.fontFamily
-                                        font.pixelSize: 8
-                                        font.weight: isHovered ? Font.Bold : Font.Normal
-                                        color: isHovered ? Colors.goldHover : Colors.textMuted
-                                        visible: showLabel
-                                    }
-                                }
-                            }
-
-                            // Final End Boundary Tick Mark (Total File Size)
-                            Rectangle {
-                                anchors.top: parent.top
-                                anchors.right: parent.right
-                                width: 1
-                                height: 5
-                                color: Colors.goldBorderHi
+                                Layout.alignment: Qt.AlignHCenter
+                                text: (sunburstCard.currentData && sunburstCard.currentData.hub && sunburstCard.currentData.hub.parentPath !== "") ? "\ue5d8" : "\ue2c7"
+                                font.family: materialIcons.name
+                                font.pixelSize: 14
+                                color: Colors.goldPrimary
                             }
 
                             Text {
-                                anchors.top: parent.top
-                                anchors.topMargin: 5
-                                anchors.right: parent.right
-                                text: entropyCard.formatBytes(entropyCard.totalFileSize)
+                                Layout.alignment: Qt.AlignHCenter
+                                text: (sunburstCard.currentData && sunburstCard.currentData.hub) ? sunburstCard.currentData.hub.name : "Archive"
                                 font.family: Colors.fontFamily
-                                font.pixelSize: 8
+                                font.pixelSize: 10
+                                font.weight: Font.Bold
+                                color: Colors.textMain
+                                elide: Text.ElideMiddle
+                                Layout.maximumWidth: parent.width - 8
+                            }
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: (sunburstCard.currentData && sunburstCard.currentData.hub) ? sunburstCard.currentData.hub.formattedSize : "0 B"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 9
                                 font.weight: Font.Bold
                                 color: Colors.goldHover
                             }
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                visible: sunburstCard.currentPath !== "/"
+                                text: "Click to zoom out"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 7
+                                color: Colors.textSubtle
+                            }
+                        }
+                    }
+
+                    // Interactive Hit-Testing MouseArea
+                    MouseArea {
+                        id: canvasMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.ArrowCursor
+
+                        function hitTest(mx, my) {
+                            var data = sunburstCard.currentData;
+                            if (!data || !data.hub) return null;
+
+                            var cx = width / 2;
+                            var cy = height / 2;
+                            var dx = mx - cx;
+                            var dy = my - cy;
+                            var dist = Math.sqrt(dx * dx + dy * dy);
+
+                            var maxR = Math.min(cx, cy) - 6;
+                            var r0 = maxR * 0.32;
+                            var r1 = maxR * 0.36;
+                            var r2 = maxR * 0.65;
+                            var r3 = maxR * 0.69;
+                            var r4 = maxR * 0.98;
+
+                            if (dist <= r0) {
+                                return { type: "hub", item: data.hub };
+                            }
+
+                            // Calculate angle in degrees [0..360] where 0 is 12 o'clock
+                            var rad = Math.atan2(dy, dx);
+                            var deg = (rad * 180 / Math.PI) + 90;
+                            if (deg < 0) deg += 360;
+                            if (deg >= 360) deg -= 360;
+
+                            if (dist >= r1 && dist <= r2 && data.ring1) {
+                                for (var i = 0; i < data.ring1.length; ++i) {
+                                    var it1 = data.ring1[i];
+                                    if (deg >= it1.startAngle && deg <= it1.endAngle) {
+                                        return { type: "ring1", item: it1 };
+                                    }
+                                }
+                            }
+
+                            if (dist >= r3 && dist <= r4 && data.ring2) {
+                                for (var j = 0; j < data.ring2.length; ++j) {
+                                    var it2 = data.ring2[j];
+                                    if (deg >= it2.startAngle && deg <= it2.endAngle) {
+                                        return { type: "ring2", item: it2 };
+                                    }
+                                }
+                            }
+
+                            return null;
+                        }
+
+                        onPositionChanged: (mouse) => {
+                            var hit = hitTest(mouse.x, mouse.y);
+                            if (hit) {
+                                if (hit.type === "hub") {
+                                    canvasMouse.cursorShape = (sunburstCard.currentPath !== "/") ? Qt.PointingHandCursor : Qt.ArrowCursor;
+                                    sunburstCard.hoveredSector = hit.item;
+                                } else {
+                                    canvasMouse.cursorShape = (hit.item.isFolder && !hit.item.isOther) ? Qt.PointingHandCursor : Qt.ArrowCursor;
+                                    sunburstCard.hoveredSector = hit.item;
+                                }
+                            } else {
+                                canvasMouse.cursorShape = Qt.ArrowCursor;
+                                sunburstCard.hoveredSector = null;
+                            }
+                            sunburstCanvas.requestPaint();
+                        }
+
+                        onExited: {
+                            sunburstCard.hoveredSector = null;
+                            canvasMouse.cursorShape = Qt.ArrowCursor;
+                            sunburstCanvas.requestPaint();
+                        }
+
+                        onClicked: (mouse) => {
+                            var hit = hitTest(mouse.x, mouse.y);
+                            if (!hit) return;
+
+                            if (hit.type === "hub") {
+                                if (sunburstCard.currentPath !== "/") {
+                                    sunburstCard.zoomOut();
+                                }
+                            } else if (hit.item.isFolder && !hit.item.isOther) {
+                                sunburstCard.drillDown(hit.item.path);
+                            } else {
+                                sunburstCard.selectedSector = hit.item;
+                                if (hit.item && hit.item.path && !hit.item.isOther) {
+                                    root.notifyNavigation(hit.item.path, false);
+                                }
+                            }
                         }
                     }
                 }
 
-                // ==========================================
-                // --- Region Inspector Card: Name, Size, Entropy & CRC32 ---
-                // ==========================================
+                // Inspector Card Below Donut
                 Rectangle {
                     id: inspectorCard
                     Layout.fillWidth: true
-                    implicitHeight: 82
+                    implicitHeight: 78
                     radius: 8
                     color: Colors.bgCard
-                    border.color: entropyCard.activeRegion ? entropyCard.activeRegion.color : Colors.goldBorder
+                    border.color: (sunburstCard.activeItem && sunburstCard.activeItem.color) ? sunburstCard.activeItem.color : Colors.goldBorder
                     border.width: 1
 
-                    Behavior on border.color { ColorAnimation { duration: 150 } }
-
-                    // Left Accent Pill showing Region Color
                     Rectangle {
                         anchors.left: parent.left
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
                         width: 4
                         radius: 2
-                        color: entropyCard.activeRegion ? entropyCard.activeRegion.color : Colors.goldPrimary
+                        color: (sunburstCard.activeItem && sunburstCard.activeItem.color) ? sunburstCard.activeItem.color : Colors.goldPrimary
                     }
 
                     ColumnLayout {
                         anchors.fill: parent
                         anchors.leftMargin: 12
                         anchors.rightMargin: 10
-                        anchors.topMargin: 8
-                        anchors.bottomMargin: 8
-                        spacing: 6
+                        anchors.topMargin: 7
+                        anchors.bottomMargin: 7
+                        spacing: 5
 
-                        // Row 1: Region Name & Security Classification
+                        // Row 1: Item Name, Path & Badge
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 6
 
                             Rectangle {
-                                width: 8; height: 8; radius: 4
-                                color: entropyCard.activeRegion ? entropyCard.activeRegion.color : Colors.goldPrimary
+                                width: 8
+                                height: 8
+                                radius: 4
+                                color: (sunburstCard.activeItem && sunburstCard.activeItem.color) ? sunburstCard.activeItem.color : Colors.goldPrimary
                             }
 
                             Text {
-                                text: entropyCard.activeRegion ? entropyCard.activeRegion.name : "No Region Selected"
+                                text: sunburstCard.activeItem ? sunburstCard.activeItem.name : "Root Archive"
                                 font.family: Colors.fontFamily
                                 font.pixelSize: 11
                                 font.weight: Font.Bold
                                 color: Colors.textMain
                                 elide: Text.ElideRight
-                                Layout.maximumWidth: 260
+                                Layout.maximumWidth: 320
                             }
 
-                            // Magnification Status (Inform user why tiny sections are visible)
-                            Rectangle {
-                                visible: entropyCard.activeRegion && entropyCard.activeRegion.isEnlarged
-                                implicitWidth: magText.implicitWidth + 8
-                                implicitHeight: 16
-                                radius: 4
-                                color: Qt.rgba(1, 0.8, 0, 0.12)
-                                border.color: Colors.goldBorder
-                                border.width: 1
-
-                                Text {
-                                    id: magText
-                                    anchors.centerIn: parent
-                                    text: "✦ Magnified (" + (entropyCard.activeRegion ? entropyCard.activeRegion.percent : "0") + "% actual)"
-                                    font.family: Colors.fontFamily
-                                    font.pixelSize: 8
-                                    font.weight: Font.Medium
-                                    color: Colors.goldHover
+                            Text {
+                                text: {
+                                    if (!sunburstCard.activeItem) return "";
+                                    if (sunburstCard.activeItem.isOther) return "[OTHER MERGED]";
+                                    if (sunburstCard.activeItem.isFolder) {
+                                        var fc = sunburstCard.activeItem.fileCount || 0;
+                                        return "[" + fc + " FILES]";
+                                    }
+                                    return "[FILE]";
                                 }
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 8
+                                font.weight: Font.Bold
+                                color: Colors.textMuted
                             }
 
                             Item { Layout.fillWidth: true }
 
-                            // Category Tag (Encrypted / Compressed / Structured)
-                            RowLayout {
-                                spacing: 4
-                                readonly property var cat: entropyCard.getEntropyCategory(entropyCard.activeRegion ? entropyCard.activeRegion.entropy : 0)
-
-                                Text {
-                                    text: parent.cat.icon
-                                    font.family: materialIcons.name
-                                    font.pixelSize: 12
-                                    color: parent.cat.color
-                                }
-                                Text {
-                                    text: parent.cat.label
-                                    font.family: Colors.fontFamily
-                                    font.pixelSize: 9
-                                    font.weight: Font.Bold
-                                    color: parent.cat.color
-                                }
+                            Text {
+                                visible: sunburstCard.activeItem && sunburstCard.activeItem.isFolder && !sunburstCard.activeItem.isOther
+                                text: "Click sector to drill down"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 8
+                                color: Colors.goldHover
                             }
                         }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: Colors.divider }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 1
+                            color: Colors.divider
+                        }
 
-                        // Row 2: 4-Column Detailed Metrics (Entropy, Size, Offset, CRC32)
+                        // Row 2: 4 Strict Metrics
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
 
-                            // Col 1: Shannon Entropy
+                            // Col 1: Space Savings
                             ColumnLayout {
                                 spacing: 1
                                 Layout.fillWidth: true
-
                                 Text {
-                                    text: "ENTROPY"
+                                    text: "SPACE SAVINGS"
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 8
                                     color: Colors.textMuted
                                     font.weight: Font.Bold
                                 }
                                 Text {
-                                    text: entropyCard.activeRegion ? (entropyCard.activeRegion.entropy.toFixed(2) + " Bits/B") : "0.00"
+                                    text: {
+                                        if (!sunburstCard.activeItem || sunburstCard.activeItem.savings === undefined) return "0.0%";
+                                        return Number(sunburstCard.activeItem.savings).toFixed(1) + "%";
+                                    }
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 11
                                     font.weight: Font.Bold
-                                    color: entropyCard.activeRegion ? entropyCard.activeRegion.color : Colors.textMain
+                                    color: (sunburstCard.activeItem && sunburstCard.activeItem.color) ? sunburstCard.activeItem.color : Colors.textMain
                                 }
                             }
 
-                            // Col 2: Size & Percentage
+                            // Col 2: Size (Raw / Comp)
                             ColumnLayout {
                                 spacing: 1
                                 Layout.fillWidth: true
-
                                 Text {
-                                    text: "SIZE"
+                                    text: "SIZE (RAW / COMP)"
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 8
                                     color: Colors.textMuted
                                     font.weight: Font.Bold
                                 }
                                 Text {
-                                    text: entropyCard.activeRegion ? (entropyCard.formatBytes(entropyCard.activeRegion.size) + " (" + entropyCard.activeRegion.percent + "%)") : "0 B"
+                                    text: sunburstCard.activeItem ? (sunburstCard.activeItem.formattedSize + " / " + sunburstCard.activeItem.formattedCompSize) : "0 B / 0 B"
                                     font.family: Colors.fontFamily
-                                    font.pixelSize: 11
+                                    font.pixelSize: 10
                                     font.weight: Font.Bold
                                     color: Colors.textMain
                                 }
                             }
 
-                            // Col 3: Byte Range Offsets (Hex & Humanized)
+                            // Col 3: Share of Directory
                             ColumnLayout {
                                 spacing: 1
                                 Layout.fillWidth: true
-
                                 Text {
-                                    text: "OFFSET RANGE"
+                                    text: "SHARE OF FOLDER"
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 8
                                     color: Colors.textMuted
                                     font.weight: Font.Bold
                                 }
                                 Text {
-                                    text: entropyCard.activeRegion ? (entropyCard.formatHex(entropyCard.activeRegion.startOffset) + " → " + entropyCard.formatHex(entropyCard.activeRegion.endOffset)) : "0x0 - 0x0"
-                                    font.family: "Consolas, Segoe UI, monospace"
-                                    font.pixelSize: 9
+                                    text: {
+                                        if (!sunburstCard.activeItem || sunburstCard.activeItem.sharePercent === undefined) return "100.0%";
+                                        return Number(sunburstCard.activeItem.sharePercent).toFixed(1) + "%";
+                                    }
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 10
                                     color: Colors.textMain
                                 }
                             }
 
-                            // Col 4: CRC-32 Checksum with Copy Button
+                            // Col 4: CRC32 / Count
                             ColumnLayout {
                                 spacing: 1
-                                Layout.preferredWidth: 95
-
+                                Layout.preferredWidth: 105
                                 Text {
-                                    text: "CRC-32"
+                                    text: (sunburstCard.activeItem && !sunburstCard.activeItem.isFolder && !sunburstCard.activeItem.isOther) ? "CRC-32" : "FOLDER COUNT"
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 8
                                     color: Colors.textMuted
                                     font.weight: Font.Bold
                                 }
-
                                 RowLayout {
                                     spacing: 4
-
                                     Text {
-                                        text: entropyCard.activeRegion ? entropyCard.activeRegion.crc32 : "0x00000000"
-                                        font.family: "Consolas, Segoe UI, monospace"
+                                        text: {
+                                            if (!sunburstCard.activeItem) return "N/A";
+                                            if (sunburstCard.activeItem.isFolder) {
+                                                return (sunburstCard.activeItem.folderCount || 0) + " folders";
+                                            }
+                                            return sunburstCard.activeItem.crc32 || "N/A";
+                                        }
+                                        font.family: (sunburstCard.activeItem && !sunburstCard.activeItem.isFolder) ? "Consolas, Segoe UI, monospace" : Colors.fontFamily
                                         font.pixelSize: 10
                                         font.weight: Font.Bold
                                         color: Colors.goldPrimary
                                     }
-
                                     Rectangle {
-                                        width: 18; height: 18; radius: 4
+                                        visible: sunburstCard.activeItem && !sunburstCard.activeItem.isFolder && !sunburstCard.activeItem.isOther && sunburstCard.activeItem.crc32 && sunburstCard.activeItem.crc32 !== "N/A"
+                                        width: 16
+                                        height: 16
+                                        radius: 3
                                         color: copyMouse.containsMouse ? Colors.bgHover : "transparent"
                                         border.color: Colors.goldBorder
                                         border.width: 1
 
                                         Text {
                                             anchors.centerIn: parent
-                                            text: entropyCard.copyFeedback ? "\ue877" : "\ue14d" // check or copy
+                                            text: sunburstCard.copyFeedback ? "\ue877" : "\ue14d"
                                             font.family: materialIcons.name
-                                            font.pixelSize: 11
-                                            color: entropyCard.copyFeedback ? "#4ade80" : Colors.goldPrimary
+                                            font.pixelSize: 10
+                                            color: sunburstCard.copyFeedback ? "#4ade80" : Colors.goldPrimary
                                         }
 
                                         MouseArea {
@@ -1046,8 +1159,8 @@ Page {
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
                                             onClicked: {
-                                                if (entropyCard.activeRegion) {
-                                                    entropyCard.copyToClipboard(entropyCard.activeRegion.crc32);
+                                                if (sunburstCard.activeItem && sunburstCard.activeItem.crc32) {
+                                                    sunburstCard.copyToClipboard(sunburstCard.activeItem.crc32);
                                                 }
                                             }
                                         }
@@ -1057,90 +1170,211 @@ Page {
                         }
                     }
                 }
+            }
+        }
 
-                // ==========================================
-                // --- Region Legend Chips & Quick Navigation ---
-                // ==========================================
-                Flickable {
-                    id: legendFlick
+        // ==========================================
+        // --- Compression Settings & Actions Box ---
+        // ==========================================
+        Rectangle {
+            id: compSettingsBox
+            Layout.fillWidth: true
+            implicitHeight: compSettingsCol.implicitHeight + 18
+            color: Colors.bgCard
+            radius: 10
+            border.color: root.hasSettingsChanges ? Colors.goldBorderHi : Colors.goldBorder
+            border.width: 1
+            visible: root.hasActiveArchive
+
+            ColumnLayout {
+                id: compSettingsCol
+                anchors.fill: parent
+                anchors.margins: 10
+                spacing: 8
+
+                // Header Row
+                RowLayout {
                     Layout.fillWidth: true
-                    height: 26
-                    contentWidth: legendRow.implicitWidth
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
+                    spacing: 8
 
+                    Text {
+                        text: "\ue871" // view_quilt
+                        font.family: materialIcons.name
+                        font.pixelSize: 15
+                        color: Colors.goldPrimary
+                    }
+
+                    Text {
+                        text: "COMPRESSION OPTIONS"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 10
+                        font.weight: Font.Bold
+                        color: Colors.goldPrimary
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Rectangle {
+                        implicitWidth: 76
+                        implicitHeight: 18
+                        radius: 4
+                        color: Colors.goldLight
+                        border.color: Colors.goldBorderHi
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "LZMA2 / ZSTD"
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 8
+                            font.weight: Font.Bold
+                            color: Colors.goldHover
+                        }
+                    }
+                }
+
+                // Segmented Toggle
+                TripleToggle {
+                    id: compToggle
+                    Layout.fillWidth: true
+                    currentIndex: Math.max(0, Math.min(2, root.pendingCompressionLevel - 1))
+                    options: ["Fast (Store)", "Balanced", "Ultra"]
+                    onSelected: (idx) => {
+                        root.pendingCompressionLevel = idx + 1;
+                    }
+                    Binding on currentIndex {
+                        value: Math.max(0, Math.min(2, root.pendingCompressionLevel - 1))
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: Colors.divider
+                }
+
+                // Options row
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    GoldSwitch {
+                        text: "Preserve Attributes & Timestamps"
+                        checked: root.pendingPreserveMetadata
+                        Layout.fillWidth: true
+                        onToggled: (isChecked) => {
+                            root.pendingPreserveMetadata = isChecked;
+                        }
+                    }
+                }
+
+                // Action Buttons: Cancel & Save Settings
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 2
+                    spacing: 8
+
+                    // Feedback Indicator
                     RowLayout {
-                        id: legendRow
-                        spacing: 6
+                        spacing: 4
+                        visible: root.settingsSavedFeedback
 
-                        Repeater {
-                            model: entropyCard.computedRegions
+                        Text {
+                            text: "\ue877" // check_circle
+                            font.family: materialIcons.name
+                            font.pixelSize: 13
+                            color: "#4ade80"
+                        }
+                        Text {
+                            text: "Settings Saved"
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 10
+                            font.weight: Font.Bold
+                            color: "#4ade80"
+                        }
+                    }
 
-                            Rectangle {
-                                implicitWidth: chipRow.implicitWidth + 10
-                                implicitHeight: 24
-                                radius: 4
-                                color: entropyCard.activeIndex === index ? Qt.rgba(1, 1, 1, 0.08) : Colors.bgInput
-                                border.color: entropyCard.activeIndex === index ? modelData.color : Colors.divider
-                                border.width: 1
+                    Item { Layout.fillWidth: true }
 
-                                Behavior on border.color { ColorAnimation { duration: 120 } }
+                    // Cancel Button
+                    Rectangle {
+                        implicitWidth: 80
+                        implicitHeight: 28
+                        radius: 5
+                        color: cancelSettingsMouse.containsMouse ? Colors.bgHover : "transparent"
+                        border.color: root.hasSettingsChanges ? Colors.goldBorder : Colors.borderSubtle
+                        border.width: 1
+                        opacity: root.hasSettingsChanges ? 1.0 : 0.5
 
-                                RowLayout {
-                                    id: chipRow
-                                    anchors.centerIn: parent
-                                    spacing: 5
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Cancel"
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 11
+                            font.weight: Font.Medium
+                            color: Colors.textMuted
+                        }
 
-                                    Rectangle {
-                                        width: 6; height: 6; radius: 3
-                                        color: modelData.color
+                        MouseArea {
+                            id: cancelSettingsMouse
+                            anchors.fill: parent
+                            enabled: root.hasSettingsChanges
+                            hoverEnabled: true
+                            cursorShape: root.hasSettingsChanges ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: {
+                                root.reloadSettings();
+                            }
+                        }
+                    }
+
+                    // Save Button
+                    Rectangle {
+                        implicitWidth: 110
+                        implicitHeight: 28
+                        radius: 5
+                        color: !root.hasSettingsChanges ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(0, 0, 0, 0.06))
+                             : saveSettingsMouse.containsPress ? Qt.darker(Colors.goldPrimary, 1.15)
+                             : (saveSettingsMouse.containsMouse ? Colors.goldHover : Colors.goldPrimary)
+                        border.color: root.hasSettingsChanges ? Colors.goldBorderHi : Colors.borderSubtle
+                        border.width: 1
+
+                        Behavior on color { ColorAnimation { duration: 120 } }
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 4
+
+                            Text {
+                                text: "\ue161" // save
+                                font.family: materialIcons.name
+                                font.pixelSize: 13
+                                color: root.hasSettingsChanges ? Colors.textOnGold : Colors.textSubtle
+                            }
+
+                            Text {
+                                text: "Save Settings"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 11
+                                font.weight: Font.Bold
+                                color: root.hasSettingsChanges ? Colors.textOnGold : Colors.textSubtle
+                            }
+                        }
+
+                        MouseArea {
+                            id: saveSettingsMouse
+                            anchors.fill: parent
+                            enabled: root.hasSettingsChanges
+                            hoverEnabled: true
+                            cursorShape: root.hasSettingsChanges ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: {
+                                if (typeof archiveInterface !== "undefined" && archiveInterface) {
+                                    // Strictly validate compression level int (1: Fast, 2: Balanced, 3: Ultra) before queuing job
+                                    if (root.pendingCompressionLevel >= 1 && root.pendingCompressionLevel <= 3) {
+                                        archiveInterface.addCompressionLevelJob(root.pendingCompressionLevel);
                                     }
-
-                                    Text {
-                                        text: modelData.name
-                                        font.family: Colors.fontFamily
-                                        font.pixelSize: 9
-                                        font.weight: entropyCard.activeIndex === index ? Font.Bold : Font.Medium
-                                        color: Colors.textMain
-                                    }
-
-                                    Text {
-                                        text: entropyCard.formatBytes(modelData.size)
-                                        font.family: Colors.fontFamily
-                                        font.pixelSize: 8
-                                        color: Colors.textMuted
-                                    }
-
-                                    Text {
-                                        text: modelData.entropy.toFixed(1) + "H"
-                                        font.family: Colors.fontFamily
-                                        font.pixelSize: 8
-                                        font.weight: Font.Bold
-                                        color: modelData.color
-                                    }
-
-                                    Text {
-                                        text: modelData.crc32
-                                        font.family: "Consolas, monospace"
-                                        font.pixelSize: 8
-                                        color: Colors.goldPrimary
-                                    }
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onEntered: entropyCard.hoveredIndex = index
-                                    onExited: {
-                                        if (entropyCard.hoveredIndex === index) {
-                                            entropyCard.hoveredIndex = -1;
-                                        }
-                                    }
-                                    onClicked: {
-                                        entropyCard.selectedIndex = index;
-                                        root.regionSelected(modelData, index);
-                                    }
+                                    archiveInterface.setPreserveMetadata(root.pendingPreserveMetadata);
+                                    root.settingsSavedFeedback = true;
+                                    settingsFeedbackTimer.restart();
                                 }
                             }
                         }

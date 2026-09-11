@@ -8,11 +8,11 @@ Window {
     id: progressWindow
     title: "Creating archive ..."
     width: 420
-    height: 420
+    height: 446
     minimumWidth: 420
     maximumWidth: 420
-    minimumHeight: 420
-    maximumHeight: 420
+    minimumHeight: 446
+    maximumHeight: 446
     flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint | Qt.WindowMinimizeButtonHint | Qt.CustomizeWindowHint
     color: Colors.bgMain
     visible: false
@@ -20,26 +20,302 @@ Window {
     // ==========================================
     // --- Progress & Operation State Properties ---
     // ==========================================
-    property string currentFilePath: "C:/Users/Freddy/Documents/SecureVault/Archives/Project_Data_Stream.bin"
-    property string currentFileName: "Project_Data_Stream.bin"
-    property real fileProgress: 0.68          // 0.0 to 1.0
-    property real overallProgress: 0.42       // 0.0 to 1.0
-    property int processedFiles: 14
-    property int totalFiles: 32
-    property real processedSizeMB: 142.5
-    property real totalSizeMB: 340.0
-    property real readSpeedMBs: 48.5
-    property real writeSpeedMBs: 32.4
+    property string currentFilePath: ""
+    property string currentFileName: ""
+    property real fileProgress: 0.0          // 0.0 to 1.0
+    property real overallProgress: 0.0       // 0.0 to 1.0
+    readonly property real displayOverallProgress: {
+        if (overallProgress > 0.0) return overallProgress;
+        if (typeof multiPartProgress !== "undefined" && multiPartProgress && multiPartProgress.calculatedOverallProgress > 0.0) {
+            return multiPartProgress.calculatedOverallProgress;
+        }
+        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.overallProgress > 0.0) {
+            return archiveInterface.overallProgress;
+        }
+        return 0.0;
+    }
+    property int processedFiles: 0
+    property int totalFiles: 0
+    property real processedSizeMB: 0.0
+    property real totalSizeMB: 0.0
+    property real speedMBs: 0.0
+    property real smoothedSpeedMBs: 0.0
 
     // Timing Properties (in seconds)
-    property int elapsedSeconds: 42
-    property int remainingSeconds: 58
+    property int elapsedSeconds: 0
+    property int remainingSeconds: 0
+    property real lastObservedProgress: 0.0
+    property var lastProgressChangeTime: 0
     property bool isPaused: false
+    property bool isCanceling: false
+    property bool isCompleted: false
+    property bool isFailed: false
+    readonly property bool isOperationDone: isCanceling || isCompleted || isFailed
+
+    // Byte Tracking for Speed Calculation
+    property real lastCompressedBytes: 0
+    property real lastProcessedBytes: 0
+    property var lastSampleTime: 0
 
     // Signals
     signal pauseToggled(bool paused)
     signal canceled()
     signal completed()
+
+    onPauseToggled: function(paused) {
+        if (typeof archiveInterface !== "undefined" && archiveInterface) {
+            archiveInterface.setOperationPaused(paused);
+        }
+    }
+
+    function resetProgressState() {
+        isCompleted = false;
+        isFailed = false;
+        isCanceling = false;
+        isPaused = false;
+        elapsedSeconds = 0;
+        remainingSeconds = 0;
+        lastObservedProgress = (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.overallProgress : 0.0;
+        lastProgressChangeTime = Date.now();
+        speedMBs = 0.0;
+        smoothedSpeedMBs = 0.0;
+        lastSampleTime = Date.now();
+        lastCompressedBytes = (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.totalCompressedBytes : 0;
+        lastProcessedBytes = (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.totalProcessedBytes : 0;
+        speedGraph.reset();
+        testCloseTimer.stop();
+        if (typeof testOkDialog !== "undefined" && testOkDialog) {
+            testOkDialog.close();
+        }
+        if (typeof errorDialog !== "undefined" && errorDialog) {
+            errorDialog.close();
+        }
+        if (typeof cancelConfirmDialog !== "undefined" && cancelConfirmDialog) {
+            cancelConfirmDialog.close();
+        }
+    }
+
+    function showError(title, message) {
+        isFailed = true;
+        progressTimer.stop();
+        timeLeftTimer.stop();
+        closeAndResetTimer.stop();
+        testCloseTimer.stop();
+        if (typeof testOkDialog !== "undefined" && testOkDialog) {
+            testOkDialog.close();
+        }
+        if (progressWindow.visible) {
+            errorDialog.showError(title, message);
+        }
+    }
+
+    onVisibleChanged: {
+        if (visible) {
+            isCanceling = false;
+            isCompleted = false;
+            isFailed = false;
+            var hasActiveTask = (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy);
+            if (hasActiveTask) {
+                // Synchronize live progress and pause state with running background task
+                progressWindow.isPaused = archiveInterface.isPaused;
+                progressWindow.overallProgress = archiveInterface.overallProgress;
+                progressWindow.fileProgress = archiveInterface.fileProgress;
+                if (archiveInterface.totalFiles > 0) {
+                    progressWindow.processedFiles = archiveInterface.processedFiles;
+                    progressWindow.totalFiles = archiveInterface.totalFiles;
+                }
+                if (archiveInterface.currentFileName.length > 0) {
+                    progressWindow.currentFileName = archiveInterface.currentFileName;
+                    progressWindow.currentFilePath = archiveInterface.currentFileName;
+                }
+                if (archiveInterface.currentOperationName.length > 0) {
+                    progressWindow.title = archiveInterface.currentOperationName;
+                }
+                if (archiveInterface.totalBytes > 0) {
+                    progressWindow.totalSizeMB = archiveInterface.totalBytes / (1024.0 * 1024.0);
+                } else if (archiveInterface.jobModel && archiveInterface.jobModel.totalBytes > 0) {
+                    progressWindow.totalSizeMB = archiveInterface.jobModel.totalBytes / (1024.0 * 1024.0);
+                } else if (archiveInterface.totalArchiveSize > 0) {
+                    progressWindow.totalSizeMB = archiveInterface.totalArchiveSize / (1024.0 * 1024.0);
+                }
+                var initProcBytes = archiveInterface.totalProcessedBytes;
+                if (initProcBytes > 0) {
+                    progressWindow.processedSizeMB = initProcBytes / (1024.0 * 1024.0);
+                } else if (progressWindow.totalSizeMB > 0) {
+                    var curPct = progressWindow.displayOverallProgress;
+                    if (curPct > 0) {
+                        progressWindow.processedSizeMB = progressWindow.totalSizeMB * curPct;
+                    }
+                }
+                progressWindow.lastSampleTime = Date.now();
+                progressWindow.lastCompressedBytes = archiveInterface.totalCompressedBytes;
+                progressWindow.lastProcessedBytes = archiveInterface.totalProcessedBytes;
+                progressWindow.lastObservedProgress = archiveInterface.overallProgress;
+                progressWindow.lastProgressChangeTime = Date.now();
+            } else {
+                resetProgressState();
+            }
+        } else {
+            progressTimer.stop();
+            timeLeftTimer.stop();
+            closeAndResetTimer.stop();
+            testCloseTimer.stop();
+            if (typeof testOkDialog !== "undefined" && testOkDialog) {
+                testOkDialog.close();
+            }
+            if (typeof errorDialog !== "undefined" && errorDialog) {
+                errorDialog.close();
+            }
+            if (typeof archiveInterface !== "undefined" && archiveInterface && !archiveInterface.isBusy) {
+                archiveInterface.syncJobsList();
+            }
+        }
+    }
+
+    onClosing: function(close) {
+        // Closing the progress window does NOT cancel the active task!
+        if (typeof cancelConfirmDialog !== "undefined" && cancelConfirmDialog) {
+            cancelConfirmDialog.close();
+        }
+        if (typeof archiveInterface !== "undefined" && archiveInterface && !archiveInterface.isBusy) {
+            resetProgressState();
+            archiveInterface.syncJobsList();
+        }
+    }
+
+    onCanceled: {
+        isCanceling = true;
+        if (typeof archiveInterface !== "undefined" && archiveInterface) {
+            archiveInterface.cancelCurrentOperation();
+        }
+    }
+
+    Connections {
+        target: typeof archiveInterface !== "undefined" ? archiveInterface : null
+        function onIsPausedChanged() {
+            if (archiveInterface) {
+                progressWindow.isPaused = archiveInterface.isPaused;
+                if (!progressWindow.isPaused) {
+                    progressWindow.lastProgressChangeTime = Date.now();
+                    progressWindow.lastSampleTime = Date.now();
+                }
+            }
+        }
+        function onProgressChanged() {
+            if (archiveInterface) {
+                if (archiveInterface.isBusy && (progressWindow.isCompleted || progressWindow.isFailed)) {
+                    progressWindow.isCompleted = false;
+                    progressWindow.isFailed = false;
+                }
+                progressWindow.overallProgress = archiveInterface.overallProgress;
+                progressWindow.fileProgress = archiveInterface.fileProgress;
+                if (archiveInterface.totalFiles > 0) {
+                    progressWindow.processedFiles = archiveInterface.processedFiles;
+                    progressWindow.totalFiles = archiveInterface.totalFiles;
+                }
+                if (archiveInterface.currentFileName.length > 0) {
+                    progressWindow.currentFileName = archiveInterface.currentFileName;
+                    progressWindow.currentFilePath = archiveInterface.currentFileName;
+                }
+                if (archiveInterface.currentOperationName.length > 0) {
+                    progressWindow.title = archiveInterface.currentOperationName;
+                }
+                if (archiveInterface.totalBytes > 0) {
+                    progressWindow.totalSizeMB = archiveInterface.totalBytes / (1024.0 * 1024.0);
+                } else if (archiveInterface.jobModel && archiveInterface.jobModel.totalBytes > 0) {
+                    progressWindow.totalSizeMB = archiveInterface.jobModel.totalBytes / (1024.0 * 1024.0);
+                } else if (archiveInterface.totalArchiveSize > 0) {
+                    progressWindow.totalSizeMB = archiveInterface.totalArchiveSize / (1024.0 * 1024.0);
+                }
+                var liveProcBytes = archiveInterface.totalProcessedBytes;
+                if (liveProcBytes > 0) {
+                    progressWindow.processedSizeMB = liveProcBytes / (1024.0 * 1024.0);
+                } else if (progressWindow.totalSizeMB > 0) {
+                    var curPct = progressWindow.displayOverallProgress;
+                    if (curPct > 0) {
+                        progressWindow.processedSizeMB = progressWindow.totalSizeMB * curPct;
+                    }
+                }
+            }
+        }
+        function onOperationCompleted(op, success, msg) {
+            var isCancel = isCanceling || (msg && msg.toLowerCase().indexOf("cancel") !== -1);
+            if (isCancel) {
+                isCanceling = false;
+                isCompleted = false;
+                isFailed = false;
+                if (typeof testOkDialog !== "undefined" && testOkDialog) {
+                    testOkDialog.close();
+                }
+                testCloseTimer.stop();
+                progressTimer.stop();
+                timeLeftTimer.stop();
+                closeAndResetTimer.stop();
+                progressWindow.close();
+                progressWindow.resetProgressState();
+                return;
+            }
+            if (success) {
+                progressWindow.isCompleted = true;
+                progressWindow.isFailed = false;
+                progressWindow.overallProgress = 1.0;
+                progressWindow.fileProgress = 1.0;
+                progressWindow.remainingSeconds = 0;
+                timeLeftTimer.stop();
+                progressWindow.completed();
+                if (op === "Test File" || op === "Test Archive") {
+                    testOkDialog.showTestOk(
+                        (op === "Test Archive") ? "Archive is OK" : "File is OK",
+                        (op === "Test Archive") ? "Integrity verification passed" : "CRC32 checksum verified",
+                        (op === "Test Archive") ? "All archive files and data blocks verified successfully!\nCRC32 checksums match TOC records." : "File data decrypted and verified successfully!\nCRC32 checksum matches archive entry.",
+                        (op === "Test Archive") ? "\ue8e8" : "\ue86c"
+                    );
+                    testCloseTimer.restart();
+                } else {
+                    // Watch when the job is done and close the window and reset the timers
+                    closeAndResetTimer.restart();
+                }
+            } else {
+                progressWindow.isFailed = true;
+                progressTimer.stop();
+                timeLeftTimer.stop();
+                testCloseTimer.stop();
+                if (typeof testOkDialog !== "undefined" && testOkDialog) {
+                    testOkDialog.close();
+                }
+                progressWindow.showError(op + " Failed", msg);
+            }
+        }
+    }
+
+    Timer {
+        id: testCloseTimer
+        interval: 3500
+        repeat: false
+        onTriggered: {
+            if (typeof testOkDialog !== "undefined" && testOkDialog) {
+                testOkDialog.close();
+            }
+            progressWindow.close();
+            progressWindow.resetProgressState();
+            if (typeof archiveInterface !== "undefined" && archiveInterface) {
+                archiveInterface.syncJobsList();
+            }
+        }
+    }
+
+    Timer {
+        id: closeAndResetTimer
+        interval: 600
+        repeat: false
+        onTriggered: {
+            progressWindow.close();
+            progressWindow.resetProgressState();
+            if (typeof archiveInterface !== "undefined" && archiveInterface) {
+                archiveInterface.syncJobsList();
+            }
+        }
+    }
 
     FontLoader {
         id: materialIcons
@@ -60,43 +336,122 @@ Window {
     }
 
     // ==========================================
-    // --- Live Timer (Progress & Speed Generator) ---
+    // --- Live Timer (Elapsed Time & Speed Graph) ---
     // ==========================================
     Timer {
         id: progressTimer
-        interval: 800
+        interval: 1000
         running: progressWindow.visible && !progressWindow.isPaused
         repeat: true
         onTriggered: {
             progressWindow.elapsedSeconds += 1;
+
             if (progressWindow.remainingSeconds > 0) {
                 progressWindow.remainingSeconds -= 1;
             }
 
-            // Smooth demo progress simulation
-            if (progressWindow.fileProgress < 0.98) {
-                progressWindow.fileProgress = Math.min(1.0, progressWindow.fileProgress + 0.025);
-            } else {
-                progressWindow.fileProgress = 0.05;
-                if (progressWindow.processedFiles < progressWindow.totalFiles) {
-                    progressWindow.processedFiles += 1;
-                    progressWindow.processedSizeMB = Math.min(progressWindow.totalSizeMB, progressWindow.processedSizeMB + 10.5);
+            var now = Date.now();
+            var dt = (progressWindow.lastSampleTime > 0) ? ((now - progressWindow.lastSampleTime) / 1000.0) : 1.0;
+            if (dt <= 0.05) dt = 1.0;
+            progressWindow.lastSampleTime = now;
+
+            var hasActiveBackend = (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy);
+            if (hasActiveBackend) {
+                var curComp = archiveInterface.totalCompressedBytes;
+                var curProc = archiveInterface.totalProcessedBytes;
+
+                // Resilient fallback: If backend byte counters are zero but overallProgress and totalBytes exist,
+                // derive processed bytes from overall progress
+                var totB = archiveInterface.totalBytes;
+                if (totB <= 0 && archiveInterface.jobModel && archiveInterface.jobModel.totalBytes > 0) {
+                    totB = archiveInterface.jobModel.totalBytes;
                 }
+                if (totB <= 0 && archiveInterface.totalArchiveSize > 0) {
+                    totB = archiveInterface.totalArchiveSize;
+                }
+
+                var activePct = progressWindow.displayOverallProgress;
+                if (curProc <= 0 && curComp <= 0 && totB > 0 && activePct > 0) {
+                    curProc = activePct * totB;
+                }
+
+                var deltaComp = (curComp >= progressWindow.lastCompressedBytes) ? (curComp - progressWindow.lastCompressedBytes) : curComp;
+                var deltaProc = (curProc >= progressWindow.lastProcessedBytes) ? (curProc - progressWindow.lastProcessedBytes) : curProc;
+
+                progressWindow.lastCompressedBytes = curComp;
+                progressWindow.lastProcessedBytes = curProc;
+
+                // Active throughput (raw bytes processed or written)
+                var deltaBytes = Math.max(deltaProc, deltaComp);
+                var curSpeed = (deltaBytes / (1024.0 * 1024.0)) / dt;
+
+                progressWindow.speedMBs = curSpeed;
+                speedGraph.addData(curSpeed);
+
+                // Smoothed speed using exponential moving average
+                if (progressWindow.smoothedSpeedMBs <= 0.01) {
+                    progressWindow.smoothedSpeedMBs = curSpeed;
+                } else if (curSpeed > 0.01) {
+                    progressWindow.smoothedSpeedMBs = 0.70 * progressWindow.smoothedSpeedMBs + 0.30 * curSpeed;
+                }
+            } else {
+                progressWindow.speedMBs = 0.0;
+                speedGraph.addData(0.0);
+            }
+        }
+    }
+
+    // ==========================================
+    // --- Time Left Calculation Timer (Every 5s) ---
+    // Watches how long it takes for overall percentage to change,
+    // avoiding UI lag caused by rapid progress bursts.
+    // ==========================================
+    Timer {
+        id: timeLeftTimer
+        interval: 5000
+        running: progressWindow.visible && !progressWindow.isPaused && !progressWindow.isOperationDone
+        repeat: true
+        onTriggered: {
+            var curProgress = progressWindow.displayOverallProgress;
+            if (curProgress >= 0.999) {
+                progressWindow.remainingSeconds = 0;
+                return;
             }
 
-            if (progressWindow.overallProgress < 0.99) {
-                progressWindow.overallProgress = Math.min(1.0, progressWindow.overallProgress + 0.008);
+            var now = Date.now();
+            if (!progressWindow.lastProgressChangeTime || progressWindow.lastProgressChangeTime <= 0) {
+                progressWindow.lastProgressChangeTime = now;
+                progressWindow.lastObservedProgress = curProgress;
+                return;
             }
 
-            // Live speed data generation and push to SpeedGraph
-            var deltaR = (Math.random() * 16.0 - 7.5);
-            var deltaW = (Math.random() * 12.0 - 5.5);
-            var nextRead = Math.max(18.0, Math.min(85.0, progressWindow.readSpeedMBs + deltaR));
-            var nextWrite = Math.max(12.0, Math.min(70.0, progressWindow.writeSpeedMBs + deltaW));
+            var deltaProgress = curProgress - progressWindow.lastObservedProgress;
 
-            progressWindow.readSpeedMBs = nextRead;
-            progressWindow.writeSpeedMBs = nextWrite;
-            speedGraph.addData(nextRead, nextWrite);
+            // If progress was reset backwards, re-synchronize baseline
+            if (deltaProgress < 0) {
+                progressWindow.lastObservedProgress = curProgress;
+                progressWindow.lastProgressChangeTime = now;
+                return;
+            }
+
+            // If the overall percentage has changed, calculate remaining time based on time taken
+            if (deltaProgress > 0) {
+                var timeElapsedSec = (now - progressWindow.lastProgressChangeTime) / 1000.0;
+                if (timeElapsedSec > 0.05) {
+                    var rate = deltaProgress / timeElapsedSec;
+                    var remainingFraction = Math.max(0.0, 1.0 - curProgress);
+                    var estRemaining = Math.round(remainingFraction / rate);
+                    if (isFinite(estRemaining) && estRemaining >= 0) {
+                        progressWindow.remainingSeconds = estRemaining;
+                    }
+                }
+                // Percentage changed: update baseline to watch the next change
+                progressWindow.lastObservedProgress = curProgress;
+                progressWindow.lastProgressChangeTime = now;
+            }
+            // If deltaProgress <= 0:
+            // The percentage has not changed yet. We keep watching and do NOT reset
+            // lastObservedProgress or lastProgressChangeTime so the accumulated elapsed time is preserved.
         }
     }
 
@@ -334,7 +689,7 @@ Window {
                     }
 
                     Text {
-                        text: Math.round(progressWindow.overallProgress * 100) + "%"
+                        text: Math.round(progressWindow.displayOverallProgress * 100) + "%"
                         font.family: Colors.fontFamily
                         font.pixelSize: 12
                         font.weight: Font.Bold
@@ -342,9 +697,17 @@ Window {
                     }
                 }
 
-                TallProgressBar {
-                    value: progressWindow.overallProgress
-                    barHeight: 8
+                // =========================================================
+                // --- High-Performance Multi-Part Progress Bar ---
+                // =========================================================
+                MultiPartProgressBar {
+                    id: multiPartProgress
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 32
+                    implicitHeight: 32
+                    forceText: true
+                    flyoutDownward: true
+                    customOverallProgress: (progressWindow.overallProgress > 0) ? progressWindow.overallProgress : -1.0
                 }
             }
 
@@ -487,9 +850,8 @@ Window {
             SpeedGraph {
                 id: speedGraph
                 Layout.fillWidth: true
-                Layout.preferredHeight: 70
-                currentTimeText: progressWindow.formatTime(progressWindow.elapsedSeconds)
-                midTimeText: progressWindow.formatTime(Math.max(0, Math.floor(progressWindow.elapsedSeconds / 2)))
+                Layout.preferredHeight: 74
+                elapsedSeconds: progressWindow.elapsedSeconds
             }
 
             RowLayout {
@@ -504,14 +866,47 @@ Window {
                     implicitWidth: 105
                     implicitHeight: 32
                     radius: 6
-                    color: pauseMouse.containsPress ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.10))
+                    readonly property bool btnEnabled: !progressWindow.isOperationDone
+                    opacity: btnEnabled ? 1.0 : 0.38
+                    color: !btnEnabled ? Colors.bgElevated
+                         : pauseMouse.containsPress ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.10))
                          : pauseMouse.containsMouse ? Colors.goldLightHover
                          : (progressWindow.isPaused ? Colors.goldLight : Colors.bgElevated)
-                    border.color: progressWindow.isPaused ? Colors.goldBorderHi : Colors.goldBorder
-                    border.width: 1
+                    border.color: !btnEnabled ? Colors.borderSubtle : (progressWindow.isPaused ? Colors.goldHover : Colors.goldBorder)
+                    border.width: progressWindow.isPaused ? 1.5 : 1
 
                     Behavior on color { ColorAnimation { duration: 150 } }
                     Behavior on border.color { ColorAnimation { duration: 150 } }
+                    Behavior on opacity {
+                        enabled: !progressWindow.isPaused
+                        NumberAnimation { duration: 150 }
+                    }
+
+                    // Pulsing / blinking animation when operation is paused so user immediately notices
+                    SequentialAnimation {
+                        id: pauseBlinkAnim
+                        running: progressWindow.isPaused && pauseBtn.btnEnabled && progressWindow.visible
+                        loops: Animation.Infinite
+                        NumberAnimation {
+                            target: pauseBtn
+                            property: "opacity"
+                            from: 1.0
+                            to: 0.30
+                            duration: 550
+                            easing.type: Easing.InOutQuad
+                        }
+                        NumberAnimation {
+                            target: pauseBtn
+                            property: "opacity"
+                            from: 0.30
+                            to: 1.0
+                            duration: 550
+                            easing.type: Easing.InOutQuad
+                        }
+                        onStopped: {
+                            pauseBtn.opacity = pauseBtn.btnEnabled ? 1.0 : 0.38;
+                        }
+                    }
 
                     RowLayout {
                         anchors.centerIn: parent
@@ -521,7 +916,7 @@ Window {
                             text: progressWindow.isPaused ? "\ue037" : "\ue034" // play_arrow / pause
                             font.family: materialIcons.name
                             font.pixelSize: 15
-                            color: Colors.goldPrimary
+                            color: pauseBtn.btnEnabled ? (progressWindow.isPaused ? Colors.goldHover : Colors.goldPrimary) : Colors.textMuted
                         }
 
                         Text {
@@ -529,15 +924,16 @@ Window {
                             font.family: Colors.fontFamily
                             font.pixelSize: 11
                             font.weight: Font.DemiBold
-                            color: Colors.textMain
+                            color: pauseBtn.btnEnabled ? (progressWindow.isPaused ? Colors.goldHover : Colors.textMain) : Colors.textMuted
                         }
                     }
 
                     MouseArea {
                         id: pauseMouse
                         anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
+                        enabled: pauseBtn.btnEnabled
+                        hoverEnabled: pauseBtn.btnEnabled
+                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                         onClicked: {
                             progressWindow.isPaused = !progressWindow.isPaused
                             progressWindow.pauseToggled(progressWindow.isPaused)
@@ -552,46 +948,639 @@ Window {
                     implicitWidth: 105
                     implicitHeight: 32
                     radius: 6
-                    color: cancelMouse.containsPress ? Qt.rgba(0.88, 0.33, 0.33, 0.25)
+                    readonly property bool btnEnabled: !progressWindow.isOperationDone
+                    opacity: btnEnabled ? 1.0 : 0.38
+                    color: !btnEnabled ? Colors.bgCard
+                         : cancelMouse.containsPress ? Qt.rgba(0.88, 0.33, 0.33, 0.25)
                          : cancelMouse.containsMouse ? Qt.rgba(0.88, 0.33, 0.33, 0.14)
                          : Colors.bgCard
-                    border.color: cancelMouse.containsMouse ? "#e05353" : Colors.borderSubtle
+                    border.color: !btnEnabled ? Colors.borderSubtle : (cancelMouse.containsMouse ? "#e05353" : (Colors.isDarkMode ? Qt.rgba(0.88, 0.33, 0.33, 0.35) : Qt.rgba(0.88, 0.33, 0.33, 0.45)))
                     border.width: 1
 
                     Behavior on color { ColorAnimation { duration: 150 } }
                     Behavior on border.color { ColorAnimation { duration: 150 } }
+                    Behavior on opacity { NumberAnimation { duration: 150 } }
 
                     RowLayout {
                         anchors.centerIn: parent
                         spacing: 6
 
                         Text {
-                            text: "\ue5cd" // close
+                            text: progressWindow.isCanceling ? "\ue5d5" : "\ue5cd" // refresh or close
                             font.family: materialIcons.name
                             font.pixelSize: 15
-                            color: cancelMouse.containsMouse ? "#e05353" : Colors.textMuted
+                            color: !cancelBtn.btnEnabled ? Colors.textMuted : (cancelMouse.containsMouse ? "#ef4444" : "#e05353")
                         }
 
                         Text {
-                            text: "Cancel"
+                            text: progressWindow.isCanceling ? "Canceling..." : "Cancel"
                             font.family: Colors.fontFamily
                             font.pixelSize: 11
                             font.weight: Font.DemiBold
-                            color: cancelMouse.containsMouse ? "#e05353" : Colors.textMuted
+                            color: !cancelBtn.btnEnabled ? Colors.textMuted : (cancelMouse.containsMouse ? "#ef4444" : Colors.textMain)
                         }
                     }
 
                     MouseArea {
                         id: cancelMouse
                         anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
+                        enabled: cancelBtn.btnEnabled
+                        hoverEnabled: cancelBtn.btnEnabled
+                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                         onClicked: {
-                            progressWindow.canceled()
-                            progressWindow.close()
+                            if (cancelBtn.btnEnabled) {
+                                cancelConfirmDialog.open()
+                            }
                         }
                         scale: containsPress ? 0.96 : 1.0
                         Behavior on scale { NumberAnimation { duration: 100 } }
+                    }
+                }
+            }
+        }
+
+        // =========================================================
+        // --- Test Verification Dialog (Styled like ErrorDialog in Green) ---
+        // =========================================================
+        Dialog {
+            id: testOkDialog
+            anchors.centerIn: parent
+            width: parent ? Math.min(parent.width - 36, 384) : 384
+            modal: true
+            focus: true
+            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+            padding: 16
+
+            property string okTitle: "Archive is OK"
+            property string okCategory: "Integrity verification passed"
+            property string okDetail: "All archive files and data blocks verified successfully!\nCRC32 checksums match TOC records."
+            property string okIcon: "\ue8e8" // verified_user / shield_check
+            property bool copyFeedback: false
+
+            function showTestOk(title, category, detail, iconGlyph) {
+                okTitle = (title && title.length > 0) ? title : "Archive is OK";
+                okCategory = (category && category.length > 0) ? category : "Integrity verification passed";
+                okDetail = (detail && detail.length > 0) ? detail : "Verification completed successfully.";
+                okIcon = (iconGlyph && iconGlyph.length > 0) ? iconGlyph : "\ue8e8";
+                copyFeedback = false;
+                open();
+            }
+
+            function dismissAndClose() {
+                testCloseTimer.stop();
+                testOkDialog.close();
+                progressWindow.close();
+                progressWindow.resetProgressState();
+                if (typeof archiveInterface !== "undefined" && archiveInterface) {
+                    archiveInterface.syncJobsList();
+                }
+            }
+
+            onClosed: {
+                testCloseTimer.stop();
+                if (progressWindow.isCompleted && progressWindow.visible) {
+                    progressWindow.close();
+                    progressWindow.resetProgressState();
+                    if (typeof archiveInterface !== "undefined" && archiveInterface) {
+                        archiveInterface.syncJobsList();
+                    }
+                }
+            }
+
+            Overlay.modal: Rectangle {
+                color: Colors.overlayModal
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+            }
+
+            background: Rectangle {
+                color: Colors.bgSurface
+                radius: 14
+                border.color: Colors.isDarkMode ? Qt.rgba(progressWindow.seaGreenLight.r, progressWindow.seaGreenLight.g, progressWindow.seaGreenLight.b, 0.5)
+                                                : Qt.rgba(progressWindow.seaGreenPrimary.r, progressWindow.seaGreenPrimary.g, progressWindow.seaGreenPrimary.b, 0.55)
+                border.width: 1.5
+
+                Behavior on color { ColorAnimation { duration: 200 } }
+                Behavior on border.color { ColorAnimation { duration: 200 } }
+
+                // Top SeaGreen accent glow bar (matching ErrorDialog)
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.leftMargin: 18
+                    anchors.rightMargin: 18
+                    height: 2.5
+                    radius: 1.25
+                    color: progressWindow.seaGreenLight
+                }
+            }
+
+            // Hidden clipboard helper
+            TextInput {
+                id: testOkClipboardHelper
+                visible: false
+            }
+
+            Timer {
+                id: testOkCopyFeedbackTimer
+                interval: 1600
+                repeat: false
+                onTriggered: testOkDialog.copyFeedback = false
+            }
+
+            contentItem: ColumnLayout {
+                spacing: 14
+
+                // ==========================================
+                // --- Header: Test Icon Badge, Title & Close ---
+                // ==========================================
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    // Circular green test icon badge
+                    Rectangle {
+                        width: 40
+                        height: 40
+                        radius: 20
+                        color: Colors.isDarkMode ? Qt.rgba(progressWindow.seaGreenLight.r, progressWindow.seaGreenLight.g, progressWindow.seaGreenLight.b, 0.16)
+                                                 : Qt.rgba(progressWindow.seaGreenPrimary.r, progressWindow.seaGreenPrimary.g, progressWindow.seaGreenPrimary.b, 0.12)
+                        border.color: Colors.isDarkMode ? Qt.rgba(progressWindow.seaGreenLight.r, progressWindow.seaGreenLight.g, progressWindow.seaGreenLight.b, 0.45)
+                                                        : Qt.rgba(progressWindow.seaGreenPrimary.r, progressWindow.seaGreenPrimary.g, progressWindow.seaGreenPrimary.b, 0.35)
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: testOkDialog.okIcon
+                            font.family: materialIcons.name
+                            font.pixelSize: 22
+                            color: progressWindow.seaGreenLight
+                        }
+                    }
+
+                    ColumnLayout {
+                        spacing: 2
+                        Layout.fillWidth: true
+
+                        Text {
+                            text: testOkDialog.okTitle
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 15
+                            font.weight: Font.Bold
+                            color: Colors.textMain
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+
+                        Text {
+                            text: testOkDialog.okCategory
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 11
+                            color: Colors.textMuted
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    // Close button (X)
+                    Rectangle {
+                        width: 26
+                        height: 26
+                        radius: 13
+                        color: testOkCloseMouse.containsMouse ? Qt.rgba(progressWindow.seaGreenLight.r, progressWindow.seaGreenLight.g, progressWindow.seaGreenLight.b, 0.18) : "transparent"
+                        border.color: testOkCloseMouse.containsMouse ? progressWindow.seaGreenLight : Colors.borderSubtle
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "\ue5cd"
+                            font.family: materialIcons.name
+                            font.pixelSize: 14
+                            color: testOkCloseMouse.containsMouse ? progressWindow.seaGreenLight : Colors.textMuted
+                        }
+
+                        MouseArea {
+                            id: testOkCloseMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onEntered: testCloseTimer.stop()
+                            onClicked: testOkDialog.dismissAndClose()
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: Colors.divider
+                }
+
+                // ==========================================
+                // --- Detailed Verification Info Box ---
+                // ==========================================
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: testOkDetailCol.implicitHeight + 18
+                    radius: 8
+                    color: Colors.bgInput
+                    border.color: Colors.isDarkMode ? Qt.rgba(progressWindow.seaGreenLight.r, progressWindow.seaGreenLight.g, progressWindow.seaGreenLight.b, 0.25) : Colors.borderSubtle
+                    border.width: 1
+
+                    ColumnLayout {
+                        id: testOkDetailCol
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 6
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Rectangle {
+                                width: 6
+                                height: 6
+                                radius: 3
+                                color: progressWindow.seaGreenLight
+                            }
+
+                            Text {
+                                text: "VERIFICATION DETAILS"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 9
+                                font.weight: Font.Bold
+                                color: progressWindow.seaGreenLight
+                                Layout.fillWidth: true
+                            }
+
+                            // Copy report button (exact pattern from ErrorDialog)
+                            Item {
+                                implicitWidth: testOkCopyRow.implicitWidth
+                                implicitHeight: testOkCopyRow.implicitHeight
+                                opacity: testOkCopyMouse.containsMouse ? 1.0 : 0.75
+
+                                RowLayout {
+                                    id: testOkCopyRow
+                                    anchors.fill: parent
+                                    spacing: 4
+
+                                    Text {
+                                        text: testOkDialog.copyFeedback ? "\ue876" : "\ue14d" // checkmark or content_copy
+                                        font.family: materialIcons.name
+                                        font.pixelSize: 12
+                                        color: testOkDialog.copyFeedback ? progressWindow.seaGreenLight : Colors.textMuted
+                                    }
+
+                                    Text {
+                                        text: testOkDialog.copyFeedback ? "Copied" : "Copy"
+                                        font.family: Colors.fontFamily
+                                        font.pixelSize: 10
+                                        font.weight: Font.Medium
+                                        color: testOkDialog.copyFeedback ? progressWindow.seaGreenLight : Colors.textMuted
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: testOkCopyMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onEntered: testCloseTimer.stop()
+                                    onClicked: {
+                                        testOkClipboardHelper.text = testOkDialog.okDetail;
+                                        testOkClipboardHelper.selectAll();
+                                        testOkClipboardHelper.copy();
+                                        testOkDialog.copyFeedback = true;
+                                        testOkCopyFeedbackTimer.restart();
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            id: testOkDetailText
+                            text: testOkDialog.okDetail
+                            color: Colors.textMain
+                            font.family: "Cascadia Code, Consolas, Courier New, monospace"
+                            font.pixelSize: 11
+                            font.weight: Font.Medium
+                            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                            Layout.fillWidth: true
+                            lineHeight: 1.25
+                        }
+                    }
+                }
+
+                // ==========================================
+                // --- Footer: Action Button (OK) ---
+                // ==========================================
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Item { Layout.fillWidth: true }
+
+                    Rectangle {
+                        implicitWidth: 110
+                        implicitHeight: 34
+                        radius: 6
+                        color: testOkBtnMouse.containsPress ? Qt.darker(progressWindow.seaGreenPrimary, 1.2)
+                             : (testOkBtnMouse.containsMouse ? progressWindow.seaGreenLight : progressWindow.seaGreenPrimary)
+
+                        Behavior on color { ColorAnimation { duration: 120 } }
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+
+                            Text {
+                                text: "\ue5ca" // check
+                                font.family: materialIcons.name
+                                font.pixelSize: 14
+                                color: "#ffffff"
+                            }
+
+                            Text {
+                                text: "OK"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 12
+                                font.weight: Font.Bold
+                                color: "#ffffff"
+                            }
+                        }
+
+                        MouseArea {
+                            id: testOkBtnMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onEntered: testCloseTimer.stop()
+                            onClicked: testOkDialog.dismissAndClose()
+                        }
+                    }
+                }
+            }
+        }
+
+        ErrorDialog {
+            id: errorDialog
+            anchors.centerIn: parent
+        }
+
+        // =========================================================
+        // --- Cancel Confirmation Dialog (Styled like ErrorDialog) ---
+        // =========================================================
+        Dialog {
+            id: cancelConfirmDialog
+            anchors.centerIn: parent
+            width: parent ? Math.min(parent.width - 40, 440) : 440
+            modal: true
+            focus: true
+            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+            padding: 18
+
+            Overlay.modal: Rectangle {
+                color: Colors.overlayModal
+                Behavior on opacity { NumberAnimation { duration: 150 } }
+            }
+
+            background: Rectangle {
+                color: Colors.bgSurface
+                radius: 14
+                border.color: Colors.isDarkMode ? Qt.rgba(0.9, 0.32, 0.32, 0.5) : Qt.rgba(0.85, 0.25, 0.25, 0.6)
+                border.width: 1.5
+
+                Behavior on color { ColorAnimation { duration: 200 } }
+                Behavior on border.color { ColorAnimation { duration: 200 } }
+
+                // Subtle top warning accent glow bar
+                Rectangle {
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.leftMargin: 18
+                    anchors.rightMargin: 18
+                    height: 2.5
+                    radius: 1.25
+                    color: "#e05353"
+                }
+            }
+
+            contentItem: ColumnLayout {
+                spacing: 14
+
+                // Header: Warning Icon Badge, Title & Close Button
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    Rectangle {
+                        width: 40
+                        height: 40
+                        radius: 20
+                        color: Colors.isDarkMode ? Qt.rgba(0.9, 0.32, 0.32, 0.16) : Qt.rgba(0.88, 0.25, 0.25, 0.12)
+                        border.color: Colors.isDarkMode ? Qt.rgba(0.9, 0.32, 0.32, 0.4) : Qt.rgba(0.88, 0.25, 0.25, 0.3)
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "\ue002" // warning icon
+                            font.family: materialIcons.name
+                            font.pixelSize: 22
+                            color: "#e05353"
+                        }
+                    }
+
+                    ColumnLayout {
+                        spacing: 2
+                        Layout.fillWidth: true
+
+                        Text {
+                            text: "Cancel Operation?"
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 15
+                            font.weight: Font.Bold
+                            color: Colors.textMain
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+
+                        Text {
+                            text: "Active background task will be aborted"
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 11
+                            color: Colors.textMuted
+                        }
+                    }
+
+                    // Close button (X)
+                    Rectangle {
+                        width: 26
+                        height: 26
+                        radius: 13
+                        color: cancelCloseMouse.containsMouse ? Qt.rgba(0.9, 0.3, 0.3, 0.2) : "transparent"
+                        border.color: cancelCloseMouse.containsMouse ? "#d9534f" : Colors.borderSubtle
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "\ue5cd"
+                            font.family: materialIcons.name
+                            font.pixelSize: 14
+                            color: cancelCloseMouse.containsMouse ? "#ff6b6b" : Colors.textMuted
+                        }
+
+                        MouseArea {
+                            id: cancelCloseMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: cancelConfirmDialog.close()
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: Colors.divider
+                }
+
+                // Warning Message Box
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: cancelDetailCol.implicitHeight + 20
+                    radius: 8
+                    color: Colors.bgInput
+                    border.color: Colors.isDarkMode ? Qt.rgba(0.9, 0.32, 0.32, 0.25) : Colors.borderSubtle
+                    border.width: 1
+
+                    ColumnLayout {
+                        id: cancelDetailCol
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 6
+
+                        RowLayout {
+                            spacing: 5
+                            Text {
+                                text: "\ue000" // error / alert
+                                font.family: materialIcons.name
+                                font.pixelSize: 13
+                                color: "#e05353"
+                            }
+                            Text {
+                                text: "CONFIRMATION REQUIRED"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 9
+                                font.weight: Font.Bold
+                                color: "#e05353"
+                            }
+                        }
+
+                        Text {
+                            text: "Are you sure you want to cancel the current operation? The ongoing task will be immediately stopped, and any partial, uncommitted progress will be discarded."
+                            color: Colors.textMain
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 11
+                            font.weight: Font.Normal
+                            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                            Layout.fillWidth: true
+                            lineHeight: 1.25
+                        }
+                    }
+                }
+
+                // Footer: Action Buttons (No / Yes)
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Item { Layout.fillWidth: true }
+
+                    // No / Keep Running Button
+                    Rectangle {
+                        implicitWidth: 120
+                        implicitHeight: 34
+                        radius: 6
+                        color: noCancelMouse.containsPress ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.12))
+                             : (noCancelMouse.containsMouse ? Colors.bgHover : Colors.bgElevated)
+                        border.color: noCancelMouse.containsMouse ? Colors.goldBorderHi : Colors.borderSubtle
+                        border.width: 1
+
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                        Behavior on border.color { ColorAnimation { duration: 120 } }
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+
+                            Text {
+                                text: "\ue5cd" // close
+                                font.family: materialIcons.name
+                                font.pixelSize: 14
+                                color: Colors.textMuted
+                            }
+
+                            Text {
+                                text: "No, Continue"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 12
+                                font.weight: Font.Medium
+                                color: Colors.textMain
+                            }
+                        }
+
+                        MouseArea {
+                            id: noCancelMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: cancelConfirmDialog.close()
+                        }
+                    }
+
+                    // Yes / Cancel Button
+                    Rectangle {
+                        implicitWidth: 120
+                        implicitHeight: 34
+                        radius: 6
+                        color: yesCancelMouse.containsPress ? Qt.darker("#e05353", 1.25)
+                             : (yesCancelMouse.containsMouse ? "#eb6b6b" : "#e05353")
+
+                        Behavior on color { ColorAnimation { duration: 120 } }
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 6
+
+                            Text {
+                                text: "\ue5ca" // check
+                                font.family: materialIcons.name
+                                font.pixelSize: 14
+                                color: "#ffffff"
+                            }
+
+                            Text {
+                                text: "Yes, Cancel"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 12
+                                font.weight: Font.Bold
+                                color: "#ffffff"
+                            }
+                        }
+
+                        MouseArea {
+                            id: yesCancelMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                cancelConfirmDialog.close();
+                                progressWindow.isCanceling = true;
+                                progressWindow.canceled();
+                            }
+                        }
                     }
                 }
             }

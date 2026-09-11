@@ -13,6 +13,7 @@ QtObject {
 
     // Windows 11 Fluent typography stack
     readonly property string fontFamily: "Segoe UI, Segoe UI Variable Text, Aptos, Inter, sans-serif"
+    readonly property string iconFontFamily: "Material Icons Round"
 
     // Background Layers (Windows 11 Mica / Acrylic / Card Hierarchy)
     readonly property color bgMain:       isDarkMode ? "#0c0e12" : "#f3f3f5"
@@ -26,10 +27,12 @@ QtObject {
     // Premium Gold Accents (High contrast in both Day & Night modes)
     readonly property color goldPrimary:    isDarkMode ? "#e5c158" : "#b0821e"
     readonly property color goldHover:      isDarkMode ? "#ebd480" : "#986f16"
+    readonly property color goldDark:       isDarkMode ? "#6b5314" : "#7d5d12"
     readonly property color goldLight:      isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.15) : Qt.rgba(0.69, 0.51, 0.12, 0.12)
     readonly property color goldLightHover: isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.25) : Qt.rgba(0.69, 0.51, 0.12, 0.22)
     readonly property color goldBorder:     isDarkMode ? "#3c3422" : "#dfd5bd"
     readonly property color goldBorderHi:   isDarkMode ? "#7a653c" : "#c4a768"
+    readonly property color borderFocus:    isDarkMode ? "#c4a768" : "#986f16"
     readonly property color textOnGold:     isDarkMode ? "#0d0e11" : "#ffffff"
 
     // Typography

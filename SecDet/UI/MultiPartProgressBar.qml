@@ -7,29 +7,45 @@ Item {
     id: root
 
     // =========================================================================
-    // --- Configurable Status Colors (Separated at the top for easy modification) ---
+    // --- Configurable Status Colors (Harmonized with SecDet Fluent / SeaGreen & Gold) ---
     // =========================================================================
-    property color colorIdle:     Colors.isDarkMode ? "#64748b" : "#94a3b8"  // Slate / Idle
-    property color colorPending:  Colors.isDarkMode ? "#818cf8" : "#6366f1"  // Indigo / Queued
-    property color colorRunning:  Colors.isDarkMode ? "#22c55e" : "#16a34a"  // Emerald Green / Running
-    property color colorPaused:   Colors.isDarkMode ? "#f59e0b" : "#d97706"  // Amber / Paused
-    property color colorAborted:  Colors.isDarkMode ? "#f97316" : "#ea580c"  // Orange / Aborted
-    property color colorFailed:   Colors.isDarkMode ? "#ef4444" : "#dc2626"  // Crimson / Error
-    property color colorFinished: Colors.isDarkMode ? "#0ea5e9" : "#0284c7"  // Sky Blue / Completed
+    property color colorIdle:     Colors.isDarkMode ? "#475569" : "#838b99"  // Slate / Idle
+    property color colorPending:  Colors.isDarkMode ? "#5c6b84" : "#64748b"  // Slate steel / Queued
+    property color colorRunning:  Colors.isDarkMode ? "#2e8b57" : "#228b50"  // Refined SeaGreen / Running
+    property color colorPaused:   Colors.isDarkMode ? Colors.goldPrimary : Colors.goldHover  // Amber Gold / Paused
+    property color colorAborted:  Colors.isDarkMode ? "#c86541" : "#b05232"  // Muted Terracotta / Aborted
+    property color colorFailed:   Colors.isDarkMode ? "#cd5c5c" : "#b23a3a"  // Indian Red / Error
+    property color colorFinished: Colors.isDarkMode ? "#236d43" : "#1a6b3e"  // Slight darker SeaGreen / Completed
 
-    // Sleeker, reduced height for a refined Fluent status bar aesthetic
-    implicitHeight: 34
+    // Sleeker, standard 36px height for Fluent status bar aesthetic
+    implicitHeight: 36
     Layout.fillWidth: true
-    Layout.preferredHeight: 34
+    Layout.preferredHeight: 36
 
-    // Sizing constants
-    property real runningWeight: 2.6
-    property real normalWeight: 1.0
-    property real minNormalWidth: 48
-    property real minRunningWidth: 180
+    // Minimal style toggle: automatically active when height < 35 unless forceText is true
+    property bool forceMinimal: false
+    property bool forceText: false
+    readonly property bool isMinimal: (forceMinimal || (height < 35)) && !forceText
 
-    // Simulation toggle (advances progress for demo purposes)
-    property bool simulationActive: true
+    // Flyout placement direction: if true, opens downwards (e.g. for ProgressWindow); otherwise opens upwards (MainWindow status bar)
+    property bool flyoutDownward: false
+
+    // Container styling
+    property color containerBackgroundColor: Colors.bgInput
+    property color cornerMaskColor: (parent && parent.color !== undefined && parent.color != "transparent")
+                                    ? parent.color
+                                    : (Colors.isDarkMode ? Colors.bgSurface : "#ffffff")
+
+    // Lifecycle & suspension controls
+    property bool isSuspended: false
+    property bool isCollapsed: false
+    property bool simulationActive: false
+
+    // Signals
+    signal removeRequested(int index, int jobId)
+    signal retryRequested(int index, int jobId)
+    signal progressClicked()
+    signal optimizationSequenceCompleted()
 
     FontLoader {
         id: materialIcons
@@ -39,39 +55,201 @@ Item {
     // =========================================================================
     // --- Data Model for Jobs ---
     // =========================================================================
+    readonly property var activeJobModel: (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.jobModel && archiveInterface.jobModel.count > 0)
+                                          ? archiveInterface.jobModel
+                                          : jobModel
+
+    readonly property int currentJobCount: activeJobModel ? activeJobModel.count : 0
+
+    property int internalRunningJobIndex: -1
+    property int internalFailedJobIndex: -1
+
+    readonly property int currentRunningJobIndex: {
+        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.jobModel && archiveInterface.jobModel.count > 0) {
+            return archiveInterface.jobModel.runningJobIndex;
+        }
+        return internalRunningJobIndex;
+    }
+
+    readonly property int currentFailedJobIndex: {
+        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.jobModel && archiveInterface.jobModel.count > 0) {
+            return archiveInterface.jobModel.failedJobIndex;
+        }
+        return internalFailedJobIndex;
+    }
+
     ListModel {
         id: jobModel
+    }
 
-        ListElement {
-            name: "Job #1 • Encrypting Vault"
-            state: "running"
-            progress: 0.68
-            detail: "Writing payload: 142.5 MB / 340 MB"
+    // =========================================================================
+    // --- O(1) Aggregate Counts & Status Computation ---
+    // =========================================================================
+    readonly property int finishedCount: {
+        if (activeJobModel && activeJobModel.finishedCount !== undefined) {
+            return activeJobModel.finishedCount;
         }
-        ListElement {
-            name: "Job #2 • Tree Structure"
-            state: "finished"
-            progress: 1.0
-            detail: "32 files processed successfully"
+        var count = 0;
+        for (var i = 0; i < jobModel.count; ++i) {
+            var st = jobModel.get(i).state;
+            if (st === "finished" || st === "done") count++;
         }
-        ListElement {
-            name: "Job #3 • SHA-256 Checksum"
-            state: "paused"
-            progress: 0.45
-            detail: "Paused by user (chunk 45/100)"
+        return count;
+    }
+
+    readonly property int failedCount: {
+        if (activeJobModel && activeJobModel.failedCount !== undefined) {
+            return activeJobModel.failedCount;
         }
-        ListElement {
-            name: "Job #4 • Compressing Media"
-            state: "pending"
-            progress: 0.0
-            detail: "Waiting for queue position"
+        var count = 0;
+        for (var i = 0; i < jobModel.count; ++i) {
+            var st = jobModel.get(i).state;
+            if (st === "failed") count++;
         }
-        ListElement {
-            name: "Job #5 • Index Sync"
-            state: "failed"
-            progress: 0.22
-            detail: "CRC32 checksum mismatch (0x9A4F)"
+        return count;
+    }
+
+    readonly property int runningCount: {
+        if (activeJobModel && activeJobModel.runningCount !== undefined) {
+            return activeJobModel.runningCount;
         }
+        return (currentRunningJobIndex >= 0 && currentRunningJobIndex < currentJobCount) ? 1 : 0;
+    }
+
+    readonly property int pendingCount: Math.max(0, currentJobCount - (finishedCount + runningCount + failedCount))
+
+    property real customOverallProgress: -1.0
+    readonly property bool isBusyWithTask: (customOverallProgress >= 0.0) ||
+                                           (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy)
+
+    readonly property real calculatedOverallProgress: {
+        if (customOverallProgress >= 0.0) {
+            return Math.max(0.0, Math.min(1.0, customOverallProgress));
+        }
+        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy && archiveInterface.overallProgress !== undefined && archiveInterface.overallProgress > 0.0) {
+            return Math.max(0.0, Math.min(1.0, archiveInterface.overallProgress));
+        }
+        if (activeJobModel && activeJobModel.overallProgress !== undefined && activeJobModel.overallProgress > 0.0) {
+            return Math.max(0.0, Math.min(1.0, activeJobModel.overallProgress));
+        }
+        if (currentJobCount <= 0) return 0.0;
+        var progressSum = finishedCount;
+        if (currentRunningJobIndex >= 0 && currentRunningJobIndex < currentJobCount) {
+            var rItem = activeJobModel.get(currentRunningJobIndex);
+            if (rItem && rItem.progress !== undefined) {
+                progressSum += rItem.progress;
+            }
+        }
+        return Math.max(0.0, Math.min(1.0, progressSum / currentJobCount));
+    }
+
+    readonly property string overallState: {
+        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.jobModel && archiveInterface.jobModel.count > 0) {
+            return archiveInterface.jobModel.overallState;
+        }
+        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy) {
+            if (archiveInterface.isPaused) return "paused";
+            return "running";
+        }
+        if (customOverallProgress >= 0.0) {
+            return (customOverallProgress >= 1.0) ? "finished" : "running";
+        }
+        if (currentJobCount === 0) return "idle";
+        if (failedCount > 0 || internalFailedJobIndex >= 0) return "failed";
+        if (runningCount > 0 || (internalRunningJobIndex >= 0 && internalRunningJobIndex < currentJobCount)) return "running";
+        if (finishedCount === currentJobCount) return "finished";
+        return "idle";
+    }
+
+    readonly property color overallBorderColor: {
+        switch (overallState) {
+            case "failed":   return colorFailed;
+            case "aborted":  return colorAborted;
+            case "running":  return colorRunning;
+            case "paused":   return colorPaused;
+            case "finished": return colorFinished;
+            default:         return Colors.goldBorder;
+        }
+    }
+
+    // Active running job metadata (reactively re-fetched via calculatedOverallProgress trigger)
+    readonly property var currentRunningJobItem: {
+        var _trigger = root.calculatedOverallProgress;
+        if (currentRunningJobIndex >= 0 && currentRunningJobIndex < currentJobCount && activeJobModel) {
+            return activeJobModel.get(currentRunningJobIndex);
+        }
+        return null;
+    }
+    readonly property string runningJobName: {
+        if (currentRunningJobItem && currentRunningJobItem.name) return currentRunningJobItem.name;
+        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.currentFileName.length > 0) {
+            return archiveInterface.currentFileName;
+        }
+        return (currentRunningJobIndex >= 0) ? ("Job #" + (currentRunningJobIndex + 1)) : "";
+    }
+    readonly property real runningJobProgress: (currentRunningJobItem && currentRunningJobItem.progress !== undefined) ? currentRunningJobItem.progress : 0.0
+    readonly property string runningJobDetail: {
+        var overallPct = Math.round(root.calculatedOverallProgress * 100) + "%";
+        if (currentRunningJobItem && currentRunningJobItem.detail) {
+            return overallPct + " overall • " + currentRunningJobItem.detail;
+        }
+        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy) {
+            if (archiveInterface.totalBytes > 0) {
+                var procBytes = archiveInterface.totalProcessedBytes;
+                if (procBytes <= 0 && root.calculatedOverallProgress > 0) {
+                    procBytes = root.calculatedOverallProgress * archiveInterface.totalBytes;
+                }
+                return (procBytes / (1024 * 1024)).toFixed(1) + " MB / " +
+                       (archiveInterface.totalBytes / (1024 * 1024)).toFixed(1) + " MB (" +
+                       overallPct + " overall)";
+            }
+        }
+        return overallPct + " overall";
+    }
+
+    // Mode determination: For small job sets (<= 5), show discrete proportional cells; for large batches (> 5), show HUD Capsule
+    readonly property bool isSegmentedMode: currentJobCount > 1 && currentJobCount <= 5
+
+    // =========================================================================
+    // --- Optimization & Deletion Sequence Properties ---
+    // =========================================================================
+    property bool isOptimizingSequenceActive: false
+    property string optimizationBannerText: ""
+    property var optimizationCallback: null
+
+    function playOptimizationDeletionSequence(deletedJobIds, onCompletedCallback) {
+        if (!deletedJobIds || deletedJobIds.length === 0) {
+            if (typeof onCompletedCallback === "function") {
+                onCompletedCallback();
+            }
+            return;
+        }
+        var count = deletedJobIds.length;
+        optimizationBannerText = "Optimizing archive • Eliminated " + count + " redundant operation" + (count > 1 ? "s" : "");
+        isOptimizingSequenceActive = true;
+        optimizationCallback = onCompletedCallback;
+        optimizationTimer.restart();
+    }
+
+    Timer {
+        id: optimizationTimer
+        interval: 500
+        repeat: false
+        onTriggered: {
+            root.isOptimizingSequenceActive = false;
+            root.optimizationSequenceCompleted();
+            var cb = root.optimizationCallback;
+            root.optimizationCallback = null;
+            if (typeof cb === "function") {
+                cb();
+            }
+        }
+    }
+
+    function demoDeletionAnimation() {
+        playOptimizationDeletionSequence([1, 2], function() {
+            // Demo finished
+        });
     }
 
     // =========================================================================
@@ -93,8 +271,8 @@ Item {
     function getStatusIcon(state) {
         switch (state) {
             case "idle":     return "\ue836"; // radio_button_unchecked
-            case "pending":  return "\ue8b5"; // schedule / clock
-            case "running":  return "\ue037"; // play_arrow
+            case "pending":  return "\ue8b5"; // schedule
+            case "running":  return "\ue86a"; // sync
             case "paused":   return "\ue034"; // pause
             case "aborted":  return "\ue5c9"; // cancel
             case "failed":   return "\ue000"; // error
@@ -116,651 +294,1051 @@ Item {
         }
     }
 
-    // Aggregate state for the overall structure border:
-    // Priority: failed > aborted > running > paused > finished > idle
-    readonly property string overallState: {
-        var count = jobModel.count;
-        if (count === 0) return "idle";
-
-        var hasRunning = false;
-        var hasPaused = false;
-        var hasAborted = false;
-        var hasFailed = false;
-        var allFinished = true;
-
-        var checkLimit = Math.min(count, 100);
-        for (var i = 0; i < checkLimit; ++i) {
-            var item = jobModel.get(i);
-            var s = item.state;
-            if (s === "failed") hasFailed = true;
-            if (s === "aborted") hasAborted = true;
-            if (s === "running") hasRunning = true;
-            if (s === "paused") hasPaused = true;
-            if (s !== "finished") allFinished = false;
-        }
-
-        if (hasFailed) return "failed";
-        if (hasAborted) return "aborted";
-        if (hasRunning) return "running";
-        if (hasPaused) return "paused";
-        if (allFinished) return "finished";
-        return "idle";
-    }
-
-    readonly property color overallBorderColor: {
-        switch (overallState) {
-            case "failed":   return colorFailed;
-            case "aborted":  return colorAborted;
-            case "running":  return colorRunning;
-            case "paused":   return colorPaused;
-            case "finished": return colorFinished;
-            default:         return Colors.goldBorder;
+    // Public navigation & trigger methods (fully backwards-compatible)
+    function scrollToRunningJob(animated) {
+        // High-performance focus action: triggers tooltip or updates active head
+        if (currentRunningJobIndex >= 0) {
+            triggerRunningToolTip(currentRunningJobIndex);
         }
     }
 
-    // Can all parts fit inside the container without scrolling?
-    readonly property bool canFitAll: {
-        var count = jobModel.count;
-        if (count <= 0) return true;
-        if (count > 20) return false; // Early exit for performance
-
-        var mw = 0;
-        for (var i = 0; i < count; ++i) {
-            var s = jobModel.get(i).state;
-            mw += (s === "running" ? minRunningWidth : minNormalWidth);
-        }
-        return mw <= containerRect.width;
-    }
-
-    property real totalWeight: {
-        var tw = 0;
-        var count = jobModel.count;
-        if (count > 20) return 1.0;
-        for (var i = 0; i < count; ++i) {
-            var s = jobModel.get(i).state;
-            tw += (s === "running" ? runningWeight : normalWeight);
-        }
-        return Math.max(1.0, tw);
-    }
-
-    // Calculate individual delegate width
-    function getDelegateWidth(index, state) {
-        var count = jobModel.count;
-        if (count <= 0) return 0;
-
-        if (canFitAll) {
-            var w = (state === "running" ? runningWeight : normalWeight);
-            var portion = (w / totalWeight) * containerRect.width;
-            return Math.max(minNormalWidth, portion);
-        } else {
-            return (state === "running" ? minRunningWidth : minNormalWidth);
+    function scrollToFailedJob(animated) {
+        if (currentFailedJobIndex >= 0) {
+            triggerRunningToolTip(currentFailedJobIndex);
+        } else if (failedCount > 0) {
+            jobFlyout.openFlyout("failed");
         }
     }
 
-    // -------------------------------------------------------------------------
-    // --- ToolTip Display & Seek Functionality ---
-    // -------------------------------------------------------------------------
-    function getJobCenterX(targetIdx) {
-        if (targetIdx < 0 || targetIdx >= jobModel.count) return containerRect.width / 2;
+    function seekToRunningJob() {
+        scrollToRunningJob(true);
+    }
 
-        if (canFitAll) {
-            var accX = 0;
-            for (var i = 0; i < targetIdx; ++i) {
-                accX += getDelegateWidth(i, jobModel.get(i).state);
-            }
-            var itemW = getDelegateWidth(targetIdx, jobModel.get(targetIdx).state);
-            return accX + itemW / 2;
-        } else {
-            var visualAccumX = 0;
-            for (var j = 0; j < targetIdx; ++j) {
-                visualAccumX += getDelegateWidth(j, jobModel.get(j).state);
-            }
-            var widthAtIdx = getDelegateWidth(targetIdx, jobModel.get(targetIdx).state);
-            var screenX = visualAccumX - jobListView.contentX;
-            return Math.max(80, Math.min(containerRect.width - 80, screenX + widthAtIdx / 2));
-        }
+    function seekToFailedJob() {
+        scrollToFailedJob(true);
     }
 
     function triggerRunningToolTip(index) {
-        if (index < 0 || index >= jobModel.count) return;
+        if (index < 0 || index >= currentJobCount) return;
+        var item = activeJobModel.get(index);
+        if (!item) return;
 
-        // Hide previous tooltip first
-        activeToolTip.close();
-        toolTipTimer.stop();
-
-        // Update data
-        var item = jobModel.get(index);
         activeToolTip.targetIndex = index;
-        activeToolTip.jobName = item.name;
-        activeToolTip.jobState = item.state;
-        activeToolTip.jobProgress = item.progress;
+        activeToolTip.jobName = item.name || ("Job #" + (index + 1));
+        activeToolTip.jobState = item.state || "idle";
+        activeToolTip.jobProgress = item.progress !== undefined ? item.progress : 0.0;
         activeToolTip.jobDetail = item.detail || "";
-
-        // Open and schedule 5-second auto-close
         activeToolTip.open();
         toolTipTimer.restart();
     }
 
-    function seekToRunningJob() {
-        var runningIdx = -1;
-        for (var i = 0; i < jobModel.count; ++i) {
-            if (jobModel.get(i).state === "running") {
-                runningIdx = i;
-                break;
-            }
-        }
-        if (runningIdx !== -1) {
-            if (!root.canFitAll) {
-                jobListView.positionViewAtIndex(runningIdx, ListView.Center);
-            }
-            triggerRunningToolTip(runningIdx);
-        }
+    Timer {
+        id: toolTipTimer
+        interval: 4000
+        repeat: false
+        onTriggered: activeToolTip.close()
     }
 
-    // Public helper methods
+    // Job model manipulation helpers
     function addJob(name, state, progress, detail) {
         var isNewRunning = (state === "running");
+        var newIdx = jobModel.count;
         jobModel.append({
-            name: name || ("Job #" + (jobModel.count + 1)),
+            name: name || ("Job #" + (newIdx + 1)),
             state: state || "pending",
             progress: progress !== undefined ? progress : 0.0,
             detail: detail || "Added to queue"
         });
         if (isNewRunning) {
-            triggerRunningToolTip(jobModel.count - 1);
+            internalRunningJobIndex = newIdx;
+            triggerRunningToolTip(newIdx);
         }
     }
 
     function removeJob(index) {
-        if (index >= 0 && index < jobModel.count) {
-            if (activeToolTip.targetIndex === index) {
-                activeToolTip.close();
-                toolTipTimer.stop();
-            }
+        if (index < 0 || index >= currentJobCount) return;
+        var item = activeJobModel ? activeJobModel.get(index) : null;
+        var jobId = (item && item.id !== undefined) ? item.id : -1;
+        removeRequested(index, jobId);
+        if (typeof archiveInterface !== "undefined" && archiveInterface) {
+            archiveInterface.removeJob(jobId, index);
+        }
+        if (jobModel && index >= 0 && index < jobModel.count) {
             jobModel.remove(index);
+            if (internalRunningJobIndex === index) {
+                internalRunningJobIndex = -1;
+            } else if (internalRunningJobIndex > index) {
+                internalRunningJobIndex--;
+            }
         }
     }
 
     function pauseJob(index) {
         if (index >= 0 && index < jobModel.count) {
             jobModel.setProperty(index, "state", "paused");
-            if (activeToolTip.targetIndex === index) {
-                activeToolTip.close();
-                toolTipTimer.stop();
-            }
         }
     }
 
     function resumeJob(index) {
         if (index >= 0 && index < jobModel.count) {
             jobModel.setProperty(index, "state", "running");
+            internalRunningJobIndex = index;
             triggerRunningToolTip(index);
         }
     }
 
     function retryJob(index) {
-        if (index >= 0 && index < jobModel.count) {
+        if (index < 0 || index >= currentJobCount) return;
+        var item = activeJobModel ? activeJobModel.get(index) : null;
+        var jobId = (item && item.id !== undefined) ? item.id : -1;
+
+        if (jobModel && index >= 0 && index < jobModel.count) {
             jobModel.setProperty(index, "state", "running");
-            jobModel.setProperty(index, "progress", 0.05);
-            triggerRunningToolTip(index);
+            jobModel.setProperty(index, "progress", 0.0);
+            internalRunningJobIndex = index;
+        }
+
+        retryRequested(index, jobId);
+        if (typeof archiveInterface !== "undefined" && archiveInterface) {
+            archiveInterface.retryJob(jobId, index);
         }
     }
 
-    function benchmark1000Jobs() {
-        jobModel.clear();
-        for (var i = 1; i <= 1000; ++i) {
-            var st = "pending";
-            var pr = 0.0;
-            if (i === 1) {
-                st = "running";
-                pr = 0.62;
-            } else if (i <= 40) {
-                st = "finished";
-                pr = 1.0;
-            } else if (i === 41 || i === 42) {
-                st = "paused";
-                pr = 0.35;
-            } else if (i === 43) {
-                st = "failed";
-                pr = 0.15;
-            } else if (i === 44) {
-                st = "aborted";
-                pr = 0.08;
-            }
-
-            jobModel.append({
-                name: "Job #" + i + " • Stream_Data_" + (i < 10 ? "00" : (i < 100 ? "0" : "")) + i + ".bin",
-                state: st,
-                progress: pr,
-                detail: "Archive batch item " + i + " of 1000"
-            });
-        }
-        jobListView.contentX = 0;
-        jobListView.positionViewAtIndex(0, ListView.Beginning);
-        triggerRunningToolTip(0);
-    }
-
-    function resetDefaultJobs() {
-        jobModel.clear();
-        jobModel.append({ name: "Job #1 • Encrypting Vault", state: "running", progress: 0.68, detail: "Writing payload: 142.5 MB / 340 MB" });
-        jobModel.append({ name: "Job #2 • Tree Structure", state: "finished", progress: 1.0, detail: "32 files processed successfully" });
-        jobModel.append({ name: "Job #3 • SHA-256 Checksum", state: "paused", progress: 0.45, detail: "Paused by user (chunk 45/100)" });
-        jobModel.append({ name: "Job #4 • Compressing Media", state: "pending", progress: 0.0, detail: "Waiting for queue position" });
-        jobModel.append({ name: "Job #5 • Index Sync", state: "failed", progress: 0.22, detail: "CRC32 checksum mismatch (0x9A4F)" });
-        jobListView.contentX = 0;
-        jobListView.positionViewAtIndex(0, ListView.Beginning);
-        triggerRunningToolTip(0);
-    }
-
-    Component.onCompleted: {
-        triggerRunningToolTip(0);
-    }
-
-    // =========================================================================
-    // --- Live Demo Progress Simulator ---
-    // =========================================================================
-    Timer {
-        id: simTimer
-        interval: 750
-        running: root.simulationActive && root.visible
-        repeat: true
-        onTriggered: {
-            for (var i = 0; i < jobModel.count; ++i) {
-                var item = jobModel.get(i);
-                if (item.state === "running") {
-                    if (item.progress < 0.98) {
-                        jobModel.setProperty(i, "progress", Math.min(1.0, item.progress + 0.02));
-                    } else {
-                        jobModel.setProperty(i, "progress", 1.0);
-                        jobModel.setProperty(i, "state", "finished");
-                        for (var j = 0; j < jobModel.count; ++j) {
-                            if (jobModel.get(j).state === "pending") {
-                                jobModel.setProperty(j, "state", "running");
-                                jobModel.setProperty(j, "progress", 0.04);
-                                root.triggerRunningToolTip(j);
-                                break;
-                            }
-                        }
-                    }
-                    break;
-                }
+    function retryAllFailed() {
+        for (var i = 0; i < currentJobCount; ++i) {
+            var item = activeJobModel.get(i);
+            if (item && item.state === "failed") {
+                retryJob(i);
             }
         }
     }
 
-    // Timer to auto-hide tooltip after 5 seconds
-    Timer {
-        id: toolTipTimer
-        interval: 5000
-        repeat: false
-        onTriggered: {
-            activeToolTip.close();
+    function openProgressWindowIfBusy() {
+        if (!root.flyoutDownward && typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy) {
+            root.progressClicked();
+            if (typeof progressWindow !== "undefined" && progressWindow) {
+                progressWindow.show();
+                progressWindow.raise();
+                progressWindow.requestActivate();
+                return true;
+            }
         }
+        return false;
     }
 
+
     // =========================================================================
-    // --- Outer Multi-Part Progress Container ---
+    // --- Outer Container (Capsule Aesthetic, Windows 11 Fluent) ---
     // =========================================================================
     Rectangle {
         id: containerRect
         anchors.fill: parent
         radius: 6
-        color: Colors.bgSurface
-        border.color: root.overallBorderColor
-        border.width: root.overallState === "running" ? 1.5 : 1.0
+        color: root.containerBackgroundColor
         clip: true
 
-        Behavior on border.color {
-            ColorAnimation { duration: 250 }
-        }
-
-        SequentialAnimation on border.width {
-            running: root.overallState === "running"
-            loops: Animation.Infinite
-            NumberAnimation { to: 2.0; duration: 900; easing.type: Easing.InOutQuad }
-            NumberAnimation { to: 1.2; duration: 900; easing.type: Easing.InOutQuad }
-        }
-
-        // Empty state indicator if all jobs removed
+        // =====================================================================
+        // --- 1. Empty State (currentJobCount === 0) ---
+        // =====================================================================
         Item {
             anchors.fill: parent
-            visible: jobModel.count === 0
+            visible: root.currentJobCount === 0 && !root.isBusyWithTask && !root.isCollapsed
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy) ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.openProgressWindowIfBusy()
+            }
+
+            RowLayout {
+                anchors.centerIn: parent
+                spacing: 6
+                Text {
+                    text: "\ue836" // radio_button_unchecked
+                    font.family: materialIcons.name
+                    font.pixelSize: root.isMinimal ? 11 : 13
+                    color: Colors.textMuted
+                    opacity: 0.7
+                }
+                Text {
+                    text: root.isMinimal ? "Idle" : "No active operations • System Idle"
+                    font.family: Colors.fontFamily
+                    font.pixelSize: root.isMinimal ? 10 : 11
+                    color: Colors.textMuted
+                }
+            }
+        }
+
+        // =====================================================================
+        // --- 2. Discrete Proportional Mode (For small workflows: 2 to 8 items) ---
+        // Zero scrolling, equal or proportional distribution across the width!
+        // =====================================================================
+        RowLayout {
+            anchors.fill: parent
+            anchors.margins: 2
+            spacing: 2
+            visible: root.isSegmentedMode && root.currentJobCount > 0 && !root.isCollapsed
+
+            Repeater {
+                model: root.isSegmentedMode ? root.activeJobModel : null
+
+                delegate: Rectangle {
+                    id: segmentCell
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    radius: 4
+                    clip: true
+                    color: Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.04) : Qt.rgba(0, 0, 0, 0.03)
+
+                    readonly property color cellColor: root.getStatusColor(model.state)
+                    readonly property bool isCellRunning: model.state === "running"
+                    readonly property bool isCellDone: model.state === "finished" || model.state === "done"
+
+                    // Progress fill inside this discrete segment
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: isCellDone ? parent.width : Math.max(0, parent.width * (model.progress !== undefined ? model.progress : 0))
+                        radius: 3
+                        color: segmentCell.cellColor
+                        opacity: isCellDone ? 0.9 : 0.75
+
+                        Behavior on width {
+                            enabled: !root.isSuspended
+                            NumberAnimation { duration: 180; easing.type: Easing.OutQuad }
+                        }
+                    }
+
+                    // Content row
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 6
+                        spacing: 4
+
+                        Text {
+                            text: root.getStatusIcon(model.state)
+                            font.family: materialIcons.name
+                            font.pixelSize: 11
+                            color: isCellDone || isCellRunning ? "#ffffff" : Colors.textMuted
+                            Layout.alignment: Qt.AlignVCenter
+
+                            RotationAnimation on rotation {
+                                running: segmentCell.isCellRunning && root.visible
+                                loops: Animation.Infinite
+                                from: 0; to: 360; duration: 1200
+                            }
+                        }
+
+                        Text {
+                            text: model.name || ("Part " + (index + 1))
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 10
+                            font.weight: Font.DemiBold
+                            color: isCellDone || isCellRunning ? "#ffffff" : Colors.textMain
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        Text {
+                            text: isCellDone ? "Done" : (segmentCell.isCellRunning ? "Working" : "Queued")
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 9
+                            font.weight: Font.Bold
+                            color: isCellDone || isCellRunning ? "#ffffff" : Colors.textMuted
+                            visible: segmentCell.width >= 70
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        cursorShape: Qt.PointingHandCursor
+                        hoverEnabled: true
+                        onClicked: (mouse) => {
+                            if (mouse.button === Qt.RightButton) {
+                                taskContextMenu.openForTask(index, model.name, model.state, (typeof model !== "undefined" && model && model.fileName) ? model.fileName : "");
+                                taskContextMenu.popup(segmentCell, mouse.x, mouse.y);
+                            } else {
+                                if (!root.openProgressWindowIfBusy()) {
+                                    root.triggerRunningToolTip(index);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Overall percentage badge pinned to right in segmented mode
+            Rectangle {
+                Layout.preferredWidth: overallSegBadgeRow.implicitWidth + 14
+                Layout.fillHeight: true
+                radius: 4
+                color: Colors.isDarkMode ? Qt.rgba(0, 0, 0, 0.35) : Qt.rgba(255, 255, 255, 0.45)
+                border.color: root.getStatusColor(root.overallState)
+                border.width: 1
+
+                RowLayout {
+                    id: overallSegBadgeRow
+                    anchors.centerIn: parent
+                    spacing: 4
+
+                    Text {
+                        text: Math.round(root.calculatedOverallProgress * 100) + "%"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 10
+                        font.weight: Font.Bold
+                        color: root.overallState === "failed" ? root.colorFailed : root.colorRunning
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // --- 3. Adaptive Segmented Capsule Mode (For Batch Workflows: > 5 or 1 item) ---
+        // $O(1)$ Constant-Time Proportional Track + Live Head HUD. ZERO scrolling!
+        // =====================================================================
+        Item {
+            anchors.fill: parent
+            anchors.margins: 2
+            visible: (!root.isSegmentedMode && (root.currentJobCount > 0 || root.isBusyWithTask)) && !root.isCollapsed
+
+            // --- 3A. Proportional Background Multi-State Track ---
+            Item {
+                anchors.fill: parent
+                clip: true
+
+                // Finished track segment (SeaGreen fill from far left)
+                Rectangle {
+                    id: finishedTrack
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: Math.max(0, parent.width * (root.currentJobCount > 0 ? (root.finishedCount / Math.max(1, root.currentJobCount)) : (root.calculatedOverallProgress >= 1.0 ? 1.0 : 0.0)))
+                    radius: 3
+                    color: Qt.rgba(root.colorFinished.r, root.colorFinished.g, root.colorFinished.b, Colors.isDarkMode ? 0.40 : 0.25)
+
+                    Behavior on width {
+                        enabled: !root.isSuspended
+                        NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
+                    }
+                }
+
+                // Active task pulse slice (adjacent to finished track)
+                Rectangle {
+                    id: activeTrack
+                    anchors.left: finishedTrack.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: (root.runningCount > 0 || root.isBusyWithTask)
+                           ? Math.min(parent.width - finishedTrack.width,
+                                      Math.max(6, parent.width * (root.currentJobCount > 0 ? Math.max(0.0, root.calculatedOverallProgress - (root.finishedCount / Math.max(1, root.currentJobCount))) : root.calculatedOverallProgress)))
+                           : 0
+                    radius: 3
+                    color: root.colorRunning
+                    opacity: 0.85
+
+                    Behavior on width {
+                        enabled: !root.isSuspended
+                        NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
+                    }
+
+                    // Breathing ambient pulse for running head
+                    SequentialAnimation on opacity {
+                        running: root.runningCount > 0 && root.visible && !root.isSuspended
+                        loops: Animation.Infinite
+                        NumberAnimation { from: 0.65; to: 0.95; duration: 750; easing.type: Easing.InOutQuad }
+                        NumberAnimation { from: 0.95; to: 0.65; duration: 750; easing.type: Easing.InOutQuad }
+                    }
+                }
+
+                // Failed segment indicator (anchored to the far right if any errors exist)
+                Rectangle {
+                    id: failedTrack
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: (root.failedCount > 0)
+                           ? Math.max(14, parent.width * (root.failedCount / Math.max(1, root.currentJobCount)))
+                           : 0
+                    radius: 3
+                    color: Qt.rgba(root.colorFailed.r, root.colorFailed.g, root.colorFailed.b, 0.70)
+                    visible: root.failedCount > 0
+                }
+            }
+
+            // --- 3B. Live Heads-Up Display (HUD) ---
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                spacing: 8
+
+                // Left: Active Task Indicator & Name
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 7
+
+                    // Live Rotating Indicator or State Icon
+                    Rectangle {
+                        width: 20
+                        height: 20
+                        radius: 10
+                        color: Qt.rgba(root.getStatusColor(root.overallState).r,
+                                       root.getStatusColor(root.overallState).g,
+                                       root.getStatusColor(root.overallState).b,
+                                       Colors.isDarkMode ? 0.25 : 0.15)
+                        border.color: root.getStatusColor(root.overallState)
+                        border.width: 1
+                        Layout.alignment: Qt.AlignVCenter
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: root.getStatusIcon(root.overallState)
+                            font.family: materialIcons.name
+                            font.pixelSize: 12
+                            color: root.getStatusColor(root.overallState)
+
+                            RotationAnimation on rotation {
+                                running: root.overallState === "running" && root.visible
+                                loops: Animation.Infinite
+                                from: 0; to: 360; duration: 1100
+                            }
+                        }
+                    }
+
+                    // Task name & status detail
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 0
+                        Layout.alignment: Qt.AlignVCenter
+
+                        Text {
+                            text: root.runningJobName.length > 0
+                                  ? root.runningJobName
+                                  : (root.finishedCount === root.currentJobCount ? "All tasks completed successfully" : "Processing archive jobs")
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 11
+                            font.weight: Font.DemiBold
+                            color: Colors.textMain
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+
+                        Text {
+                            text: root.runningJobDetail.length > 0
+                                  ? root.runningJobDetail
+                                  : ((root.currentJobCount > 0)
+                                      ? (Math.round(root.calculatedOverallProgress * 100) + "% overall • " + root.finishedCount + " of " + root.currentJobCount + " completed")
+                                      : (Math.round(root.calculatedOverallProgress * 100) + "% overall"))
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 9
+                            color: Colors.textMuted
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            visible: !root.isMinimal && (parent.height > 30)
+                        }
+                    }
+                }
+
+                // Center: Status Capsule Badges (Finished, Running, Queued, Failed)
+                RowLayout {
+                    spacing: 4
+                    visible: !root.isMinimal && (containerRect.width >= 580)
+                    Layout.alignment: Qt.AlignVCenter
+
+                    // Finished badge
+                    Rectangle {
+                        height: 20
+                        implicitWidth: doneRow.implicitWidth + 10
+                        radius: 10
+                        color: Qt.rgba(root.colorFinished.r, root.colorFinished.g, root.colorFinished.b, 0.18)
+                        border.color: Qt.rgba(root.colorFinished.r, root.colorFinished.g, root.colorFinished.b, 0.45)
+                        border.width: 1
+
+                        RowLayout {
+                            id: doneRow
+                            anchors.centerIn: parent
+                            spacing: 3
+                            Text {
+                                text: "\ue86c" // check_circle
+                                font.family: materialIcons.name
+                                font.pixelSize: 11
+                                color: root.colorFinished
+                            }
+                            Text {
+                                text: root.finishedCount + " Done"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                font.weight: Font.Medium
+                                color: Colors.isDarkMode ? "#cbd5e1" : "#334155"
+                            }
+                        }
+                    }
+
+                    // Queued badge
+                    Rectangle {
+                        height: 20
+                        implicitWidth: queuedRow.implicitWidth + 10
+                        radius: 10
+                        color: Qt.rgba(root.colorPending.r, root.colorPending.g, root.colorPending.b, 0.15)
+                        border.color: Qt.rgba(root.colorPending.r, root.colorPending.g, root.colorPending.b, 0.35)
+                        border.width: 1
+                        visible: root.pendingCount > 0
+
+                        RowLayout {
+                            id: queuedRow
+                            anchors.centerIn: parent
+                            spacing: 3
+                            Text {
+                                text: "\ue8b5" // schedule
+                                font.family: materialIcons.name
+                                font.pixelSize: 10
+                                color: root.colorPending
+                            }
+                            Text {
+                                text: root.pendingCount + " Queued"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                font.weight: Font.Medium
+                                color: Colors.textMuted
+                            }
+                        }
+                    }
+
+                    // Failed badge (Clickable to inspect / retry)
+                    Rectangle {
+                        id: failedBadge
+                        height: 20
+                        implicitWidth: failedRow.implicitWidth + 12
+                        radius: 10
+                        color: failedMouse.containsMouse
+                               ? Qt.rgba(root.colorFailed.r, root.colorFailed.g, root.colorFailed.b, 0.35)
+                               : Qt.rgba(root.colorFailed.r, root.colorFailed.g, root.colorFailed.b, 0.20)
+                        border.color: root.colorFailed
+                        border.width: 1
+                        visible: root.failedCount > 0
+
+                        RowLayout {
+                            id: failedRow
+                            anchors.centerIn: parent
+                            spacing: 3
+                            Text {
+                                text: "\ue000" // error
+                                font.family: materialIcons.name
+                                font.pixelSize: 11
+                                color: root.colorFailed
+                            }
+                            Text {
+                                text: root.failedCount + " Failed • Retry"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                font.weight: Font.Bold
+                                color: root.colorFailed
+                            }
+                        }
+
+                        MouseArea {
+                            id: failedMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                jobFlyout.openFlyout("failed");
+                            }
+                        }
+                    }
+                }
+
+                // Right: Overall Progress & Batch Position
+                RowLayout {
+                    spacing: 6
+                    Layout.alignment: Qt.AlignVCenter
+
+                    // Overall percentage badge
+                    Text {
+                        text: Math.round(root.calculatedOverallProgress * 100) + "%"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 12
+                        font.weight: Font.Bold
+                        color: root.overallState === "failed" ? root.colorFailed : root.colorRunning
+                    }
+
+                    // Batch position: [ 451 / 1000 ]
+                    Text {
+                        text: "[" + (root.currentRunningJobIndex >= 0 ? (root.currentRunningJobIndex + 1) : root.finishedCount) + "/" + root.currentJobCount + "]"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 10
+                        color: Colors.textMuted
+                        visible: !root.isMinimal && (containerRect.width >= 400) && (root.currentJobCount > 0)
+                    }
+
+                    // Job Inspector Button
+                    Rectangle {
+                        id: flyoutBtn
+                        height: 22
+                        implicitWidth: flyoutBtnRow.implicitWidth + 12
+                        radius: 11
+                        color: flyoutBtnMouse.containsMouse
+                               ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.08))
+                               : (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.05) : Qt.rgba(0, 0, 0, 0.04))
+                        border.color: flyoutBtnMouse.containsMouse ? Colors.goldPrimary : Colors.borderSubtle
+                        border.width: 1
+
+                        RowLayout {
+                            id: flyoutBtnRow
+                            anchors.centerIn: parent
+                            spacing: 4
+                            Text {
+                                text: "\ue8ee" // view_list / format_list_bulleted
+                                font.family: materialIcons.name
+                                font.pixelSize: 11
+                                color: Colors.goldPrimary
+                            }
+                            Text {
+                                text: "Tasks"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                font.weight: Font.Medium
+                                color: Colors.isDarkMode ? "#e2e8f0" : "#334155"
+                                visible: containerRect.width >= 480
+                            }
+                        }
+
+                        MouseArea {
+                            id: flyoutBtnMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (!root.openProgressWindowIfBusy()) {
+                                    jobFlyout.toggle();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Interactive click on the HUD to inspect tasks
+            MouseArea {
+                anchors.fill: parent
+                z: -1
+                acceptedButtons: Qt.LeftButton
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    if (!root.openProgressWindowIfBusy()) {
+                        jobFlyout.toggle();
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // --- 4. Optimization Deletion Sequence Banner Overlay ---
+        // =====================================================================
+        Rectangle {
+            anchors.fill: parent
+            radius: 6
+            color: Colors.goldPrimary
+            opacity: root.isOptimizingSequenceActive ? 0.92 : 0.0
+            visible: opacity > 0.0
+            z: 80
+
+            Behavior on opacity { NumberAnimation { duration: 180 } }
 
             RowLayout {
                 anchors.centerIn: parent
                 spacing: 8
                 Text {
-                    text: "\ue88e" // info
+                    text: "\ue872" // delete
                     font.family: materialIcons.name
                     font.pixelSize: 14
-                    color: Colors.textMuted
+                    color: Colors.textOnGold
                 }
                 Text {
-                    text: "No active background jobs • Right-click to add jobs or run 1,000-job benchmark"
+                    text: root.optimizationBannerText
                     font.family: Colors.fontFamily
                     font.pixelSize: 11
-                    color: Colors.textMuted
-                }
-            }
-
-            MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.RightButton
-                onClicked: (mouse) => {
-                    emptyMenu.popup(containerRect, mouse.x, mouse.y);
+                    font.weight: Font.Bold
+                    color: Colors.textOnGold
                 }
             }
         }
 
         // =====================================================================
-        // --- Virtualized Horizontal ListView for 1000+ Parts Efficiency ---
+        // --- 5. Border Overlay (Always renders on top of tracks, HUD & overlays) ---
         // =====================================================================
-        ListView {
-            id: jobListView
-            anchors.fill: parent
-            anchors.margins: 1
-            orientation: ListView.Horizontal
-            boundsBehavior: Flickable.StopAtBounds
-            clip: true
-            spacing: 0
-
-            model: jobModel
-
-            WheelHandler {
-                onWheel: (event) => {
-                    jobListView.contentX = Math.max(0, Math.min(jobListView.contentWidth - jobListView.width,
-                                                                jobListView.contentX - event.angleDelta.y * 1.5));
-                    if (activeToolTip.visible) {
-                        activeToolTip.x = root.getJobCenterX(activeToolTip.targetIndex) - activeToolTip.width / 2;
-                    }
-                }
-            }
-
-            add: Transition {
-                NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 200; easing.type: Easing.OutCubic }
-            }
-
-            remove: Transition {
-                NumberAnimation { property: "opacity"; to: 0.0; duration: 180; easing.type: Easing.InQuad }
-            }
-
-            displaced: Transition {
-                NumberAnimation { properties: "x"; duration: 220; easing.type: Easing.OutCubic }
-            }
-
-            delegate: Item {
-                id: partDelegate
-                height: jobListView.height
-                width: root.getDelegateWidth(index, model.state)
-
-                Behavior on width {
-                    NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
-                }
-
-                readonly property color stateColor: root.getStatusColor(model.state)
-                readonly property bool isRunning: model.state === "running"
-                readonly property bool isCompact: width < 120
-
-                // 1. Part Base Background (unfilled track portion, no bottom border)
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 0
-                    border.width: 0
-                    color: Qt.rgba(partDelegate.stateColor.r,
-                                   partDelegate.stateColor.g,
-                                   partDelegate.stateColor.b,
-                                   Colors.isDarkMode ? 0.16 : 0.10)
-                }
-
-                // 2. Part Progress Fill Layer (the progress bar itself, no bottom border)
-                Rectangle {
-                    id: progressFill
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    border.width: 0
-                    radius: 0
-                    width: Math.max(0, Math.min(parent.width, parent.width * model.progress))
-
-                    color: partDelegate.stateColor
-
-                    Behavior on width {
-                        NumberAnimation { duration: 250; easing.type: Easing.OutQuad }
-                    }
-
-                    // Active animated shimmer effect for running part
-                    Rectangle {
-                        id: shimmerRect
-                        anchors.fill: parent
-                        border.width: 0
-                        radius: 0
-                        visible: partDelegate.isRunning
-
-                        gradient: Gradient {
-                            orientation: Gradient.Horizontal
-                            GradientStop { position: 0.0; color: "transparent" }
-                            GradientStop { position: 0.5; color: Qt.rgba(1, 1, 1, 0.28) }
-                            GradientStop { position: 1.0; color: "transparent" }
-                        }
-
-                        SequentialAnimation on opacity {
-                            running: partDelegate.isRunning
-                            loops: Animation.Infinite
-                            NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
-                            NumberAnimation { to: 0.2; duration: 600; easing.type: Easing.InOutQuad }
-                        }
-                    }
-                }
-
-                // 3. Soft blend transition to adjacent part on the right (eliminates solid harsh borders)
-                Rectangle {
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    width: 7
-                    border.width: 0
-                    visible: index < jobModel.count - 1
-
-                    gradient: Gradient {
-                        orientation: Gradient.Horizontal
-                        GradientStop { position: 0.0; color: "transparent" }
-                        GradientStop { position: 1.0; color: Colors.isDarkMode ? Qt.rgba(0, 0, 0, 0.28) : Qt.rgba(0, 0, 0, 0.08) }
-                    }
-                }
-
-                // 4. Soft blend transition from adjacent part on the left
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    width: 4
-                    border.width: 0
-                    visible: index > 0
-
-                    gradient: Gradient {
-                        orientation: Gradient.Horizontal
-                        GradientStop { position: 0.0; color: Colors.isDarkMode ? Qt.rgba(0, 0, 0, 0.20) : Qt.rgba(0, 0, 0, 0.06) }
-                        GradientStop { position: 1.0; color: "transparent" }
-                    }
-                }
-
-                // 5. Hover Highlight Overlay
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 0
-                    border.width: 0
-                    color: partMouseArea.containsMouse
-                           ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(0, 0, 0, 0.06))
-                           : "transparent"
-
-                    Behavior on color { ColorAnimation { duration: 150 } }
-                }
-
-                // 6. Part Content (Job Identifier text + icon + percentage)
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: partDelegate.isCompact ? 4 : 7
-                    anchors.rightMargin: partDelegate.isCompact ? 4 : 7
-                    spacing: 4
-
-                    // Status icon
-                    Text {
-                        text: root.getStatusIcon(model.state)
-                        font.family: materialIcons.name
-                        font.pixelSize: partDelegate.isCompact ? 12 : 13
-                        color: Colors.textMain
-                        Layout.alignment: Qt.AlignVCenter
-                    }
-
-                    // Full Job Name & Identifier
-                    Text {
-                        id: jobTitleText
-                        text: model.name
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 11
-                        font.weight: Font.DemiBold
-                        color: Colors.textMain
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignVCenter
-                        visible: !partDelegate.isCompact
-                    }
-
-                    // Progress Percentage or compact job index
-                    Text {
-                        text: partDelegate.isCompact
-                              ? "#" + (index + 1)
-                              : Math.round(model.progress * 100) + "%"
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 10
-                        font.weight: Font.Bold
-                        color: partDelegate.isRunning
-                               ? (Colors.isDarkMode ? "#ffffff" : "#14532d")
-                               : Colors.textMain
-                        Layout.alignment: Qt.AlignVCenter
-                        Layout.rightMargin: 1
-                    }
-                }
-
-                // 7. Interactive Mouse Area: Click, Double-Click (seek running job), & Context Menu
-                MouseArea {
-                    id: partMouseArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    acceptedButtons: Qt.LeftButton | Qt.RightButton
-                    cursorShape: Qt.PointingHandCursor
-
-                    onDoubleClicked: (mouse) => {
-                        if (mouse.button === Qt.LeftButton) {
-                            root.seekToRunningJob();
-                        }
-                    }
-
-                    onClicked: (mouse) => {
-                        if (mouse.button === Qt.RightButton) {
-                            partMenu.targetIndex = index;
-                            partMenu.targetName = model.name;
-                            partMenu.targetState = model.state;
-                            partMenu.targetProgress = model.progress;
-                            partMenu.targetDetail = model.detail || "";
-                            partMenu.popup(partMouseArea, mouse.x, mouse.y);
-                        } else if (mouse.button === Qt.LeftButton) {
-                            if (!root.canFitAll) {
-                                jobListView.positionViewAtIndex(index, ListView.Center);
-                            }
-                            root.triggerRunningToolTip(index);
-                        }
-                    }
-                }
-            }
-        }
-
-        // =====================================================================
-        // --- 4 Corner Cutout Masks (Canvas) ---
-        // Guarantees zero pixels/borders of scrolling items ever bleed past the 6px rounded corners
-        // =====================================================================
-        Canvas {
-            id: cornerMaskCanvas
-            anchors.fill: parent
-            z: 50
-            antialiasing: true
-
-            onPaint: {
-                var ctx = getContext("2d");
-                ctx.clearRect(0, 0, width, height);
-                var r = containerRect.radius;
-                var w = width;
-                var h = height;
-
-                ctx.fillStyle = Colors.bgMain;
-
-                // Top-Left Corner wedge
-                ctx.beginPath();
-                ctx.moveTo(0, 0);
-                ctx.lineTo(r, 0);
-                ctx.arc(r, r, r, -Math.PI / 2, Math.PI, true);
-                ctx.closePath();
-                ctx.fill();
-
-                // Top-Right Corner wedge
-                ctx.beginPath();
-                ctx.moveTo(w, 0);
-                ctx.lineTo(w, r);
-                ctx.arc(w - r, r, r, 0, -Math.PI / 2, true);
-                ctx.closePath();
-                ctx.fill();
-
-                // Bottom-Right Corner wedge
-                ctx.beginPath();
-                ctx.moveTo(w, h);
-                ctx.lineTo(w - r, h);
-                ctx.arc(w - r, h - r, r, Math.PI / 2, 0, true);
-                ctx.closePath();
-                ctx.fill();
-
-                // Bottom-Left Corner wedge
-                ctx.beginPath();
-                ctx.moveTo(0, h);
-                ctx.lineTo(0, h - r);
-                ctx.arc(r, h - r, r, Math.PI, Math.PI / 2, true);
-                ctx.closePath();
-                ctx.fill();
-            }
-
-            Connections {
-                target: Colors
-                function onIsDarkModeChanged() { cornerMaskCanvas.requestPaint(); }
-            }
-            onWidthChanged: requestPaint()
-            onHeightChanged: requestPaint()
-        }
-
-        // Top Overlay Border Rectangle (sits on top of the corner masks to draw a crisp border)
         Rectangle {
             anchors.fill: parent
-            radius: containerRect.radius
+            radius: parent.radius
             color: "transparent"
             border.color: root.overallBorderColor
             border.width: root.overallState === "running" ? 1.5 : 1.0
-            z: 60
+            z: 100
+
+            Behavior on border.color { ColorAnimation { duration: 200 } }
         }
     }
 
     // =========================================================================
-    // --- Unified Fluent ToolTip for Running / Selected Job (5s auto-hide) ---
+    // --- Interactive Job Inspector Flyout / Popover ---
+    // Zero background overhead: only renders virtual items when opened!
+    // =========================================================================
+    Popup {
+        id: jobFlyout
+        parent: containerRect
+        x: Math.max(0, (containerRect.width - width) / 2)
+        y: root.flyoutDownward ? (containerRect.height + 6) : (-height - 8)
+        width: Math.min(480, Math.max(340, containerRect.width - 20))
+        height: Math.min(root.flyoutDownward ? 235 : 360, (root.flyoutDownward ? 120 : 200) + Math.min(4, Math.max(1, root.currentJobCount)) * 34)
+        padding: 0
+        modal: false
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+
+        property string filterMode: "all" // all, running, failed, pending, finished
+        property string searchKeyword: ""
+
+        function openFlyout(mode) {
+            filterMode = mode || "all";
+            open();
+        }
+
+        function toggle() {
+            if (visible) close();
+            else openFlyout("all");
+        }
+
+        background: Rectangle {
+            color: Colors.bgSurface
+            radius: 8
+            clip: true
+        }
+
+        contentItem: Item {
+            clip: true
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+
+                // Flyout Header
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 38
+                    radius: 8
+                    color: Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.04) : Qt.rgba(0, 0, 0, 0.03)
+
+                    // Square off bottom corners so only top corners are rounded
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 8
+                        color: parent.color
+                    }
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 8
+                    spacing: 8
+
+                    Text {
+                        text: "Task Inspector (" + root.currentJobCount + ")"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 11
+                        font.weight: Font.Bold
+                        color: Colors.textMain
+                    }
+
+                    // Search input
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 24
+                        radius: 4
+                        color: Colors.bgInput
+                        border.color: searchInput.activeFocus ? Colors.goldPrimary : Colors.borderSubtle
+                        border.width: 1
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 6
+                            anchors.rightMargin: 6
+                            spacing: 4
+
+                            Text {
+                                text: "\ue8b6" // search
+                                font.family: materialIcons.name
+                                font.pixelSize: 12
+                                color: Colors.textMuted
+                            }
+
+                            TextInput {
+                                id: searchInput
+                                Layout.fillWidth: true
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                color: Colors.textMain
+                                clip: true
+                                onTextChanged: jobFlyout.searchKeyword = text.toLowerCase()
+                            }
+                        }
+                    }
+
+                    // Close button
+                    Rectangle {
+                        width: 22
+                        height: 22
+                        radius: 11
+                        color: closeFlyoutMouse.containsMouse ? Colors.bgHover : "transparent"
+                        Text {
+                            anchors.centerIn: parent
+                            text: "\ue5cd" // close
+                            font.family: materialIcons.name
+                            font.pixelSize: 14
+                            color: Colors.textMuted
+                        }
+                        MouseArea {
+                            id: closeFlyoutMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: jobFlyout.close()
+                        }
+                    }
+                }
+            }
+
+            // Divider
+            Rectangle {
+                Layout.fillWidth: true
+                height: 1
+                color: Colors.divider
+            }
+
+            // Virtualized Job List
+            ListView {
+                id: flyoutListView
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                reuseItems: true
+                model: jobFlyout.visible ? root.activeJobModel : null
+
+                delegate: Rectangle {
+                    id: flyoutRow
+                    width: flyoutListView.width
+                    height: matchesFilter ? 34 : 0
+                    visible: matchesFilter
+                    color: rowMouse.containsMouse ? Colors.bgHover : "transparent"
+
+                    readonly property string jState: (typeof model !== "undefined" && model && model.state) ? model.state : "idle"
+                    readonly property string jName: (typeof model !== "undefined" && model && model.name) ? model.name : ("Job #" + (index + 1))
+                    readonly property real jProgress: (typeof model !== "undefined" && model && model.progress !== undefined) ? model.progress : 0.0
+
+                    readonly property bool matchesFilter: {
+                        if (jobFlyout.filterMode === "failed" && jState !== "failed") return false;
+                        if (jobFlyout.filterMode === "running" && jState !== "running") return false;
+                        if (jobFlyout.searchKeyword.length > 0 && jName.toLowerCase().indexOf(jobFlyout.searchKeyword) === -1) return false;
+                        return true;
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 8
+
+                        Text {
+                            text: root.getStatusIcon(flyoutRow.jState)
+                            font.family: materialIcons.name
+                            font.pixelSize: 13
+                            color: root.getStatusColor(flyoutRow.jState)
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        Text {
+                            text: flyoutRow.jName
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 11
+                            color: Colors.textMain
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        // Mini progress fill
+                        Rectangle {
+                            Layout.preferredWidth: 60
+                            Layout.preferredHeight: 4
+                            radius: 2
+                            color: Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(0, 0, 0, 0.08)
+                            Layout.alignment: Qt.AlignVCenter
+
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                width: parent.width * Math.max(0, Math.min(1.0, flyoutRow.jProgress))
+                                radius: 2
+                                color: root.getStatusColor(flyoutRow.jState)
+                            }
+                        }
+
+                        Text {
+                            text: Math.round(flyoutRow.jProgress * 100) + "%"
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 10
+                            font.weight: Font.Bold
+                            color: root.getStatusColor(flyoutRow.jState)
+                            Layout.preferredWidth: 32
+                            horizontalAlignment: Text.AlignRight
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
+                        // Quick Action (Retry / Pause)
+                        Rectangle {
+                            Layout.preferredWidth: 20
+                            Layout.preferredHeight: 20
+                            radius: 4
+                            color: actionMouse.containsMouse ? Colors.bgHover : "transparent"
+                            visible: flyoutRow.jState === "failed" || flyoutRow.jState === "running" || flyoutRow.jState === "paused"
+                            Layout.alignment: Qt.AlignVCenter
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: flyoutRow.jState === "failed" ? "\ue5d5" : (flyoutRow.jState === "running" ? "\ue034" : "\ue037")
+                                font.family: materialIcons.name
+                                font.pixelSize: 13
+                                color: Colors.goldPrimary
+                            }
+
+                            MouseArea {
+                                id: actionMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (flyoutRow.jState === "failed") root.retryJob(index);
+                                    else if (flyoutRow.jState === "running") root.pauseJob(index);
+                                    else root.resumeJob(index);
+                                }
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        id: rowMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.RightButton
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            taskContextMenu.openForTask(index, flyoutRow.jName, flyoutRow.jState, (typeof model !== "undefined" && model && model.fileName) ? model.fileName : "");
+                            taskContextMenu.popup(flyoutRow, mouse.x, mouse.y);
+                        }
+                    }
+                }
+            }
+
+            // Divider above footer
+            Rectangle {
+                Layout.fillWidth: true
+                height: 1
+                color: Colors.divider
+            }
+
+            // Footer
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 30
+                radius: 8
+                color: Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.03) : Qt.rgba(0, 0, 0, 0.02)
+
+                // Square off top corners so only bottom corners are rounded
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: 8
+                    color: parent.color
+                }
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    spacing: 8
+
+                    Text {
+                        text: root.failedCount > 0 ? (root.failedCount + " tasks failed") : "All systems normal"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 10
+                        color: root.failedCount > 0 ? root.colorFailed : Colors.textMuted
+                        Layout.fillWidth: true
+                    }
+
+                    // Retry all failed button
+                    Rectangle {
+                        Layout.preferredHeight: 20
+                        implicitWidth: retryAllText.implicitWidth + 10
+                        radius: 4
+                        color: root.failedCount > 0 ? root.colorFailed : "transparent"
+                        visible: root.failedCount > 0
+
+                        Text {
+                            id: retryAllText
+                            anchors.centerIn: parent
+                            text: "Retry Failed"
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 9
+                            font.weight: Font.Bold
+                            color: "#ffffff"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.retryAllFailed()
+                        }
+                    }
+                }
+            }
+        }
+
+        // Dedicated Border Overlay on top of all flyout content
+        Rectangle {
+            anchors.fill: parent
+            radius: 8
+            color: "transparent"
+            border.color: Colors.goldBorder
+            border.width: 1
+            z: 99
+        }
+    }
+}
+
+    // =========================================================================
+    // --- Unified ToolTip ---
     // =========================================================================
     ToolTip {
         id: activeToolTip
         parent: containerRect
-        x: root.getJobCenterX(activeToolTip.targetIndex) - width / 2
-        y: -height - 8
+        x: Math.max(10, Math.min(containerRect.width - width - 10, containerRect.width / 2 - width / 2))
+        y: root.flyoutDownward ? (containerRect.height + 6) : (-height - 8)
         timeout: -1
 
         property int targetIndex: -1
-        property string jobName: ""
-        property string jobState: ""
+        property var jobName: ""
+        property var jobState: "idle"
         property real jobProgress: 0.0
-        property string jobDetail: ""
+        property var jobDetail: ""
 
         contentItem: ColumnLayout {
             spacing: 3
@@ -786,7 +1364,7 @@ Item {
                 color: root.getStatusColor(activeToolTip.jobState)
             }
             Text {
-                text: activeToolTip.jobDetail ? activeToolTip.jobDetail : "Running archive task"
+                text: activeToolTip.jobDetail ? activeToolTip.jobDetail : "Archive operation"
                 font.family: Colors.fontFamily
                 font.pixelSize: 10
                 color: Colors.textMuted
@@ -802,69 +1380,154 @@ Item {
         }
     }
 
-    // =========================================================================
-    // --- Part Interactive Context Menu (Fluent SecDet Style, Compact & Pixel-Perfect) ---
-    // =========================================================================
+    // =========================================================
+    // --- Compact Theme-Matching Context Menu for Tasks ---
+    // =========================================================
     Menu {
-        id: partMenu
+        id: taskContextMenu
         property int targetIndex: -1
         property string targetName: ""
-        property string targetState: ""
-        property real targetProgress: 0.0
-        property string targetDetail: ""
+        property string targetState: "idle"
+        property string targetFileName: ""
+        property string operationType: "add"
+        property string operationIcon: "\ue145" // +
+        property string displayName: ""
 
-        implicitWidth: 210
-        width: 210
-        topPadding: 4
-        bottomPadding: 4
-        leftPadding: 4
-        rightPadding: 4
+        function openForTask(index, name, state, fileName) {
+            targetIndex = index;
+            targetName = name || ("Job #" + (index + 1));
+            targetState = state || "idle";
+            targetFileName = fileName || "";
+
+            var trimmed = targetName.trim();
+            var lower = trimmed.toLowerCase();
+
+            if (lower.indexOf("add ") === 0 || lower.indexOf("create ") === 0) {
+                operationType = "add";
+                operationIcon = "\ue145"; // + (add)
+                displayName = trimmed.substring(trimmed.indexOf(" ") + 1);
+            } else if (lower.indexOf("remove ") === 0 || lower.indexOf("delete ") === 0) {
+                operationType = "remove";
+                operationIcon = "\ue872"; // bin (delete)
+                displayName = trimmed.substring(trimmed.indexOf(" ") + 1);
+            } else if (lower.indexOf("extract ") === 0) {
+                operationType = "extract";
+                operationIcon = "\ue89e"; // open_in_new / extract
+                displayName = trimmed.substring(trimmed.indexOf(" ") + 1);
+            } else if (lower.indexOf("compress ") === 0 || lower.indexOf("change compression") === 0) {
+                operationType = "compress";
+                operationIcon = "\ue8b8"; // settings / compress
+                var lvlName = targetFileName;
+                if (lvlName === "1") lvlName = "Fast (Store)";
+                else if (lvlName === "2") lvlName = "Balanced";
+                else if (lvlName === "3") lvlName = "Ultra";
+
+                if (lvlName && lvlName.length > 0) {
+                    displayName = lvlName;
+                } else if (trimmed.indexOf(":") !== -1) {
+                    displayName = trimmed.substring(trimmed.indexOf(":") + 1).trim();
+                } else {
+                    displayName = trimmed;
+                }
+            } else if (lower.indexOf("move ") === 0) {
+                operationType = "move";
+                operationIcon = "\ue8d4"; // swap_horiz / move
+                displayName = trimmed.substring(trimmed.indexOf(" ") + 1);
+            } else if (lower.indexOf("test ") === 0 || lower.indexOf("verify ") === 0 || lower.indexOf("checksum ") === 0) {
+                operationType = "test";
+                operationIcon = "\ue876"; // check / verified
+                displayName = trimmed.substring(trimmed.indexOf(" ") + 1);
+            } else {
+                if (targetFileName && targetFileName.length > 0) {
+                    displayName = targetFileName;
+                } else {
+                    displayName = trimmed;
+                }
+                if (lower.indexOf("delete") !== -1 || lower.indexOf("remove") !== -1) {
+                    operationType = "remove";
+                    operationIcon = "\ue872"; // bin
+                } else {
+                    operationType = "add";
+                    operationIcon = "\ue145"; // +
+                }
+            }
+        }
+
+        implicitWidth: 180
+        width: 180
+        padding: 3
+        topPadding: 3
+        bottomPadding: 3
 
         background: Rectangle {
             color: Colors.bgSurface
-            radius: 8
+            radius: 6
             border.color: Colors.goldBorder
             border.width: 1
         }
 
-        // Header Item (Job Title & Status)
+        // Header Item: Operation Icon + File Name
         MenuItem {
-            implicitWidth: 202
-            implicitHeight: 38
+            implicitWidth: 174
+            implicitHeight: 32
             padding: 0
-            leftPadding: 8
-            rightPadding: 8
-            topPadding: 4
-            bottomPadding: 4
-            indicator: null
+            leftPadding: 6
+            rightPadding: 6
+            topPadding: 3
+            bottomPadding: 3
             enabled: false
+            indicator: null
 
-            contentItem: ColumnLayout {
-                spacing: 2
-                Text {
-                    text: partMenu.targetName
-                    font.family: Colors.fontFamily
-                    font.pixelSize: 11
-                    font.weight: Font.Bold
-                    color: Colors.textMain
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                }
-                RowLayout {
-                    spacing: 5
-                    Rectangle {
-                        width: 6; height: 6; radius: 3
-                        color: root.getStatusColor(partMenu.targetState)
-                    }
+            contentItem: RowLayout {
+                spacing: 6
+
+                // Operation Badge (e.g. green + for Add, red bin for Remove)
+                Rectangle {
+                    width: 18
+                    height: 18
+                    radius: 9
+                    color: taskContextMenu.operationType === "remove"
+                           ? Qt.rgba(root.colorFailed.r, root.colorFailed.g, root.colorFailed.b, 0.20)
+                           : Qt.rgba(root.colorRunning.r, root.colorRunning.g, root.colorRunning.b, 0.20)
+                    border.color: taskContextMenu.operationType === "remove" ? root.colorFailed : root.colorRunning
+                    border.width: 1
+                    Layout.alignment: Qt.AlignVCenter
+
                     Text {
-                        text: root.getStatusLabel(partMenu.targetState) + " • " + Math.round(partMenu.targetProgress * 100) + "%"
+                        anchors.centerIn: parent
+                        text: taskContextMenu.operationIcon
+                        font.family: materialIcons.name
+                        font.pixelSize: 11
+                        font.weight: Font.Bold
+                        color: taskContextMenu.operationType === "remove" ? root.colorFailed : root.colorRunning
+                    }
+                }
+
+                // File Name & Status
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 0
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Text {
+                        text: taskContextMenu.displayName
                         font.family: Colors.fontFamily
                         font.pixelSize: 10
-                        color: root.getStatusColor(partMenu.targetState)
+                        font.weight: Font.Bold
+                        color: Colors.textMain
+                        elide: Text.ElideRight
                         Layout.fillWidth: true
+                    }
+
+                    Text {
+                        text: root.getStatusLabel(taskContextMenu.targetState)
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 8
+                        color: root.getStatusColor(taskContextMenu.targetState)
                     }
                 }
             }
+
             background: Rectangle {
                 color: Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.04) : Qt.rgba(0, 0, 0, 0.03)
                 radius: 4
@@ -874,58 +1537,54 @@ Item {
         MenuSeparator {
             topPadding: 2
             bottomPadding: 2
-            leftPadding: 4
-            rightPadding: 4
             contentItem: Rectangle {
                 implicitHeight: 1
                 color: Colors.divider
             }
         }
 
-        // Action 1: Pause / Resume / Start / Retry
+        // Action 1: Run / Pause / Retry (interchangeable when job is in failed state)
         MenuItem {
-            id: pauseAction
-            implicitWidth: 202
-            implicitHeight: 28
+            id: runOrRetryItem
+            implicitWidth: 174
+            implicitHeight: 26
             padding: 0
             leftPadding: 8
             rightPadding: 8
-            topPadding: 0
-            bottomPadding: 0
             indicator: null
 
-            text: partMenu.targetState === "running"
-                  ? "Pause Job"
-                  : (partMenu.targetState === "paused" ? "Resume Job" : (partMenu.targetState === "failed" || partMenu.targetState === "aborted" ? "Retry Job" : "Start Job"))
+            readonly property bool isFailedState: taskContextMenu.targetState === "failed" || taskContextMenu.targetState === "aborted"
+            readonly property bool isRunningState: taskContextMenu.targetState === "running"
+
+            text: isFailedState ? "Retry" : (isRunningState ? "Pause" : "Run")
 
             onTriggered: {
-                if (partMenu.targetState === "running") {
-                    root.pauseJob(partMenu.targetIndex);
-                } else if (partMenu.targetState === "paused") {
-                    root.resumeJob(partMenu.targetIndex);
-                } else if (partMenu.targetState === "failed" || partMenu.targetState === "aborted") {
-                    root.retryJob(partMenu.targetIndex);
+                if (isFailedState) {
+                    root.retryJob(taskContextMenu.targetIndex);
+                } else if (isRunningState) {
+                    root.pauseJob(taskContextMenu.targetIndex);
                 } else {
-                    root.resumeJob(partMenu.targetIndex);
+                    root.resumeJob(taskContextMenu.targetIndex);
                 }
             }
 
             contentItem: RowLayout {
-                spacing: 8
+                spacing: 6
                 Text {
-                    text: partMenu.targetState === "running"
-                          ? "\ue034" // pause
-                          : (partMenu.targetState === "paused" || partMenu.targetState === "pending" || partMenu.targetState === "idle" ? "\ue037" : "\ue5d5")
+                    text: runOrRetryItem.isFailedState
+                          ? "\ue5d5" // refresh / retry
+                          : (runOrRetryItem.isRunningState ? "\ue034" : "\ue037") // pause / run
                     font.family: materialIcons.name
-                    font.pixelSize: 15
-                    color: pauseAction.hovered ? root.colorRunning : Colors.textMain
+                    font.pixelSize: 13
+                    color: runOrRetryItem.isFailedState ? Colors.goldPrimary : (runOrRetryItem.isRunningState ? root.colorRunning : Colors.textMain)
                     Layout.alignment: Qt.AlignVCenter
                 }
                 Text {
-                    text: pauseAction.text
+                    text: runOrRetryItem.text
                     font.family: Colors.fontFamily
-                    font.pixelSize: 11
-                    color: pauseAction.hovered ? root.colorRunning : Colors.textMain
+                    font.pixelSize: 10
+                    font.weight: Font.Medium
+                    color: Colors.textMain
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
                 }
@@ -933,41 +1592,38 @@ Item {
 
             background: Rectangle {
                 radius: 4
-                color: pauseAction.hovered ? Colors.bgHover : "transparent"
+                color: runOrRetryItem.hovered ? Colors.bgHover : "transparent"
             }
         }
 
-        // Action 2: Remove Job (smooth removing animation, adjacent parts merge)
+        // Action 2: Delete Job
         MenuItem {
-            id: removeAction
-            implicitWidth: 202
-            implicitHeight: 28
+            id: deleteJobItem
+            implicitWidth: 174
+            implicitHeight: 26
             padding: 0
             leftPadding: 8
             rightPadding: 8
-            topPadding: 0
-            bottomPadding: 0
             indicator: null
 
-            text: "Remove Job"
-            onTriggered: {
-                root.removeJob(partMenu.targetIndex);
-            }
+            text: "Delete Job"
+            onTriggered: root.removeJob(taskContextMenu.targetIndex)
 
             contentItem: RowLayout {
-                spacing: 8
+                spacing: 6
                 Text {
-                    text: "\ue872" // delete
+                    text: "\ue872" // delete / bin
                     font.family: materialIcons.name
-                    font.pixelSize: 15
-                    color: removeAction.hovered ? root.colorFailed : Colors.textMuted
+                    font.pixelSize: 13
+                    color: deleteJobItem.hovered ? root.colorFailed : Colors.textMuted
                     Layout.alignment: Qt.AlignVCenter
                 }
                 Text {
-                    text: removeAction.text
+                    text: deleteJobItem.text
                     font.family: Colors.fontFamily
-                    font.pixelSize: 11
-                    color: removeAction.hovered ? root.colorFailed : Colors.textMain
+                    font.pixelSize: 10
+                    font.weight: Font.Medium
+                    color: deleteJobItem.hovered ? root.colorFailed : Colors.textMain
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
                 }
@@ -975,152 +1631,10 @@ Item {
 
             background: Rectangle {
                 radius: 4
-                color: removeAction.hovered ? (Colors.isDarkMode ? Qt.rgba(0.9, 0.2, 0.2, 0.15) : Qt.rgba(0.9, 0.2, 0.2, 0.10)) : "transparent"
+                color: deleteJobItem.hovered
+                       ? (Colors.isDarkMode ? Qt.rgba(0.9, 0.2, 0.2, 0.15) : Qt.rgba(0.9, 0.2, 0.2, 0.10))
+                       : "transparent"
             }
-        }
-
-        MenuSeparator {
-            topPadding: 2
-            bottomPadding: 2
-            leftPadding: 4
-            rightPadding: 4
-            contentItem: Rectangle {
-                implicitHeight: 1
-                color: Colors.divider
-            }
-        }
-
-        // Quick Benchmark Action: Test 1000 parts
-        MenuItem {
-            id: benchmarkAction
-            implicitWidth: 202
-            implicitHeight: 28
-            padding: 0
-            leftPadding: 8
-            rightPadding: 8
-            topPadding: 0
-            bottomPadding: 0
-            indicator: null
-
-            text: "Benchmark 1,000 Jobs"
-            onTriggered: {
-                root.benchmark1000Jobs();
-            }
-
-            contentItem: RowLayout {
-                spacing: 8
-                Text {
-                    text: "\ue85c" // speed
-                    font.family: materialIcons.name
-                    font.pixelSize: 15
-                    color: benchmarkAction.hovered ? Colors.goldPrimary : Colors.textMuted
-                    Layout.alignment: Qt.AlignVCenter
-                }
-                Text {
-                    text: benchmarkAction.text
-                    font.family: Colors.fontFamily
-                    font.pixelSize: 11
-                    color: benchmarkAction.hovered ? Colors.goldPrimary : Colors.textMain
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
-                }
-            }
-
-            background: Rectangle {
-                radius: 4
-                color: benchmarkAction.hovered ? Colors.bgHover : "transparent"
-            }
-        }
-
-        // Reset to Default Demo Jobs
-        MenuItem {
-            id: resetAction
-            implicitWidth: 202
-            implicitHeight: 28
-            padding: 0
-            leftPadding: 8
-            rightPadding: 8
-            topPadding: 0
-            bottomPadding: 0
-            indicator: null
-
-            text: "Reset Default Jobs"
-            onTriggered: {
-                root.resetDefaultJobs();
-            }
-
-            contentItem: RowLayout {
-                spacing: 8
-                Text {
-                    text: "\ue5d5" // refresh
-                    font.family: materialIcons.name
-                    font.pixelSize: 15
-                    color: resetAction.hovered ? Colors.goldPrimary : Colors.textMuted
-                    Layout.alignment: Qt.AlignVCenter
-                }
-                Text {
-                    text: resetAction.text
-                    font.family: Colors.fontFamily
-                    font.pixelSize: 11
-                    color: resetAction.hovered ? Colors.goldPrimary : Colors.textMain
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
-                }
-            }
-
-            background: Rectangle {
-                radius: 4
-                color: resetAction.hovered ? Colors.bgHover : "transparent"
-            }
-        }
-    }
-
-    // Context Menu for Empty State
-    Menu {
-        id: emptyMenu
-        implicitWidth: 188
-        width: 188
-        topPadding: 4
-        bottomPadding: 4
-        leftPadding: 4
-        rightPadding: 4
-
-        background: Rectangle {
-            color: Colors.bgSurface
-            radius: 8
-            border.color: Colors.goldBorder
-            border.width: 1
-        }
-
-        MenuItem {
-            implicitWidth: 180
-            implicitHeight: 28
-            padding: 0
-            leftPadding: 8
-            rightPadding: 8
-            indicator: null
-            text: "Add New Job"
-            onTriggered: root.addJob("New Archive Job", "running", 0.1)
-        }
-        MenuItem {
-            implicitWidth: 180
-            implicitHeight: 28
-            padding: 0
-            leftPadding: 8
-            rightPadding: 8
-            indicator: null
-            text: "Benchmark 1,000 Jobs"
-            onTriggered: root.benchmark1000Jobs()
-        }
-        MenuItem {
-            implicitWidth: 180
-            implicitHeight: 28
-            padding: 0
-            leftPadding: 8
-            rightPadding: 8
-            indicator: null
-            text: "Reset Default Jobs"
-            onTriggered: root.resetDefaultJobs()
         }
     }
 }

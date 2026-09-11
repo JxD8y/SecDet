@@ -1,7 +1,9 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls.Basic as Basic
 import QtQuick.Layouts
 import QtQuick.Effects
+import QtQuick.Dialogs
 import UI
 
 Dialog {
@@ -16,8 +18,50 @@ Dialog {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     padding: 16
 
+    property string chosenFilePath: ""
+    property bool isScanningFolders: false
+
     signal archiveCreated(var archiveInfo)
     signal closeRequested()
+
+    function resetFields() {
+        archiveNameInput.text = ""
+        chosenFilePath = ""
+        passInput.text = ""
+        passInput.showPassword = false
+        filesContainer.queuedNodes = []
+        compTripleToggle.currentIndex = 1
+        preserveMetaSwitch.checked = true
+        if (errorDialog && errorDialog.visible) {
+            errorDialog.close()
+        }
+    }
+
+    ErrorDialog {
+        id: errorDialog
+        anchors.centerIn: parent
+        z: 9999
+    }
+
+    FileDialog {
+        id: saveArchiveDialog
+        title: "Create Archive - Choose Path"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["SecDet Archive (*.sda)", "All Files (*.*)"]
+        defaultSuffix: "sda"
+        currentFile: {
+            let n = archiveNameInput.text.trim();
+            if (n.length === 0) n = "NewArchive.sda";
+            if (!n.endsWith(".sda") && !n.includes(".")) n += ".sda";
+            return "file:///" + n;
+        }
+        onAccepted: {
+            let chosenUrl = selectedFile.toString();
+            createDialog.chosenFilePath = chosenUrl;
+            let cleanName = chosenUrl.substring(chosenUrl.lastIndexOf("/") + 1);
+            archiveNameInput.text = cleanName;
+        }
+    }
 
     FontLoader {
         id: materialIcons
@@ -251,8 +295,9 @@ Dialog {
                 model: treeComp.nodes
 
                 delegate: Column {
+                    id: nodeDelegate
                     width: parent.width
-                    property bool isOpen: modelData.expanded !== undefined ? modelData.expanded : true
+                    property bool isOpen: modelData.expanded !== undefined ? modelData.expanded : false
 
                     Rectangle {
                         width: parent.width
@@ -265,12 +310,12 @@ Dialog {
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: (treeComp.depth * 16) + 6
-                            anchors.rightMargin: 8
+                            anchors.rightMargin: 12
                             spacing: 6
 
                             // Expand/Collapse Chevron for folders
                             Text {
-                                text: modelData.isFolder ? (isOpen ? "\ue5cf" : "\ue5cc") : " "
+                                text: modelData.isFolder ? (nodeDelegate.isOpen ? "\ue5cf" : "\ue5cc") : " "
                                 font.family: materialIcons.name
                                 font.pixelSize: 14
                                 color: Colors.textMuted
@@ -280,13 +325,13 @@ Dialog {
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: parent.parent.parent.parent.isOpen = !parent.parent.parent.parent.isOpen
+                                    onClicked: nodeDelegate.isOpen = !nodeDelegate.isOpen
                                 }
                             }
 
                             // Folder / File Icon
                             Text {
-                                text: modelData.isFolder ? (isOpen ? "\ue2c8" : "\ue2c7") : "\ue873"
+                                text: modelData.isFolder ? (nodeDelegate.isOpen ? "\ue2c8" : "\ue2c7") : "\ue873"
                                 font.family: materialIcons.name
                                 font.pixelSize: 16
                                 color: modelData.isFolder ? Colors.goldPrimary : Colors.textMuted
@@ -345,7 +390,7 @@ Dialog {
                             hoverEnabled: true
                             onClicked: {
                                 if (modelData.isFolder) {
-                                    parent.parent.isOpen = !parent.parent.isOpen;
+                                    nodeDelegate.isOpen = !nodeDelegate.isOpen;
                                 }
                             }
                         }
@@ -353,8 +398,8 @@ Dialog {
 
                     Loader {
                         width: parent.width
-                        visible: modelData.isFolder && parent.isOpen
-                        active: modelData.isFolder && parent.isOpen
+                        visible: modelData.isFolder && nodeDelegate.isOpen
+                        active: modelData.isFolder && nodeDelegate.isOpen
                         sourceComponent: createTreeDirViewComp
                         onLoaded: {
                             item.nodes = modelData.children || []
@@ -501,13 +546,40 @@ Dialog {
                             TextField {
                                 id: archiveNameInput
                                 Layout.fillWidth: true
-                                text: "NewArchive.tr"
+                                text: ""
+                                placeholderText: "Select archive path (e.g. NewArchive.sda)"
+                                placeholderTextColor: Colors.textMuted
                                 color: Colors.textMain
                                 font.family: Colors.fontFamily
                                 font.pixelSize: 12
                                 font.weight: Font.Medium
                                 background: null
                                 selectByMouse: true
+                            }
+
+                            Rectangle {
+                                width: 28
+                                height: 24
+                                radius: 4
+                                color: browseNameMouse.containsMouse ? Colors.bgHover : "transparent"
+                                border.color: browseNameMouse.containsMouse ? Colors.goldBorder : "transparent"
+                                border.width: 1
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "\ue89e" // folder_open
+                                    font.family: materialIcons.name
+                                    font.pixelSize: 15
+                                    color: browseNameMouse.containsMouse ? Colors.goldPrimary : Colors.textMuted
+                                }
+
+                                MouseArea {
+                                    id: browseNameMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: saveArchiveDialog.open()
+                                }
                             }
                         }
                     }
@@ -529,26 +601,7 @@ Dialog {
                 Behavior on border.color { ColorAnimation { duration: 150 } }
                 Behavior on border.width { NumberAnimation { duration: 150 } }
 
-                property var queuedNodes: [
-                    {
-                        name: "Source Code",
-                        isFolder: true,
-                        expanded: true,
-                        children: [
-                            { name: "source_bundle.zip", isFolder: false, filePath: "C:/Projects/source_bundle.zip", realSize: "1.4 MB" },
-                            { name: "assets_manifest.json", isFolder: false, filePath: "C:/Projects/assets_manifest.json", realSize: "12 KB" }
-                        ]
-                    },
-                    {
-                        name: "Documentation",
-                        isFolder: true,
-                        expanded: false,
-                        children: [
-                            { name: "Release_Notes.pdf", isFolder: false, filePath: "C:/Projects/Release_Notes.pdf", realSize: "210 KB" },
-                            { name: "License.txt", isFolder: false, filePath: "C:/Projects/License.txt", realSize: "4 KB" }
-                        ]
-                    }
-                ]
+                property var queuedNodes: []
 
                 function countFiles(nodesList) {
                     let total = 0;
@@ -567,10 +620,9 @@ Dialog {
                     let paths = [];
                     if (!nodesList) return paths;
                     for (let i = 0; i < nodesList.length; ++i) {
-                        if (nodesList[i].isFolder) {
-                            paths = paths.concat(collectPaths(nodesList[i].children));
-                        } else {
-                            paths.push(nodesList[i].filePath || nodesList[i].name);
+                        let p = nodesList[i].filePath || nodesList[i].name;
+                        if (p) {
+                            paths.push(p);
                         }
                     }
                     return paths;
@@ -636,6 +688,7 @@ Dialog {
                         border.color: Colors.borderSubtle
                         border.width: 1
                         radius: 4
+                        visible: filesContainer.queuedNodes && filesContainer.queuedNodes.length > 0
 
                         RowLayout {
                             anchors.fill: parent
@@ -677,40 +730,93 @@ Dialog {
                         border.width: 1
                         clip: true
 
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 8
+                            visible: !filesContainer.queuedNodes || filesContainer.queuedNodes.length === 0
+
+                            Rectangle {
+                                Layout.alignment: Qt.AlignHCenter
+                                width: 44
+                                height: 44
+                                radius: 22
+                                color: Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.08) : Qt.rgba(0.69, 0.51, 0.12, 0.06)
+                                border.color: Colors.goldBorder
+                                border.width: 1
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "\ue2c6" // create_new_folder
+                                    font.family: materialIcons.name
+                                    font.pixelSize: 22
+                                    color: Colors.goldPrimary
+                                    opacity: 0.8
+                                }
+                            }
+
+                            ColumnLayout {
+                                Layout.alignment: Qt.AlignHCenter
+                                spacing: 2
+
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "No files queued"
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 12
+                                    font.weight: Font.DemiBold
+                                    color: Colors.textMain
+                                }
+
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "Drag & drop files or folders anywhere here to package them"
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 10
+                                    color: Colors.textMuted
+                                }
+                            }
+                        }
+
                         ScrollView {
                             id: treeScrollView
                             anchors.fill: parent
                             anchors.margins: 4
                             clip: true
                             contentWidth: availableWidth
+                            visible: filesContainer.queuedNodes && filesContainer.queuedNodes.length > 0
 
-                            ScrollBar.vertical: ScrollBar {
-                                parent: treeScrollView
-                                x: treeScrollView.width - width - 2
-                                y: 2
-                                height: treeScrollView.height - 4
+                            ScrollBar.vertical: Basic.ScrollBar {
+                                id: treeVertScrollBar
                                 policy: ScrollBar.AsNeeded
-                                width: 5
+                                hoverEnabled: true
+                                active: Boolean(hovered || pressed || (treeScrollView.flickableItem && (treeScrollView.flickableItem.moving || treeScrollView.flickableItem.flicking)))
+                                width: (hovered || pressed) ? 7 : 5
+
+                                Behavior on width {
+                                    NumberAnimation { duration: 150; easing.type: Easing.OutCubic }
+                                }
 
                                 contentItem: Rectangle {
-                                    implicitWidth: 5
-                                    radius: 2.5
-                                    color: parent.pressed ? Colors.goldHover
-                                         : parent.hovered ? Colors.goldPrimary
-                                         : (Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.35) : Qt.rgba(0.69, 0.51, 0.12, 0.35))
+                                    implicitWidth: treeVertScrollBar.width
+                                    radius: width / 2
+                                    color: treeVertScrollBar.pressed ? Colors.goldPrimary
+                                         : treeVertScrollBar.hovered ? Colors.goldHover
+                                         : (Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.40) : Qt.rgba(0.69, 0.51, 0.12, 0.35))
 
                                     Behavior on color { ColorAnimation { duration: 150 } }
                                 }
 
                                 background: Rectangle {
-                                    implicitWidth: 5
-                                    color: "transparent"
+                                    implicitWidth: treeVertScrollBar.width
+                                    radius: width / 2
+                                    color: (treeVertScrollBar.hovered || treeVertScrollBar.pressed) ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.05) : Qt.rgba(0, 0, 0, 0.04)) : "transparent"
+                                    Behavior on color { ColorAnimation { duration: 150 } }
                                 }
                             }
 
                             Loader {
                                 id: treeLoader
-                                width: parent.width
+                                width: treeScrollView.availableWidth
                                 sourceComponent: createTreeDirViewComp
                                 property var currentNodes: filesContainer.queuedNodes
                                 onCurrentNodesChanged: {
@@ -735,34 +841,58 @@ Dialog {
                     onEntered: (drag) => { if (drag.hasUrls) drag.acceptProposedAction(); }
                     onDropped: (drop) => {
                         if (drop.hasUrls) {
-                            let newItems = [];
+                            let urls = [];
                             for (let i = 0; i < drop.urls.length; ++i) {
-                                let rawUrl = drop.urls[i].toString();
-                                let fullPath = rawUrl;
-                                if (fullPath.startsWith("file:///")) {
-                                    if (fullPath.length >= 10 && fullPath.charAt(9) === ':') {
-                                        fullPath = fullPath.substring(8);
-                                    } else {
+                                urls.push(drop.urls[i].toString());
+                            }
+                            drop.acceptProposedAction();
+
+                            if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.scanFolderAsync) {
+                                createDialog.isScanningFolders = true;
+                                let pendingCount = urls.length;
+                                let scannedNodes = [];
+                                for (let j = 0; j < urls.length; ++j) {
+                                    archiveInterface.scanFolderAsync(urls[j], (node) => {
+                                        if (node && node.name) {
+                                            scannedNodes.push(node);
+                                        }
+                                        pendingCount--;
+                                        if (pendingCount <= 0) {
+                                            createDialog.isScanningFolders = false;
+                                            let current = filesContainer.queuedNodes.slice();
+                                            filesContainer.queuedNodes = current.concat(scannedNodes);
+                                        }
+                                    });
+                                }
+                            } else {
+                                let newItems = [];
+                                for (let i = 0; i < urls.length; ++i) {
+                                    let rawUrl = urls[i];
+                                    let fullPath = rawUrl;
+                                    if (fullPath.startsWith("file:///")) {
+                                        if (fullPath.length >= 10 && fullPath.charAt(9) === ':') {
+                                            fullPath = fullPath.substring(8);
+                                        } else {
+                                            fullPath = fullPath.substring(7);
+                                        }
+                                    } else if (fullPath.startsWith("file://")) {
                                         fullPath = fullPath.substring(7);
                                     }
-                                } else if (fullPath.startsWith("file://")) {
-                                    fullPath = fullPath.substring(7);
+                                    fullPath = decodeURIComponent(fullPath);
+                                    let name = fullPath.split("/").pop().split("\\").pop();
+                                    let isDir = !name.includes(".");
+                                    newItems.push({
+                                        name: name,
+                                        filePath: fullPath,
+                                        isFolder: isDir,
+                                        expanded: false,
+                                        realSize: isDir ? "-" : "128 KB",
+                                        children: []
+                                    });
                                 }
-                                fullPath = decodeURIComponent(fullPath);
-                                let name = fullPath.split("/").pop().split("\\").pop();
-                                let isDir = !name.includes(".");
-                                newItems.push({
-                                    name: name,
-                                    filePath: fullPath,
-                                    isFolder: isDir,
-                                    expanded: true,
-                                    realSize: isDir ? "-" : "128 KB",
-                                    children: []
-                                });
+                                let current = filesContainer.queuedNodes.slice();
+                                filesContainer.queuedNodes = current.concat(newItems);
                             }
-                            let current = filesContainer.queuedNodes.slice();
-                            filesContainer.queuedNodes = current.concat(newItems);
-                            drop.acceptProposedAction();
                         }
                     }
                 }
@@ -844,71 +974,175 @@ Dialog {
                         }
                     }
                 }
+
+                // Background Scanning & Adding Items Animation Overlay
+                Rectangle {
+                    id: scanningOverlay
+                    anchors.centerIn: parent
+                    width: Math.min(parent.width - 40, 320)
+                    height: 76
+                    radius: 12
+                    color: Colors.isDarkMode ? Qt.rgba(0.10, 0.12, 0.16, 0.96) : Qt.rgba(0.98, 0.98, 0.99, 0.96)
+                    border.color: Colors.goldPrimary
+                    border.width: 1.5
+                    z: 110
+
+                    visible: opacity > 0
+                    opacity: createDialog.isScanningFolders ? 1.0 : 0.0
+
+                    Behavior on opacity {
+                        NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+                    }
+
+                    // Subtle outer glow
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: -3
+                        radius: 15
+                        z: -1
+                        color: "transparent"
+                        border.color: Qt.rgba(0.9, 0.76, 0.35, 0.3)
+                        border.width: 2
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 12
+
+                        Rectangle {
+                            width: 40
+                            height: 40
+                            radius: 20
+                            color: Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.12) : Qt.rgba(0.69, 0.51, 0.12, 0.08)
+                            border.color: Colors.goldBorder
+                            border.width: 1
+                            Layout.alignment: Qt.AlignVCenter
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "\ue5d5" // sync / refresh icon
+                                font.family: materialIcons.name
+                                font.pixelSize: 20
+                                color: Colors.goldPrimary
+
+                                RotationAnimation on rotation {
+                                    from: 0
+                                    to: 360
+                                    duration: 1000
+                                    loops: Animation.Infinite
+                                    running: scanningOverlay.visible
+                                }
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                            spacing: 2
+
+                            Text {
+                                text: "Scanning Folder Contents..."
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
+                                color: Colors.textMain
+                            }
+
+                            Text {
+                                text: "Parsing subdirectories & files in background"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 10
+                                color: Colors.textMuted
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                        }
+                    }
+                }
             }
 
             // ==========================================
-            // --- Compression & Security Settings ---
+            // --- Compression & Settings ---
             // ==========================================
             Rectangle {
+                id: compSettingsBox
                 Layout.fillWidth: true
-                implicitHeight: settingsCol.implicitHeight + 20
+                implicitHeight: compSettingsCol.implicitHeight + 18
                 color: Colors.bgCard
                 radius: 10
                 border.color: Colors.goldBorder
                 border.width: 1
 
                 ColumnLayout {
-                    id: settingsCol
+                    id: compSettingsCol
                     anchors.fill: parent
                     anchors.margins: 10
-                    spacing: 10
+                    spacing: 8
 
-                    Text {
-                        text: "COMPRESSION LEVEL"
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 10
-                        font.weight: Font.Bold
-                        color: Colors.goldPrimary
+                    // Header Row
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Text {
+                            text: "\ue871" // view_quilt
+                            font.family: materialIcons.name
+                            font.pixelSize: 15
+                            color: Colors.goldPrimary
+                        }
+
+                        Text {
+                            text: "COMPRESSION OPTIONS"
+                            font.family: Colors.fontFamily
+                            font.pixelSize: 10
+                            font.weight: Font.Bold
+                            color: Colors.goldPrimary
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        Rectangle {
+                            implicitWidth: 76
+                            implicitHeight: 18
+                            radius: 4
+                            color: Colors.goldLight
+                            border.color: Colors.goldBorderHi
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "LZMA2 / ZSTD"
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 8
+                                font.weight: Font.Bold
+                                color: Colors.goldHover
+                            }
+                        }
                     }
 
+                    // Segmented Toggle
                     TripleToggle {
                         id: compTripleToggle
                         Layout.fillWidth: true
                         currentIndex: 1
+                        options: ["Fast (Store)", "Balanced", "Ultra"]
                     }
 
-                    Rectangle { Layout.fillWidth: true; height: 1; color: Colors.divider }
-
-                    GridLayout {
-                        columns: 2
-                        columnSpacing: 16
-                        rowSpacing: 10
+                    Rectangle {
                         Layout.fillWidth: true
+                        height: 1
+                        color: Colors.divider
+                    }
+
+                    // Options row
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
 
                         GoldSwitch {
-                            id: encSwitch
-                            text: "AES-256 Encryption"
-                            checked: true
-                            Layout.fillWidth: true
-                        }
-
-                        GoldSwitch {
-                            id: solidSwitch
-                            text: "Solid Block Mode"
-                            checked: false
-                            Layout.fillWidth: true
-                        }
-
-                        GoldCheckBox {
-                            id: permCheck
-                            text: "Preserve Permissions"
-                            checked: true
-                            Layout.fillWidth: true
-                        }
-
-                        GoldCheckBox {
-                            id: verifyCheck
-                            text: "Integrity Verification"
+                            id: preserveMetaSwitch
+                            text: "Preserve Attributes & Timestamps"
                             checked: true
                             Layout.fillWidth: true
                         }
@@ -918,20 +1152,14 @@ Dialog {
             Rectangle {
                 id: passwordContainer
                 Layout.fillWidth: true
-                implicitHeight: 140
+                implicitHeight: 88
                 color: Colors.bgCard
                 radius: 10
-                border.color: fileDropArea.containsDrag ? Colors.goldPrimary : Colors.goldBorder
-                border.width: fileDropArea.containsDrag ? 2 : 1
+                border.color: passInput.activeFocus ? Colors.goldPrimary : Colors.goldBorder
+                border.width: passInput.activeFocus ? 2 : 1
 
                 Behavior on border.color { ColorAnimation { duration: 150 } }
                 Behavior on border.width { NumberAnimation { duration: 150 } }
-
-                ListModel {
-                    id: passwords
-                    ListElement { password_hash: "ad9a67fefa847de87753df6794a0ae466431e76ad1fb4db58fbbe836d1dde0e7" }
-                    ListElement { password_hash: "2285dd09ea6ccd0ec7e7253d2f7dc10810608d45609a902b5094176974eafc44" }
-                }
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -940,16 +1168,17 @@ Dialog {
 
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: 6
 
                         Text {
-                            text: "key"
+                            text: "\ue897" // lock icon
                             font.family: materialIcons.name
                             font.pixelSize: 14
                             color: Colors.goldPrimary
                         }
 
                         Text {
-                            text: "Passwords"
+                            text: "PASSWORD ENCRYPTION"
                             font.family: Colors.fontFamily
                             font.pixelSize: 10
                             font.weight: Font.Bold
@@ -958,171 +1187,59 @@ Dialog {
                         }
 
                         Text {
-                            text: "info"
-                            font.family: materialIcons.name
+                            text: passInput.text.length > 0 ? "AES-256-GCM" : "Optional"
+                            font.family: Colors.fontFamily
                             font.pixelSize: 10
-                            color: Colors.textMuted
-                            MouseArea{
-                                anchors.fill: parent
-                                onClicked:{
-                                    ToolTip.show("Your archives can have multiple passcodes\nbut its necessary to put atleast one to continue.")
-                                }
-                            }
+                            color: passInput.text.length > 0 ? Colors.goldHover : Colors.textMuted
                         }
                     }
 
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
+                        height: 34
                         radius: 6
                         color: Colors.bgInput
-                        border.color: Colors.borderSubtle
+                        border.color: passInput.activeFocus ? Colors.goldBorderHi : Colors.borderSubtle
                         border.width: 1
-                        ListView {
-                            id: passwordListView
+
+                        RowLayout {
                             anchors.fill: parent
-                            anchors.margins: 4
-                            clip: true
-                            spacing: 2
-                            model: passwords
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 8
+                            spacing: 6
 
-                            delegate: Rectangle {
-                                width: passwordContainer.width
-                                height: 28
-                                radius: 4
-                                color: Colors.bgHover
+                            TextField {
+                                id: passInput
+                                Layout.fillWidth: true
+                                placeholderText: "Enter archive encryption password..."
+                                placeholderTextColor: Colors.textSubtle
+                                color: Colors.textMain
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 12
+                                property bool showPassword: false
+                                echoMode: showPassword ? TextInput.Normal : TextInput.Password
+                                background: null
+                                selectByMouse: true
+                            }
 
-                                RowLayout {
+                            Item {
+                                Layout.preferredWidth: 26
+                                Layout.preferredHeight: 26
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: passInput.showPassword ? "\ue8f5" : "\ue8f4"
+                                    font.family: materialIcons.name
+                                    font.pixelSize: 16
+                                    color: eyeMouse.containsMouse ? Colors.goldHover : Colors.textMuted
+                                }
+
+                                MouseArea {
+                                    id: eyeMouse
                                     anchors.fill: parent
-                                    anchors.leftMargin: 8
-                                    anchors.rightMargin: 8
-                                    spacing: 8
-
-                                    Text {
-                                        text: "key"
-                                        font.family: materialIcons.name
-                                        font.pixelSize: 14
-                                        color: Colors.textMuted
-                                    }
-
-                                    Text {
-                                        text: model.password_hash
-                                        color: Colors.textMain
-                                        font.family: Colors.fontFamily
-                                        font.pixelSize: 11
-                                        Layout.fillWidth: true
-                                        elide: Text.ElideRight
-                                    }
-
-                                    // Remove password icon button
-                                    Item {
-                                        width: 18; height: 18
-                                        Text {
-                                            anchors.centerIn: parent
-                                            text: "\ue5cd"
-                                            font.family: materialIcons.name
-                                            font.pixelSize: 12
-                                            color: removePassMouse.containsMouse ? "#ff6b6b" : Colors.textMuted
-                                        }
-                                        MouseArea {
-                                            id: removePassMouse
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: passwords.remove(index)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            height: 32
-                            radius: 6
-                            color: Colors.bgInput
-                            border.color: passInput.activeFocus ? Colors.goldBorderHi : Colors.borderSubtle
-                            border.width: 1
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 6
-
-                                TextField {
-                                    id: passInput
-                                    Layout.fillWidth: true
-                                    placeholderText: "Enter archive password..."
-                                    placeholderTextColor: Colors.textSubtle
-                                    color: Colors.textMain
-                                    font.family: Colors.fontFamily
-                                    font.pixelSize: 12
-                                    property bool showPassword: false
-                                    echoMode: showPassword ? TextInput.Normal : TextInput.Password
-                                    background: null
-                                    selectByMouse: true
-                                    onAccepted: {
-                                        if (passInput.text.length > 0) {
-                                            passwords.append({ password_hash: passInput.text });
-                                            passInput.text = "";
-                                        }
-                                    }
-                                }
-
-                                Item {
-                                    Layout.preferredWidth: 24
-                                    Layout.preferredHeight: 24
-
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: passInput.showPassword ? "\ue8f5" : "\ue8f4"
-                                        font.family: materialIcons.name
-                                        font.pixelSize: 16
-                                        color: eyeMouse.containsMouse ? Colors.goldHover : Colors.textMuted
-                                    }
-
-                                    MouseArea {
-                                        id: eyeMouse
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: passInput.showPassword = !passInput.showPassword
-                                    }
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            width: 32
-                            height: 32
-                            radius: 6
-                            color: addPassMouse.containsMouse ? Colors.goldLightHover : Colors.goldLight
-                            border.color: Colors.goldBorderHi
-                            border.width: 1
-
-                            Text {
-                                anchors.centerIn: parent
-                                font.family: materialIcons.name
-                                font.pixelSize: 18
-                                color: Colors.goldPrimary
-                                text: "\ue145" // add '+'
-                            }
-
-                            MouseArea {
-                                id: addPassMouse
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    if (passInput.text.length > 0) {
-                                        passwords.append({ password_hash: passInput.text });
-                                        passInput.text = "";
-                                    }
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: passInput.showPassword = !passInput.showPassword
                                 }
                             }
                         }
@@ -1206,16 +1323,45 @@ Dialog {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             let filesList = filesContainer.collectPaths(filesContainer.queuedNodes);
+                            if (!filesList) {
+                                filesList = [];
+                            }
+
+                            let rawName = archiveNameInput.text.trim();
+                            if (rawName.length === 0) {
+                                errorDialog.showError("Archive Name Required", "Please specify an archive name or output path.");
+                                return;
+                            }
+
+                            let pass = passInput.text;
+                            if (!pass || pass.trim().length === 0) {
+                                errorDialog.showError("Password Required", "SecDet archives require password protection. Please enter a password before creating the archive.");
+                                return;
+                            }
+
+                            let cleanName = rawName;
+                            if (!cleanName.endsWith(".sda") && !cleanName.includes(".")) {
+                                cleanName += ".sda";
+                            }
+
+                            let targetPath = createDialog.chosenFilePath;
+                            if (!targetPath || targetPath.length === 0 || !targetPath.endsWith(cleanName)) {
+                                targetPath = cleanName;
+                            }
+
+                            let compLevel = compTripleToggle.currentIndex + 1;
+                            let preserveMeta = preserveMetaSwitch.checked;
                             let archiveData = {
-                                name: archiveNameInput.text,
+                                name: cleanName,
+                                filePath: targetPath,
+                                password: pass,
+                                compressionLevel: compLevel,
                                 compression: compTripleToggle.options[compTripleToggle.currentIndex],
-                                encryption: encSwitch.checked,
-                                solidMode: solidSwitch.checked,
-                                preservePermissions: permCheck.checked,
-                                integrityCheck: verifyCheck.checked,
+                                preserveMetadata: preserveMeta,
+                                preservePermissions: preserveMeta,
                                 files: filesList
                             };
-                            console.log("CreateArchive - Created new archive: " + archiveData.name + " (" + filesList.length + " files)");
+                            console.log("CreateArchive - Creating archive: " + archiveData.filePath + " (" + filesList.length + " files)");
                             createDialog.archiveCreated(archiveData);
                             createDialog.close();
                         }
@@ -1226,6 +1372,7 @@ Dialog {
     }
 
     onOpened: {
+        resetFields()
         archiveNameInput.forceActiveFocus()
     }
 }

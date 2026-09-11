@@ -10,35 +10,29 @@ Rectangle {
     // ==========================================
     // --- Public Properties & Datasets ---
     // ==========================================
-    property var readData: [22.0, 35.5, 28.0, 48.0, 42.5, 58.0, 52.0, 68.5, 59.0, 64.0]
-    property var writeData: [14.0, 26.0, 21.5, 38.0, 34.0, 49.5, 44.0, 58.0, 51.0, 56.5]
+    property var speedData: []
     property int maxDataPoints: 20
 
-    property real currentReadSpeed: readData.length > 0 ? readData[readData.length - 1] : 0.0
-    property real currentWriteSpeed: writeData.length > 0 ? writeData[writeData.length - 1] : 0.0
-    property real peakSpeed: 75.0
+    property real currentSpeed: speedData && speedData.length > 0 ? speedData[speedData.length - 1] : 0.0
+    property real peakSpeed10s: 0.0
+    property real yAxisMax: 10.0
+    property int elapsedSeconds: 0
 
-    // Time Axis Labels (e.g., 00:00, 00:45, 01:32)
-    property string startTimeText: "00:00"
-    property string midTimeText: "00:45"
-    property string currentTimeText: "01:32"
+    // Coordinates of current speed tip on canvas
+    property real tipX: 0
+    property real tipY: 0
 
-    // Visibility toggles (Read speed default invisible as requested)
-    property bool showRead: false
-    property bool showWrite: true
+    // Colors: Vibrant Sea Green / Emerald Theme
+    readonly property color themeColor: Colors.isDarkMode ? "#2e8b57" : "#228b50"       // Sea Green
+    readonly property color themeColorLight: Colors.isDarkMode ? "#3cb371" : "#2e8b57"  // Medium Sea Green
+    readonly property color themeColorAccent: Colors.isDarkMode ? "#4ade80" : "#22c55e" // Vibrant Emerald Accent
 
-    // Colors: Sea Green for Write, Indian Red for Read
-    readonly property color writeColor: Colors.isDarkMode ? "#2e8b57" : "#228b50" // Sea Green
-    readonly property color readColor: Colors.isDarkMode ? "#cd5c5c" : "#b23a3a"  // Indian Red
-    readonly property color writeColorLight: Colors.isDarkMode ? "#3cb371" : "#2e8b57"
-    readonly property color readColorLight: Colors.isDarkMode ? "#e06c6c" : "#cd5c5c"
-
-    // Animation progress for new point transitions
+    // Animation progress for smooth transitions
     property real animProgress: 1.0
     onAnimProgressChanged: speedCanvas.requestPaint()
 
     implicitWidth: 380
-    implicitHeight: 72
+    implicitHeight: 74
     radius: 6
     color: Colors.bgInput
     border.color: Colors.borderSubtle
@@ -47,41 +41,95 @@ Rectangle {
 
     Behavior on color { ColorAnimation { duration: 200 } }
     Behavior on border.color { ColorAnimation { duration: 200 } }
+    Behavior on yAxisMax { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
 
     FontLoader {
         id: materialIcons
         source: "Fonts/MaterialIconsRound-Regular.otf"
     }
 
-    // Number animation for smooth curve transitions
     NumberAnimation {
         id: transitionAnim
         target: root
         property: "animProgress"
         from: 0.0
         to: 1.0
-        duration: 350
+        duration: 300
         easing.type: Easing.OutCubic
     }
 
-    // Append new live data points and trigger update animation
-    function addData(readVal, writeVal) {
-        var rArr = readData ? readData.slice() : [];
-        var wArr = writeData ? writeData.slice() : [];
+    // Time formatting helper: converts seconds to MM:SS or HH:MM:SS
+    function formatTimeSec(totalSecs) {
+        var secs = Math.max(0, Math.floor(totalSecs));
+        var h = Math.floor(secs / 3600);
+        var m = Math.floor((secs % 3600) / 60);
+        var s = secs % 60;
+        var pad = function(n) { return (n < 10 ? "0" : "") + n; };
+        if (h > 0) {
+            return pad(h) + ":" + pad(m) + ":" + pad(s);
+        }
+        return pad(m) + ":" + pad(s);
+    }
 
-        rArr.push(readVal);
-        wArr.push(writeVal);
+    // Dynamic timeline labels derived declaratively from elapsedSeconds
+    readonly property int activeWindowSeconds: Math.min(root.elapsedSeconds, root.maxDataPoints)
+    readonly property string startTimeText: root.formatTimeSec(Math.max(0, root.elapsedSeconds - root.activeWindowSeconds))
+    readonly property string midTimeText: root.formatTimeSec(Math.max(0, root.elapsedSeconds - Math.floor(root.activeWindowSeconds / 2)))
+    readonly property string currentTimeText: root.formatTimeSec(root.elapsedSeconds)
 
-        if (rArr.length > maxDataPoints) rArr.shift();
-        if (wArr.length > maxDataPoints) wArr.shift();
+    // Reset graph datasets and indicators
+    function reset() {
+        speedData = [];
+        currentSpeed = 0.0;
+        peakSpeed10s = 0.0;
+        yAxisMax = 10.0;
+        tipX = 0;
+        tipY = 0;
+        animProgress = 1.0;
+        speedCanvas.requestPaint();
+    }
 
-        readData = rArr;
-        writeData = wArr;
-        currentReadSpeed = readVal;
-        currentWriteSpeed = writeVal;
+    // Append new live data point and adjust dynamic Y-axis scaling
+    function addData(speedVal) {
+        var sVal = Math.max(0.0, Number(speedVal) || 0.0);
+        var sArr = speedData ? speedData.slice() : [];
 
-        if (readVal > peakSpeed) peakSpeed = Math.ceil(readVal * 1.15);
-        if (writeVal > peakSpeed) peakSpeed = Math.ceil(writeVal * 1.15);
+        if (sArr.length === 0) {
+            sArr.push(0.0);
+        }
+
+        sArr.push(sVal);
+        if (sArr.length > maxDataPoints) {
+            sArr.shift();
+        }
+
+        speedData = sArr;
+        currentSpeed = sVal;
+
+        // 1. Calculate max speed in the last 10 seconds of data
+        var n = sArr.length;
+        var startIdx = Math.max(0, n - 10);
+        var max10 = 0.0;
+        for (var i = startIdx; i < n; i++) {
+            if (sArr[i] > max10) {
+                max10 = sArr[i];
+            }
+        }
+        peakSpeed10s = max10;
+
+        // 2. Dynamic Y-Axis Adjustment:
+        // Keep the bars around the middle of the chart (~50% height) by setting
+        // target Y-axis maximum to ~2.0x of the active speed window.
+        // If speed rises, instantly scale up maximum to prevent clipping.
+        // If speed is lower, smoothly lower maximum according to the 10-second peak.
+        var peakActive = Math.max(max10, sVal);
+        var targetMax = Math.max(6.0, Math.ceil(peakActive * 2.0));
+
+        if (targetMax > yAxisMax) {
+            yAxisMax = targetMax;
+        } else {
+            yAxisMax = targetMax;
+        }
 
         animProgress = 0.0;
         transitionAnim.restart();
@@ -94,92 +142,48 @@ Rectangle {
         spacing: 2
 
         // ==========================================
-        // --- Top Legend Bar & Controls ---
+        // --- Top Header: Speed & Dynamic Scale ---
         // ==========================================
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: 6
 
-            // Write Speed Legend (Sea Green - Always visible)
+            // Live Speed Indicator
             RowLayout {
-                spacing: 4
+                spacing: 5
+
                 Rectangle {
                     width: 7
                     height: 7
                     radius: 3.5
-                    color: root.writeColor
-                    border.color: root.writeColorLight
+                    color: root.themeColorAccent
+                    border.color: root.themeColorLight
                     border.width: 1
                 }
+
                 Text {
-                    text: "Write: " + root.currentWriteSpeed.toFixed(1) + " MB/s"
+                    text: "Speed: " + root.currentSpeed.toFixed(1) + " MB/s"
                     font.family: Colors.fontFamily
                     font.pixelSize: 9
                     font.weight: Font.DemiBold
-                    color: root.writeColor
+                    color: root.themeColorLight
                 }
             }
 
-            // Read Speed Legend (Indian Red - Clickable Toggle Button)
-            Rectangle {
-                id: readLegendBtn
-                implicitHeight: 18
-                implicitWidth: readLegendRow.implicitWidth + 8
-                radius: 4
-                color: readMouse.containsMouse ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(0, 0, 0, 0.04)) : "transparent"
-                border.color: root.showRead ? (Colors.isDarkMode ? Qt.rgba(0.8, 0.36, 0.36, 0.4) : Qt.rgba(0.7, 0.23, 0.23, 0.3)) : "transparent"
-                border.width: 1
-
-                RowLayout {
-                    id: readLegendRow
-                    anchors.centerIn: parent
-                    spacing: 4
-                    opacity: root.showRead ? 1.0 : 0.45
-
-                    Behavior on opacity { NumberAnimation { duration: 150 } }
-
-                    Rectangle {
-                        width: 7
-                        height: 7
-                        radius: 3.5
-                        color: root.showRead ? root.readColor : "transparent"
-                        border.color: root.readColor
-                        border.width: 1
-                    }
-
-                    Text {
-                        text: "Read: " + root.currentReadSpeed.toFixed(1) + " MB/s" + (root.showRead ? "" : " (off)")
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 9
-                        font.weight: Font.Medium
-                        color: root.showRead ? root.readColor : Colors.textMuted
-                    }
-
-                    Text {
-                        text: root.showRead ? "\ue8f4" : "\ue8f5" // visibility / visibility_off
-                        font.family: materialIcons.name
-                        font.pixelSize: 10
-                        color: root.showRead ? root.readColor : Colors.textMuted
-                    }
-                }
-
-                MouseArea {
-                    id: readMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.showRead = !root.showRead;
-                        speedCanvas.requestPaint();
-                    }
-                }
+            // 10s Peak Indicator
+            Text {
+                visible: root.peakSpeed10s > 0.01
+                text: "(10s Peak: " + root.peakSpeed10s.toFixed(1) + " MB/s)"
+                font.family: Colors.fontFamily
+                font.pixelSize: 8
+                color: Colors.textMuted
             }
 
             Item { Layout.fillWidth: true }
 
-            // Peak Rate Indicator
+            // Dynamic Y-Axis Scale Indicator
             Text {
-                text: "Peak " + Math.round(root.peakSpeed) + " MB/s"
+                text: "Y-Scale: " + Math.round(root.yAxisMax) + " MB/s"
                 font.family: Colors.fontFamily
                 font.pixelSize: 8
                 color: Colors.textSubtle
@@ -187,137 +191,195 @@ Rectangle {
         }
 
         // ==========================================
-        // --- Dual Speed Curves Canvas ---
+        // --- Speed Graph Canvas with Floating Badge ---
         // ==========================================
-        Canvas {
-            id: speedCanvas
+        Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            antialiasing: true
+            clip: true
 
-            onWidthChanged: requestPaint()
-            onHeightChanged: requestPaint()
+            Canvas {
+                id: speedCanvas
+                anchors.fill: parent
+                antialiasing: true
 
-            Connections {
-                target: Colors
-                function onIsDarkModeChanged() { speedCanvas.requestPaint(); }
-            }
+                onWidthChanged: requestPaint()
+                onHeightChanged: requestPaint()
 
-            onPaint: {
-                var ctx = getContext("2d");
-                ctx.reset();
-                var w = width;
-                var h = height;
-                if (w <= 0 || h <= 0) return;
+                Connections {
+                    target: Colors
+                    function onIsDarkModeChanged() { speedCanvas.requestPaint(); }
+                }
 
-                var maxVal = Math.max(20.0, root.peakSpeed);
-
-                // Draw background grid lines (horizontal & vertical ticks)
-                ctx.strokeStyle = Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(0, 0, 0, 0.05);
-                ctx.lineWidth = 1;
-
-                // Horizontal mid-grid
-                ctx.beginPath();
-                ctx.moveTo(0, Math.floor(h * 0.5));
-                ctx.lineTo(w, Math.floor(h * 0.5));
-                ctx.stroke();
-
-                // Vertical midpoint reference
-                ctx.beginPath();
-                ctx.moveTo(Math.floor(w * 0.5), 0);
-                ctx.lineTo(Math.floor(w * 0.5), h);
-                ctx.stroke();
-
-                // Helper to draw a smoothed line and filled area
-                function drawWave(data, strokeColor, fillColorTop, strokeWidth) {
-                    if (!data || data.length < 2) return;
-                    var n = data.length;
-                    var step = w / (n - 1);
-
-                    // Area fill path
-                    ctx.beginPath();
-                    ctx.moveTo(0, h);
-
-                    var firstY = h - Math.min(h - 4, (data[0] / maxVal) * (h - 4));
-                    ctx.lineTo(0, firstY);
-
-                    for (var i = 1; i < n; i++) {
-                        var prevX = (i - 1) * step;
-                        var prevY = h - Math.min(h - 4, (data[i - 1] / maxVal) * (h - 4));
-                        var curX = i * step;
-                        var curY = h - Math.min(h - 4, (data[i] / maxVal) * (h - 4));
-
-                        // Animate last segment smoothly
-                        if (i === n - 1 && root.animProgress < 1.0) {
-                            curY = prevY + (curY - prevY) * root.animProgress;
-                        }
-
-                        var cX = (prevX + curX) / 2;
-                        ctx.bezierCurveTo(cX, prevY, cX, curY, curX, curY);
+                onPaint: {
+                    var ctx = getContext("2d");
+                    if (typeof ctx.reset === "function") {
+                        ctx.reset();
+                    } else if (typeof ctx.resetTransform === "function") {
+                        ctx.resetTransform();
                     }
+                    var w = width;
+                    var h = height;
+                    if (w <= 0 || h <= 0) return;
+                    ctx.clearRect(0, 0, w, h);
 
-                    ctx.lineTo(w, h);
-                    ctx.closePath();
+                    var maxVal = Math.max(6.0, root.yAxisMax);
 
-                    var grad = ctx.createLinearGradient(0, 0, 0, h);
-                    grad.addColorStop(0, fillColorTop);
-                    grad.addColorStop(1, "transparent");
-                    ctx.fillStyle = grad;
-                    ctx.fill();
+                    // 1. Draw subtle horizontal grid lines (0%, 50% midpoint reference, 100%)
+                    ctx.strokeStyle = Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.06) : Qt.rgba(0, 0, 0, 0.05);
+                    ctx.lineWidth = 1;
 
-                    // Stroke line
+                    // 50% midpoint reference line (where typical peak/bars hover)
                     ctx.beginPath();
-                    ctx.moveTo(0, firstY);
-
-                    for (var j = 1; j < n; j++) {
-                        var pX = (j - 1) * step;
-                        var pY = h - Math.min(h - 4, (data[j - 1] / maxVal) * (h - 4));
-                        var cX2 = j * step;
-                        var cY2 = h - Math.min(h - 4, (data[j] / maxVal) * (h - 4));
-
-                        if (j === n - 1 && root.animProgress < 1.0) {
-                            cY2 = pY + (cY2 - pY) * root.animProgress;
-                        }
-
-                        var ctrlX = (pX + cX2) / 2;
-                        ctx.bezierCurveTo(ctrlX, pY, ctrlX, cY2, cX2, cY2);
-                    }
-
-                    ctx.strokeStyle = strokeColor;
-                    ctx.lineWidth = strokeWidth;
+                    var midY = Math.floor(h * 0.5);
+                    ctx.moveTo(0, midY);
+                    ctx.lineTo(w, midY);
                     ctx.stroke();
 
-                    // Glowing endpoint on current data point
-                    var lastIndex = n - 1;
-                    var lastPtX = w;
-                    var lastPtY = h - Math.min(h - 4, (data[lastIndex] / maxVal) * (h - 4));
-                    if (root.animProgress < 1.0 && n > 1) {
-                        var prevPtY = h - Math.min(h - 4, (data[n - 2] / maxVal) * (h - 4));
-                        lastPtY = prevPtY + (lastPtY - prevPtY) * root.animProgress;
+                    // 2. Render modern vertical bars & spline wave
+                    var data = root.speedData;
+                    if (!data || data.length === 0) return;
+
+                    var n = data.length;
+                    var slotCount = Math.max(root.maxDataPoints, n);
+                    var slotWidth = w / slotCount;
+                    var barWidth = Math.max(4, Math.floor(slotWidth * 0.70));
+                    var barGap = slotWidth - barWidth;
+
+                    // Collect bar center points for spline overlay
+                    var pts = [];
+
+                    for (var i = 0; i < n; i++) {
+                        var val = data[i];
+                        if (i === n - 1 && root.animProgress < 1.0) {
+                            var prevVal = (n > 1) ? data[n - 2] : 0.0;
+                            val = prevVal + (val - prevVal) * root.animProgress;
+                        }
+
+                        var barHeight = Math.max(2, (val / maxVal) * (h - 4));
+                        var bx = Math.floor(i * slotWidth + barGap / 2);
+                        var by = Math.floor(h - barHeight);
+
+                        // Draw rounded vertical bar
+                        ctx.beginPath();
+                        var r = Math.min(3, Math.floor(barWidth / 2));
+                        ctx.moveTo(bx + r, by);
+                        ctx.lineTo(bx + barWidth - r, by);
+                        ctx.arcTo(bx + barWidth, by, bx + barWidth, by + r, r);
+                        ctx.lineTo(bx + barWidth, h);
+                        ctx.lineTo(bx, h);
+                        ctx.lineTo(bx, by + r);
+                        ctx.arcTo(bx, by, bx + r, by, r);
+                        ctx.closePath();
+
+                        var barGrad = ctx.createLinearGradient(bx, by, bx, h);
+                        barGrad.addColorStop(0, root.themeColorLight);
+                        barGrad.addColorStop(1, Colors.isDarkMode ? Qt.rgba(0.18, 0.55, 0.34, 0.18) : Qt.rgba(0.14, 0.50, 0.28, 0.15));
+                        ctx.fillStyle = barGrad;
+                        ctx.fill();
+
+                        pts.push({ x: bx + barWidth / 2, y: by });
                     }
 
+                    // 3. Draw smooth accent spline connecting bar tops
+                    if (pts.length > 1) {
+                        ctx.beginPath();
+                        ctx.moveTo(pts[0].x, pts[0].y);
+                        for (var p = 1; p < pts.length; p++) {
+                            var prev = pts[p - 1];
+                            var cur = pts[p];
+                            var cX = (prev.x + cur.x) / 2;
+                            ctx.bezierCurveTo(cX, prev.y, cX, cur.y, cur.x, cur.y);
+                        }
+                        ctx.strokeStyle = root.themeColorAccent;
+                        ctx.lineWidth = 1.5;
+                        ctx.stroke();
+                    }
+
+                    // 4. Glowing tip point on the active head
+                    var lastPt = pts[pts.length - 1];
+                    root.tipX = lastPt.x;
+                    root.tipY = lastPt.y;
+
+                    // Outer halo glow
                     ctx.beginPath();
-                    ctx.arc(lastPtX - 2, lastPtY, 2.5, 0, 2 * Math.PI);
-                    ctx.fillStyle = strokeColor;
+                    ctx.arc(lastPt.x, lastPt.y, 4.5, 0, 2 * Math.PI);
+                    ctx.fillStyle = Colors.isDarkMode ? Qt.rgba(0.29, 0.87, 0.50, 0.35) : Qt.rgba(0.18, 0.55, 0.34, 0.25);
+                    ctx.fill();
+
+                    // Inner bright pip
+                    ctx.beginPath();
+                    ctx.arc(lastPt.x, lastPt.y, 2.5, 0, 2 * Math.PI);
+                    ctx.fillStyle = root.themeColorAccent;
                     ctx.fill();
                 }
+            }
 
-                // 1. Render Read Speed Wave if enabled (Indian Red)
-                if (root.showRead) {
-                    var readTopAlpha = Colors.isDarkMode ? Qt.rgba(0.80, 0.36, 0.36, 0.30) : Qt.rgba(0.70, 0.23, 0.23, 0.20);
-                    drawWave(root.readData, root.readColor, readTopAlpha, 1.8);
+            // ========================================================
+            // --- Floating Speed Tip Badge ("Fuzzed" to Speed Tip) ---
+            // ========================================================
+            Item {
+                id: floatingTipBadge
+                visible: root.speedData.length > 0 && root.currentSpeed > 0.01
+
+                implicitWidth: tipBadgeRow.implicitWidth + 12
+                implicitHeight: 18
+                width: implicitWidth
+                height: implicitHeight
+
+                // Position badge cleanly offset from the active speed tip
+                x: Math.max(2, Math.min(speedCanvas.width - width - 2,
+                       (root.tipX + width + 8 <= speedCanvas.width) ? (root.tipX + 6) : (root.tipX - width - 6)))
+                y: Math.max(2, Math.min(speedCanvas.height - height - 2, root.tipY - height / 2))
+
+                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+
+                // Frosted / fuzzed pill badge background with subtle glow
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 9
+                    color: Colors.isDarkMode ? Qt.rgba(0.08, 0.10, 0.14, 0.90) : Qt.rgba(1.0, 1.0, 1.0, 0.94)
+                    border.color: root.themeColorLight
+                    border.width: 1
+
+                    // Subtle inner border glow
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        radius: 8
+                        color: "transparent"
+                        border.color: Qt.rgba(0.29, 0.87, 0.50, 0.30)
+                        border.width: 1
+                    }
                 }
 
-                // 2. Render Write Speed Wave if enabled (Sea Green)
-                if (root.showWrite) {
-                    var writeTopAlpha = Colors.isDarkMode ? Qt.rgba(0.18, 0.55, 0.34, 0.32) : Qt.rgba(0.14, 0.50, 0.28, 0.22);
-                    drawWave(root.writeData, root.writeColor, writeTopAlpha, 1.8);
+                RowLayout {
+                    id: tipBadgeRow
+                    anchors.centerIn: parent
+                    spacing: 4
+
+                    // Glowing pulse pip
+                    Rectangle {
+                        width: 5
+                        height: 5
+                        radius: 2.5
+                        color: root.themeColorAccent
+                    }
+
+                    Text {
+                        text: root.currentSpeed.toFixed(1) + " MB/s"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 9
+                        font.weight: Font.Bold
+                        color: Colors.textMain
+                    }
                 }
             }
         }
 
         // ==========================================
-        // --- Bottom Timeline Axis (e.g. 00:00, 00:45, 01:32) ---
+        // --- Bottom Timeline Axis ---
         // ==========================================
         RowLayout {
             Layout.fillWidth: true
@@ -351,7 +413,7 @@ Rectangle {
                     width: 4
                     height: 4
                     radius: 2
-                    color: root.writeColor
+                    color: root.themeColor
                 }
 
                 Text {

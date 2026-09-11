@@ -12,7 +12,26 @@ Dialog {
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
+    property string titleText: "Enter Password"
+    property string reasonDescription: "Enter the archive password to continue"
+    property string errorMessage: ""
+
     signal acceptedPassword(string password)
+
+    function submitPassword() {
+        if (passInput.text.length > 0) {
+            errorMessage = ""
+            passwordDialog.acceptedPassword(passInput.text)
+        } else {
+            errorMessage = "Please enter password."
+            focusInput()
+        }
+    }
+
+    function focusInput() {
+        passInput.forceActiveFocus()
+        passInput.selectAll()
+    }
 
     Overlay.modal: Rectangle {
         color: Colors.overlayModal
@@ -30,7 +49,7 @@ Dialog {
     }
 
     contentItem: ColumnLayout {
-        spacing: 16
+        spacing: 14
 
         // Header: Icon & Title
         RowLayout {
@@ -57,7 +76,7 @@ Dialog {
                 Layout.fillWidth: true
 
                 Text {
-                    text: "Password Required"
+                    text: passwordDialog.titleText
                     font.family: Colors.fontFamily
                     font.pixelSize: 14
                     font.weight: Font.Bold
@@ -65,10 +84,12 @@ Dialog {
                 }
 
                 Text {
-                    text: "Enter password to unlock or extract contents"
+                    text: passwordDialog.reasonDescription
                     font.family: Colors.fontFamily
                     font.pixelSize: 11
                     color: Colors.textMuted
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
                 }
             }
         }
@@ -79,7 +100,8 @@ Dialog {
             height: 40
             radius: 6
             color: Colors.bgInput
-            border.color: passInput.activeFocus ? Colors.goldBorderHi : Colors.borderSubtle
+            border.color: passwordDialog.errorMessage.length > 0 ? "#e05353"
+                        : passInput.activeFocus ? Colors.goldBorderHi : Colors.borderSubtle
             border.width: 1
 
             Behavior on border.color { ColorAnimation { duration: 150 } }
@@ -100,10 +122,10 @@ Dialog {
                     font.pixelSize: 13
                     echoMode: showPassBtn.showPassword ? TextInput.Normal : TextInput.Password
                     background: null
-                    onAccepted: {
-                        if (passInput.text.length > 0) {
-                            passwordDialog.acceptedPassword(passInput.text)
-                            passwordDialog.close()
+                    onAccepted: passwordDialog.submitPassword()
+                    onTextChanged: {
+                        if (passwordDialog.errorMessage.length > 0) {
+                            passwordDialog.errorMessage = ""
                         }
                     }
                 }
@@ -130,6 +152,44 @@ Dialog {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: showPassBtn.showPassword = !showPassBtn.showPassword
                     }
+                }
+            }
+        }
+
+        // Inline Error Message Banner
+        Rectangle {
+            id: errorBanner
+            Layout.fillWidth: true
+            implicitHeight: passwordDialog.errorMessage.length > 0 ? 30 : 0
+            visible: passwordDialog.errorMessage.length > 0
+            radius: 6
+            color: Qt.rgba(0.9, 0.2, 0.2, 0.15)
+            border.color: Qt.rgba(0.9, 0.2, 0.2, 0.4)
+            border.width: 1
+            clip: true
+
+            Behavior on implicitHeight { NumberAnimation { duration: 120 } }
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
+                spacing: 8
+
+                Text {
+                    text: "\ue000" // warning icon
+                    font.family: materialIcons.name
+                    font.pixelSize: 14
+                    color: "#e05353"
+                }
+
+                Text {
+                    text: passwordDialog.errorMessage
+                    font.family: Colors.fontFamily
+                    font.pixelSize: 11
+                    color: "#e05353"
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
                 }
             }
         }
@@ -162,7 +222,10 @@ Dialog {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: passwordDialog.close()
+                    onClicked: {
+                        passwordDialog.rejected()
+                        passwordDialog.close()
+                    }
                 }
             }
 
@@ -177,13 +240,24 @@ Dialog {
 
                 Behavior on color { ColorAnimation { duration: 120 } }
 
-                Text {
+                RowLayout {
                     anchors.centerIn: parent
-                    text: "Unlock"
-                    font.family: Colors.fontFamily
-                    font.pixelSize: 12
-                    font.weight: Font.Bold
-                    color: Colors.textOnGold
+                    spacing: 6
+
+                    Text {
+                        text: "\ue897" // lock / unlock
+                        font.family: materialIcons.name
+                        font.pixelSize: 14
+                        color: Colors.textOnGold
+                    }
+
+                    Text {
+                        text: "Unlock"
+                        font.family: Colors.fontFamily
+                        font.pixelSize: 12
+                        font.weight: Font.Bold
+                        color: Colors.textOnGold
+                    }
                 }
 
                 MouseArea {
@@ -191,12 +265,7 @@ Dialog {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (passInput.text.length > 0) {
-                            passwordDialog.acceptedPassword(passInput.text)
-                            passwordDialog.close()
-                        }
-                    }
+                    onClicked: passwordDialog.submitPassword()
                 }
             }
         }
@@ -204,6 +273,8 @@ Dialog {
 
     onOpened: {
         passInput.text = ""
+        errorMessage = ""
+        showPassBtn.showPassword = false
         passInput.forceActiveFocus()
     }
 }
