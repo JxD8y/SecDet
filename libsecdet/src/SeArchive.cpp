@@ -1175,7 +1175,6 @@ expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
     }
   }
 
-  // If a failure or cancellation occurred:
   if (hasFailed) {
     for (auto &j : this->m_jobs) {
       if (j.m_status == JobStatus::Running) {
@@ -1183,8 +1182,9 @@ expected<void, error_code> SeArchive::SaveChangesSync(ProgressCallback callback,
       }
     }
 
-    // 1. If any jobs completed successfully before the failure, commit their TOC and metadata to disk!
-    if (completedJobsCount > 0) {
+    // in any case if the result was an op cancelation we have to write the TOC in file 
+    // bug fixed !
+    if (failureCode == SeError::OperationCanceled) {
       size_t newTocOffset = this->m_toc.getNextAvailOffset();
       auto _ser = this->m_toc.Serialize();
       if (_ser) {
@@ -3685,6 +3685,10 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
       } else if (fileSubJob.GetStatus() == JobStatus::Running && job.GetStatus() == JobStatus::Paused) {
         job.setStatus(JobStatus::Running);
         if (callback) callback(job);
+      } else {
+        SeJob fJob = fileSubJob;
+        fJob.SetFileName(fileEntry.path);
+        if (callback) callback(fJob);
       }
     };
 
@@ -3702,11 +3706,13 @@ SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
     }
 
     extractedFilesCount++;
+    job.SetFileName(fileEntry.path);
     job.processedBytes = extractedFilesCount;
     job.percentage = filesToExtract.empty()
                          ? 100
                          : static_cast<uint32_t>((extractedFilesCount * 100) /
                                                  filesToExtract.size());
+    job.setStatus(JobStatus::Finished);
     if (callback)
       callback(job);
   }
