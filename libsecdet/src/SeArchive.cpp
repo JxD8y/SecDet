@@ -947,19 +947,19 @@ SeArchive::TestKeyAsync(u16string entryPath, string key) {
 const vector<SeJob> &SeArchive::GetJobs() { return this->m_jobs; }
 
 expected<void, error_code> SeArchive::RemoveJob(int id) {
-  for (auto it = this->m_jobs.begin(); it != this->m_jobs.end(); ++it) {
-    if (it->m_id == id) {
-      if (it->m_type == JobType::CreateArchiveDirectory ||
-          it->m_type == JobType::AddDirectory) {
-        this->m_queuedDirs.erase(SeTableOfContent::NormalizeDirectoryPath(it->m_fileName));
-      } else if (it->m_type == JobType::AddFile) {
-        this->m_queuedFiles.erase(SeTableOfContent::NormalizeFilePath(it->m_fileName));
-      }
-      this->m_jobs.erase(it);
-      return {};
+    for (auto it = this->m_jobs.begin(); it != this->m_jobs.end(); ++it) {
+        if (it->m_id == id) {
+            if (it->m_type == JobType::CreateArchiveDirectory || it->m_type == JobType::AddDirectory) {
+                this->m_queuedDirs.erase(SeTableOfContent::NormalizeDirectoryPath(it->m_fileName));
+            }
+            else if (it->m_type == JobType::AddFile) {
+                this->m_queuedFiles.erase(SeTableOfContent::NormalizeFilePath(it->m_fileName));
+            }
+            this->m_jobs.erase(it);
+            return {};
+        }
     }
-  }
-  return unexpected(SeError::JobNotFound);
+    return unexpected(SeError::JobNotFound);
 }
 
 expected<void, error_code> SeArchive::ResetJob(int id) {
@@ -1682,217 +1682,206 @@ SeArchive::doCreateDirectoryJob(SeJob &job, ProgressCallback callback,
 }
 
 expected<void, error_code>
-SeArchive::doAddDirectoryJob(SeJob &job, ProgressCallback callback,
-                             stop_token stopToken,
-                             SePauseToken pauseToken) {
-  job.setStatus(JobStatus::Pending);
-  pauseToken.wait_if_paused(stopToken);
-  if (callback)
-    callback(job);
+SeArchive::doAddDirectoryJob(SeJob &job, ProgressCallback callback,stop_token stopToken, SePauseToken pauseToken) {
+    job.setStatus(JobStatus::Pending);
+    pauseToken.wait_if_paused(stopToken);
 
-  if (stopToken.stop_requested()) {
-    job.setStatus(JobStatus::Aborted);
     if (callback)
-      callback(job);
-    return unexpected(SeError::OperationCanceled);
-  }
-
-  u16string baseArchiveDir =
-      SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
-  u16string diskDirPath = job.m_filePath;
-
-  if (!SeTableOfContent::verifyAbsPath(diskDirPath) ||
-      !SeTableOfContent::isAbsPathDir(diskDirPath)) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::ExpectedDirectory);
-  }
-
-  if (baseArchiveDir != u"/" && !this->m_toc.CheckParentPath(baseArchiveDir)) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::TocPathIsInvalid);
-  }
-
-  // Ensure base archive directory entry exists in TOC
-  if (baseArchiveDir != u"/" && !this->m_toc.CheckPath(baseArchiveDir)) {
-    SeArchiveEntry baseEntry =
-        SeArchiveEntry::CreateDirectoryEntry(baseArchiveDir);
-    if (auto _err = this->m_toc.AddEntry(baseEntry); !_err) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
         callback(job);
-      return unexpected(_err.error());
-    }
-  }
 
-  filesystem::path diskPath(diskDirPath);
-  std::u16string diskU16 = diskPath.u16string();
-  size_t baseLen = diskU16.size();
-  while (baseLen > 0 &&
-         (diskU16[baseLen - 1] == u'/' || diskU16[baseLen - 1] == u'\\')) {
-    baseLen--;
-  }
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
 
-  error_code ec;
-  filesystem::recursive_directory_iterator it(
-      diskPath, filesystem::directory_options::skip_permission_denied, ec);
-  if (ec) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(ec);
-  }
-
-  struct PendingSubDir {
-    u16string archivePath;
-  };
-  struct PendingSubFile {
-    u16string archivePath;
-    u16string diskPath;
-    uint64_t fileSize;
-  };
-
-  vector<PendingSubDir> pendingDirs;
-  vector<PendingSubFile> pendingFiles;
-  uint64_t totalBytes = 0;
-
-  filesystem::recursive_directory_iterator endIt;
-  while (it != endIt) {
-    const auto &entry = *it;
-    error_code statusEc;
-    bool isDir = entry.is_directory(statusEc);
-    bool isReg = !isDir && entry.is_regular_file(statusEc);
-
-    std::u16string entryU16 = entry.path().u16string();
-    std::u16string relU16;
-    if (entryU16.size() > baseLen) {
-      size_t start = baseLen;
-      if (entryU16[start] == u'/' || entryU16[start] == u'\\') {
-        start++;
-      }
-      relU16 = entryU16.substr(start);
-      for (auto &ch : relU16) {
-        if (ch == u'\\')
-          ch = u'/';
-      }
-    }
-
-    if (!relU16.empty()) {
-      if (isDir) {
-        u16string subArchiveDir =
-            SeTableOfContent::CreateDirPath(baseArchiveDir, relU16);
-        pendingDirs.push_back({subArchiveDir});
-      } else if (isReg) {
-        u16string fileArchivePath =
-            SeTableOfContent::CreateFilePath(baseArchiveDir, relU16);
-        error_code szEc;
-        uint64_t sz = entry.file_size(szEc);
-        uint64_t fileSize = szEc ? 0 : sz;
-        totalBytes += fileSize;
-        pendingFiles.push_back({fileArchivePath, entryU16, fileSize});
-      }
-    }
-
-    it.increment(ec);
-    if (ec)
-      ec.clear();
-  }
-
-  // Create subdirectories in TOC via doCreateDirectoryJob
-  for (const auto &d : pendingDirs) {
-    if (!this->m_toc.CheckPath(d.archivePath)) {
-      job.SetFileName(d.archivePath);
-      // doCreateDirectoryJob reads job.m_fileName for the directory path
-      auto _dirResult = this->doCreateDirectoryJob(job, nullptr, stopToken, pauseToken);
-      if (!_dirResult) {
-        // Propagate abort/failure status already set by doCreateDirectoryJob
         if (callback)
-          callback(job);
-        return unexpected(_dirResult.error());
-      }
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
     }
-  }
 
-  if (stopToken.stop_requested()) {
-    job.setStatus(JobStatus::Aborted);
+    u16string baseArchiveDir = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
+    u16string diskDirPath = job.m_filePath;
+
+    if (!SeTableOfContent::verifyAbsPath(diskDirPath) || !SeTableOfContent::isAbsPathDir(diskDirPath)) {
+        job.setStatus(JobStatus::Failed);
+
+        if (callback)
+            callback(job);
+            return unexpected(SeError::ExpectedDirectory);
+        }
+
+        if (baseArchiveDir != u"/" && !this->m_toc.CheckParentPath(baseArchiveDir)) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+            return unexpected(SeError::TocPathIsInvalid);
+        }
+
+        if (baseArchiveDir != u"/" && !this->m_toc.CheckPath(baseArchiveDir)) {
+        SeArchiveEntry baseEntry = SeArchiveEntry::CreateDirectoryEntry(baseArchiveDir);
+        if (auto _err = this->m_toc.AddEntry(baseEntry); !_err) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_err.error());
+        }
+    }
+
+    filesystem::path diskPath(diskDirPath);
+    std::u16string diskU16 = diskPath.u16string();
+    size_t baseLen = diskU16.size();
+
+    while (baseLen > 0 && (diskU16[baseLen - 1] == u'/' || diskU16[baseLen - 1] == u'\\') ) {
+        baseLen--;
+    }
+
+    error_code ec;
+    filesystem::recursive_directory_iterator it(diskPath, filesystem::directory_options::skip_permission_denied, ec);
+    if (ec) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(ec);
+    }
+
+    struct PendingSubDir {
+        u16string archivePath;
+    };
+
+    struct PendingSubFile {
+        u16string archivePath;
+        u16string diskPath;
+        uint64_t fileSize;
+    };
+
+    vector<PendingSubDir> pendingDirs;
+    vector<PendingSubFile> pendingFiles;
+    uint64_t totalBytes = 0;
+
+    filesystem::recursive_directory_iterator endIt;
+    while (it != endIt) {
+        const auto &entry = *it;
+        error_code statusEc;
+        bool isDir = entry.is_directory(statusEc);
+        bool isReg = !isDir && entry.is_regular_file(statusEc);
+
+        std::u16string entryU16 = entry.path().u16string();
+        std::u16string relU16;
+        if (entryU16.size() > baseLen) {
+            size_t start = baseLen;
+            if (entryU16[start] == u'/' || entryU16[start] == u'\\') {
+            start++;
+            }
+            relU16 = entryU16.substr(start);
+            for (auto &ch : relU16) {
+            if (ch == u'\\')
+                ch = u'/';
+            }
+        }
+
+        if (!relU16.empty()) {
+            if (isDir) {
+            u16string subArchiveDir = SeTableOfContent::CreateDirPath(baseArchiveDir, relU16);
+            pendingDirs.push_back({subArchiveDir});
+            } 
+            else if (isReg) {
+                u16string fileArchivePath = SeTableOfContent::CreateFilePath(baseArchiveDir, relU16);
+                error_code szEc;
+                uint64_t sz = entry.file_size(szEc);
+                uint64_t fileSize = szEc ? 0 : sz;
+                totalBytes += fileSize;
+                pendingFiles.push_back({fileArchivePath, entryU16, fileSize});
+            }
+        }
+
+        it.increment(ec);
+        if (ec)
+            ec.clear();
+    }
+
+    // Create subdirectories in TOC via doCreateDirectoryJob
+    for (const auto &d : pendingDirs) {
+        if (!this->m_toc.CheckPath(d.archivePath)) {
+            job.SetFileName(d.archivePath);
+            // doCreateDirectoryJob reads job.m_fileName for the directory path
+            auto _dirResult = this->doCreateDirectoryJob(job, nullptr, stopToken, pauseToken);
+            if (!_dirResult) {
+                if (callback)
+                    callback(job);
+                return unexpected(_dirResult.error());
+            }
+        }
+    }
+
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    job.setStatus(JobStatus::Running);
+    job.totalBytes = totalBytes;
+    job.processedBytes = 0;
+    job.compressedBytes = 0;
+    job.percentage = (totalBytes == 0) ? 100 : 0;
     if (callback)
-      callback(job);
-    return unexpected(SeError::OperationCanceled);
-  }
+        callback(job);
 
-  job.setStatus(JobStatus::Running);
-  job.totalBytes = totalBytes;
-  job.processedBytes = 0;
-  job.compressedBytes = 0;
-  job.percentage = (totalBytes == 0) ? 100 : 0;
-  if (callback)
-    callback(job);
+    if (pendingFiles.empty()) {
+        job.SetFileName(baseArchiveDir);
+        job.setStatus(JobStatus::Finished);
+        job.percentage = 100;
+        if (callback)
+            callback(job);
+        return {};
+    }
 
-  if (pendingFiles.empty()) {
+    uint64_t cumulativeProcessed = 0;
+    uint64_t cumulativeCompressed = 0;
+
+    for (const auto &pf : pendingFiles) {
+        job.SetFileName(pf.archivePath);
+        job.m_filePath = pf.diskPath;
+
+        uint64_t baseProcessed = cumulativeProcessed;
+        uint64_t baseCompressed = cumulativeCompressed;
+
+        ProgressCallback wrappedCallback = nullptr;
+        if (callback) {
+            wrappedCallback = [&](const SeJob &j) {
+                SeJob adjusted = j;
+                adjusted.processedBytes = baseProcessed + j.processedBytes;
+                adjusted.compressedBytes = baseCompressed + j.compressedBytes;
+                adjusted.totalBytes = totalBytes;
+                adjusted.percentage = (totalBytes > 0)
+                                    ? static_cast<uint32_t>(std::min(100ULL, (adjusted.processedBytes * 100) / totalBytes))
+                                    : 100;
+                adjusted.m_status = JobStatus::Running;
+                callback(adjusted);
+            };
+        }
+
+        auto _fileResult = this->doAddFileJob(job, wrappedCallback, stopToken, pauseToken);
+        job.setStatus(JobStatus::Running);
+
+        if (!_fileResult) {
+            return unexpected(_fileResult.error());
+        }
+
+        cumulativeProcessed += job.processedBytes;
+        cumulativeCompressed += job.compressedBytes;
+
+        job.setStatus(JobStatus::Running);
+    }
+
     job.SetFileName(baseArchiveDir);
     job.setStatus(JobStatus::Finished);
+    job.processedBytes = totalBytes;
+    job.compressedBytes = cumulativeCompressed;
     job.percentage = 100;
     if (callback)
-      callback(job);
-    return {};
-  }
-
-  uint64_t cumulativeProcessed = 0;
-  uint64_t cumulativeCompressed = 0;
-
-  for (const auto &pf : pendingFiles) {
-    // Update current processing file in the job so UI updates accurately!
-    job.SetFileName(pf.archivePath);
-    job.m_filePath = pf.diskPath;
-
-    // Wrap the callback to translate per-file progress into cumulative
-    // directory-level progress while preserving filename and percentage reporting
-    uint64_t baseProcessed = cumulativeProcessed;
-    uint64_t baseCompressed = cumulativeCompressed;
-
-    ProgressCallback wrappedCallback = nullptr;
-    if (callback) {
-      wrappedCallback = [&](const SeJob &j) {
-        // Create a copy to apply cumulative directory progress adjustments
-        SeJob adjusted = j;
-        adjusted.processedBytes = baseProcessed + j.processedBytes;
-        adjusted.compressedBytes = baseCompressed + j.compressedBytes;
-        adjusted.totalBytes = totalBytes;
-        adjusted.percentage = (totalBytes > 0)
-                           ? static_cast<uint32_t>(std::min(100ULL, (adjusted.processedBytes * 100) / totalBytes))
-                           : 100;
-        callback(adjusted);
-      };
-    }
-
-    auto _fileResult = this->doAddFileJob(job, wrappedCallback, stopToken, pauseToken);
-
-    if (!_fileResult) {
-      // Status (Failed/Aborted) already set by doAddFileJob
-      return unexpected(_fileResult.error());
-    }
-
-    // After doAddFileJob finishes, accumulate per-file totals into cumulative
-    cumulativeProcessed += job.processedBytes;
-    cumulativeCompressed += job.compressedBytes;
-
-    // Restore Running status for the next file (doAddFileJob sets Finished)
-    job.setStatus(JobStatus::Running);
-  }
-
-  // Finished all files in directory! Restore job's base directory name and mark finished
-  job.SetFileName(baseArchiveDir);
-  job.setStatus(JobStatus::Finished);
-  job.processedBytes = totalBytes;
-  job.compressedBytes = cumulativeCompressed;
-  job.percentage = 100;
-  if (callback)
     callback(job);
 
-  return {};
+    return {};
 }
 
 expected<void, error_code>
