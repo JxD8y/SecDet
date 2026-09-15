@@ -54,7 +54,6 @@ Window {
             }
         }
 
-        // Hover / Active Background Rectangle
         Rectangle {
             id: hoverBg
             anchors.fill: parent
@@ -111,7 +110,7 @@ Window {
             }
         }
 
-        // Active indicator dot in top right
+        // active indicator dot
         Rectangle {
             visible: iconBtn.showIndicatorDot
             width: 7
@@ -123,7 +122,6 @@ Window {
             anchors.right: parent.right
             anchors.rightMargin: 6
 
-            // Subtle glow ring
             Rectangle {
                 anchors.centerIn: parent
                 width: 13
@@ -259,9 +257,7 @@ Window {
         }
     }
 
-    // ==========================================
-    // --- Clean Interfaces for Tree Actions ---
-    // ==========================================
+    // Drag interface
     signal itemMoved(var moveEvent)
     signal externalDragStarted(var exportEvent)
     signal fileDragExportRequested(var exportEvent)
@@ -291,18 +287,28 @@ Window {
         property real value: 0.0
     }
 
-    // Centralized Reactive Tree Model & Multi-Selection Tracking
     readonly property bool hasArchive: typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.hasArchive
     property var archiveTreeData: []
     property var selectedTreeItem: null
     property var selectedItemMap: ({})
     property int selectedCount: 0
 
-    // Standardized Tree Column Width Constants (shared between sticky header & row delegates)
     readonly property int colCompressedWidth: 95
     readonly property int colRealWidth: 95
     readonly property int colRatioWidth: 60
     readonly property int colCrcWidth: 95
+
+    property string mainTreeFindQuery: ""
+
+    Shortcut {
+        sequence: "Ctrl+F"
+        enabled: (!recoveryPageLoader.visible) && (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.hasArchive)
+        onActivated: {
+            if (treeFindBar) {
+                treeFindBar.openFind();
+            }
+        }
+    }
 
     function isItemSelected(itemPathOrName) {
         if (!itemPathOrName)
@@ -336,7 +342,7 @@ Window {
             statusText.text = "Ready";
         }
 
-        // Synchronize navigation to archive info file map if the page is open
+        // File map sync
         if (infoPageLoader.visible && infoPageLoader.item && !window.isSyncingFromInfoPage) {
             let itemPath = itemData.filePath || itemData.path || ("/" + itemData.name);
             let isFolder = Boolean(itemData.isFolder);
@@ -385,6 +391,7 @@ Window {
     }
 
     // Tree Model Actions
+    // Super memory inefficient !
     function addPendingItems(urls, targetFolder) {
         let targetDirPath = "/";
         let targetDisplayName = "root (/)";
@@ -581,7 +588,6 @@ Window {
         let cloned = JSON.parse(JSON.stringify(archiveTreeData));
         let extractedItem = null;
 
-        // 1. Remove the item from its current location
         function removeTarget(nodes) {
             for (let i = 0; i < nodes.length; ++i) {
                 if (nodes[i].name === itemData.name) {
@@ -598,7 +604,6 @@ Window {
         if (!extractedItem)
             return;
 
-        // 2. Insert into the target folder
         let inserted = false;
         function insertTarget(nodes) {
             for (let i = 0; i < nodes.length; ++i) {
@@ -989,21 +994,6 @@ Window {
                 visible: !treeContextMenu.isBlankArea
             }
 
-            // ACTION: Commit to Archive (Only for Pending items)
-            ContextMenuItem {
-                text: "Commit to Archive"
-                iconText: "\ue2c6"
-                accentColor: Colors.goldPrimary
-                visible: treeContextMenu.isTargetPending
-                onClicked: {
-                    let targetName = treeContextMenu.targetItem ? treeContextMenu.targetItem.name : "";
-                    treeContextMenu.close();
-                    if (targetName.length > 0) {
-                        commitPendingItem(targetName);
-                    }
-                }
-            }
-
             // ACTION: Discard Pending (Only for Pending files, not folders)
             ContextMenuItem {
                 text: "Discard / Remove Pending"
@@ -1034,11 +1024,9 @@ Window {
                 }
             }
 
-            // ACTION: Test File (Committed files only)
             ContextMenuItem {
                 text: "Test File"
                 iconText: "\ue86c"
-                accentColor: Colors.goldPrimary
                 visible: !treeContextMenu.isBlankArea && (!treeContextMenu.targetItem || !treeContextMenu.targetItem.isFolder) && !treeContextMenu.isTargetPending
                 onClicked: {
                     let target = treeContextMenu.targetItem;
@@ -1046,18 +1034,6 @@ Window {
                     if (target) {
                         launchTestFile(target);
                     }
-                }
-            }
-
-            // ACTION: Shannon Entropy & Hashes (Files)
-            ContextMenuItem {
-                text: "Shannon Entropy & Hashes"
-                iconText: "\ue88e"
-                visible: !treeContextMenu.isBlankArea && (!treeContextMenu.targetItem || !treeContextMenu.targetItem.isFolder)
-                onClicked: {
-                    treeContextMenu.close();
-                    statusText.text = "Calculating entropy & SHA-256 for '" + treeContextMenu.targetItem.name + "'...";
-                    infoPageLoader.visible = true;
                 }
             }
 
@@ -1109,7 +1085,7 @@ Window {
 
             // --- Blank Area Actions ---
             ContextMenuItem {
-                text: "Add Files to Root..."
+                text: "Add Files"
                 iconText: "\ue145"
                 visible: treeContextMenu.isBlankArea
                 onClicked: {
@@ -1118,31 +1094,12 @@ Window {
                     addFilesDialog.open();
                 }
             }
-
-            ContextMenuItem {
-                text: "New Root Folder"
-                iconText: "\ue2cc"
-                visible: treeContextMenu.isBlankArea
-                onClicked: {
-                    treeContextMenu.close();
-                    addPendingItems(["file:///New_Folder"], null);
-                }
-            }
-
-            ContextMenuItem {
-                text: "Refresh View"
-                iconText: "\ue5d5"
-                visible: treeContextMenu.isBlankArea
-                onClicked: {
-                    treeContextMenu.close();
-                    statusText.text = "Archive view refreshed.";
-                }
-            }
         }
     }
+
     FileDialog {
         id: openArchiveDialog
-        title: "Open Secure Detective Archive"
+        title: "Open SecDet"
         nameFilters: ["SecDet Archive (*.sda)", "All Files (*.*)"]
         onAccepted: {
             if (typeof archiveInterface !== "undefined" && archiveInterface) {
@@ -1229,17 +1186,17 @@ Window {
         }
         window.pendingExitAfterOperationCancel = false;
         forceExitTimer.stop();
-        closingSecuringDialog.close();
+        closingPendingDialog.close();
         window.closeArchiveDirectly();
         window.exitApplication();
     }
 
     function handleWindowCloseRequest() {
-        // 1. If an operation is running, cancel that operation first so the TOC won't get damaged, then close
+        // soft cancel to allow toc to be written
         if (window.isOperationRunning()) {
             window.pendingExitAfterOperationCancel = true;
             window.pendingExitAfterCommit = false;
-            statusText.text = "Cancelling operation and securing archive before closing...";
+            statusText.text = "Cancelling operation...";
             if (typeof progressWindow !== "undefined" && progressWindow && progressWindow.visible) {
                 progressWindow.isCanceling = true;
             }
@@ -1247,11 +1204,10 @@ Window {
                 archiveInterface.cancelCurrentOperation();
             }
             forceExitTimer.restart();
-            closingSecuringDialog.open();
+            closingPendingDialog.open();
             return;
         }
-
-        // 2. If there are uncommitted jobs, show the same popup as the file header on top of file tree close button shows
+        
         let hasArchive = (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.hasArchive);
         let uncommitted = false;
         if (hasArchive) {
@@ -1264,7 +1220,6 @@ Window {
             return;
         }
 
-        // 3. No operation running, and no uncommitted changes
         if (hasArchive) {
             window.closeArchiveDirectly();
         }
@@ -1288,7 +1243,6 @@ Window {
             return;
         }
         window.ensureKeyRegistered(function () {
-            // Worker thread job optimization is initiated
             archiveInterface.optimizeJobsAsync();
         });
     }
@@ -1460,7 +1414,7 @@ Window {
             progressWindow.requestActivate();
         }
         function onDragStagingCompleted() {
-            // Drag extraction finished; onOperationCompleted smoothly animates 100% completion and closes via timer
+           
         }
         function onArchiveTreeChanged() {
             window.archiveTreeData = archiveInterface.archiveTree;
@@ -1508,13 +1462,10 @@ Window {
                 return;
             }
             if (deletedJobIds && deletedJobIds.length > 0) {
-                // Scroll to deleted jobs sequentially and play the catchy deletion animation
                 bottomProgressBar.playOptimizationDeletionSequence(deletedJobIds, function () {
-                    // When deletion sequence finishes: open progress window & start main commit task!
                     window.launchCommitAndShowProgress();
                 });
             } else {
-                // No jobs eliminated: directly open progress window & start main commit task!
                 window.launchCommitAndShowProgress();
             }
         }
@@ -1660,7 +1611,7 @@ Window {
 
                     Text {
                         anchors.centerIn: parent
-                        text: "\ue002" // warning icon
+                        text: "\ue002"
                         font.family: materialIcons.name
                         font.pixelSize: 22
                         color: Colors.goldPrimary
@@ -1701,8 +1652,7 @@ Window {
                 Layout.fillWidth: true
                 Layout.topMargin: 8
                 spacing: 8
-
-                // Discard & Close button (subtle danger style)
+                
                 Rectangle {
                     implicitWidth: 124
                     implicitHeight: 34
@@ -1835,7 +1785,7 @@ Window {
     }
 
     Dialog {
-        id: closingSecuringDialog
+        id: closingPendingDialog
         anchors.centerIn: parent
         width: Math.min(parent.width - 40, 430)
         modal: true
@@ -1857,8 +1807,7 @@ Window {
             radius: 14
             border.color: Colors.goldBorder
             border.width: 1.5
-
-            // Gold accent line at top
+            
             Rectangle {
                 anchors.top: parent.top
                 anchors.left: parent.left
@@ -1889,7 +1838,7 @@ Window {
 
                     Text {
                         anchors.centerIn: parent
-                        text: "\ue5d5" // refresh / sync icon
+                        text: "\ue5d5"
                         font.family: materialIcons.name
                         font.pixelSize: 24
                         color: Colors.goldPrimary
@@ -1899,7 +1848,7 @@ Window {
                             to: 360
                             duration: 1000
                             loops: Animation.Infinite
-                            running: closingSecuringDialog.visible
+                            running: closingPendingDialog.visible
                         }
                     }
                 }
@@ -1909,18 +1858,11 @@ Window {
                     Layout.fillWidth: true
 
                     Text {
-                        text: "Securing Archive"
+                        text: "Waiting for active tasks...."
                         font.family: Colors.fontFamily
                         font.pixelSize: 16
                         font.weight: Font.Bold
                         color: Colors.textMain
-                    }
-
-                    Text {
-                        text: "Cancelling active operation..."
-                        font.family: Colors.fontFamily
-                        font.pixelSize: 12
-                        color: Colors.textMuted
                     }
                 }
             }
@@ -1928,7 +1870,7 @@ Window {
             Text {
                 text: "An operation is currently in progress. Stopping active tasks safely and preserving archive table of contents integrity before closing..."
                 font.family: Colors.fontFamily
-                font.pixelSize: 13
+                font.pixelSize: 12
                 color: Colors.textMain
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
@@ -1958,7 +1900,7 @@ Window {
                         to: barContainer.width
                         duration: 1100
                         loops: Animation.Infinite
-                        running: closingSecuringDialog.visible
+                        running: closingPendingDialog.visible
                     }
                 }
             }
@@ -1967,11 +1909,10 @@ Window {
 
     Timer {
         id: forceExitTimer
-        interval: 8000
+        interval: 10000
         repeat: false
         onTriggered: {
-            console.warn("Securing timeout reached, forcing exit.");
-            closingSecuringDialog.close();
+            closingPendingDialog.close();
             window.exitApplication();
         }
     }
@@ -2023,8 +1964,6 @@ Window {
         }
     }
 
-    // Note: Archive settings have been moved into the bottom of ArchiveInfoPage.
-
     ProgressWindow {
         id: progressWindow
         onPauseToggled: function(paused) {
@@ -2059,9 +1998,6 @@ Window {
         anchors.margins: 14
         spacing: 12
 
-        // ==========================================
-        // --- Top Function & Actions Rectangle ---
-        // ==========================================
         Rectangle {
             id: topFunctionBar
             Layout.fillWidth: true
@@ -2087,8 +2023,7 @@ Window {
                 anchors.leftMargin: 8
                 anchors.rightMargin: 12
                 spacing: 2
-
-                // 1. Create Archive (Warm Gold / Amber Accent)
+                
                 IslandButton {
                     iconText: "add_circle"
                     labelText: "Create"
@@ -2105,9 +2040,8 @@ Window {
                     }
                 }
 
-                // 2. Open Archive (Updated folder_open icon)
                 IslandButton {
-                    iconText: "\ue2c8" // folder_open
+                    iconText: "\ue2c8"
                     labelText: "Open"
                     accentColor: Colors.goldPrimary
                     onClicked: {
@@ -2115,7 +2049,6 @@ Window {
                     }
                 }
 
-                // Vertical Separator
                 Rectangle {
                     width: 1
                     Layout.preferredHeight: 28
@@ -2125,7 +2058,6 @@ Window {
                     color: Colors.divider
                 }
 
-                // 3. Extract All (Extracts entire archive, active when archive is loaded)
                 IslandButton {
                     iconText: "unarchive"
                     labelText: "Extract All"
@@ -2138,8 +2070,7 @@ Window {
                         });
                     }
                 }
-
-                // 4. Extract (Active only when item(s) selected in tree)
+                
                 IslandButton {
                     iconText: "\ue2c6" // file download / extract
                     labelText: "Extract"
@@ -2156,7 +2087,6 @@ Window {
                     }
                 }
 
-                // 5. Delete / Purge Action (Active only when item(s) selected in tree)
                 IslandButton {
                     iconText: "delete"
                     labelText: "Delete"
@@ -2172,8 +2102,7 @@ Window {
                         }
                     }
                 }
-
-                // 6. Test File Integrity (Active only when a file is selected in tree)
+                
                 IslandButton {
                     iconText: "\ue86c" // done_all / verified
                     labelText: "Test"
@@ -2192,9 +2121,8 @@ Window {
                     }
                 }
 
-                // 7. Test Entire Archive Integrity (Active when archive is loaded)
                 IslandButton {
-                    iconText: "\ue8e8" // verified_user (shield with checkmark)
+                    iconText: "\ue8e8"
                     labelText: "Test Archive"
                     accentColor: Colors.textMuted
                     enabled: window.hasArchive
@@ -2207,7 +2135,6 @@ Window {
                     }
                 }
 
-                // 8. Inspect Archive Info Page (Active when archive is loaded)
                 IslandButton {
                     iconText: "\ue88e" // info
                     labelText: "Info"
@@ -2222,12 +2149,11 @@ Window {
                     }
                 }
 
-                // 9. Inspect Archive Recovery Tools (Independent context, always accessible)
                 IslandButton {
                     id: recoveryBtn
-                    readonly property bool hasRecoveryOpen: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.hasRecoveryArchive : false
+                    readonly property bool hasRecoveryOpen: (typeof recoveryInterface !== "undefined" && recoveryInterface) ? recoveryInterface.hasArchive : ((typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.hasRecoveryArchive : false)
 
-                    iconText: "\ue869" // build / repair tool icon
+                    iconText: "\ue869"
                     labelText: "Recovery"
                     accentColor: hasRecoveryOpen ? (Colors.isDarkMode ? "#34d399" : "#059669") : Qt.rgba(16 / 255, 185 / 255, 129 / 255, 0.85) // Sea green
                     activeState: hasRecoveryOpen
@@ -2265,15 +2191,13 @@ Window {
             Layout.fillHeight: true
             spacing: 0
 
-            // --- Tab Strip Bar (Chrome-style Archive Tab) ---
             Item {
                 id: tabStripItem
                 Layout.fillWidth: true
                 Layout.preferredHeight: 36
                 height: 36
                 z: 10
-
-                // Active Archive Tab
+                
                 Rectangle {
                     id: archiveTab
                     anchors.left: parent.left
@@ -2340,8 +2264,6 @@ Window {
                                 color: Colors.goldPrimary
                             }
                         }
-
-                        // Archive Header Key Icon Button (Click to unlock archive)
                         Rectangle {
                             id: headerKeyBtn
                             width: 24
@@ -2390,9 +2312,20 @@ Window {
                                     passIn.focusInput();
                                 }
                             }
+                            ToolTip {
+                                id: keyTooltip
+                                visible: keyMouse.containsMouse
+                                delay: 400
+                                text: {
+                                    if (!archiveInterface.isKeyRegistered) {
+                                        return "No key is registered";
+                                    }
+                                    return "Key is registered";
+                                }
+                            }
                         }
 
-                        // Close Button for active archive tab
+                        // archive close button in header
                         Rectangle {
                             id: tabCloseBtn
                             width: 20
@@ -2410,7 +2343,7 @@ Window {
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "\ue5cd" // close
+                                text: "\ue5cd" 
                                 font.family: materialIcons.name
                                 font.pixelSize: 14
                                 color: tabCloseMouse.containsMouse ? "#e05353" : Colors.textMuted
@@ -2431,8 +2364,6 @@ Window {
                         }
                     }
 
-                    // Seamless Bottom Eraser Patch
-                    // Seamlessly removes the tab bottom border and masks the treeContainer top border directly underneath
                     Rectangle {
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -2451,8 +2382,7 @@ Window {
                     }
                 }
             }
-
-            // --- Main Content Views (Tree & Info Page) ---
+            
             RowLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -2490,7 +2420,7 @@ Window {
                         }
                     }
 
-                    // Background right-click menu & left-click deselection for empty/blank tree area
+                    
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -2517,8 +2447,8 @@ Window {
                         spacing: 4
                         visible: !(typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isLoadingArchive) && ((typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.treeModel) ? (archiveInterface.treeModel.count > 0) : (window.archiveTreeData && window.archiveTreeData.length > 0))
 
-                        // 1. Sticky Tree Header
                         Rectangle {
+                            id: stickyTreeHeader
                             Layout.fillWidth: true
                             Layout.preferredHeight: 30
                             color: Colors.bgElevated
@@ -2596,7 +2526,7 @@ Window {
                                 }
 
                                 Text {
-                                    text: "CRC (Health)"
+                                    text: "CRC32"
                                     color: Colors.textMuted
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 11
@@ -2604,20 +2534,191 @@ Window {
                                     Layout.preferredWidth: window.colCrcWidth
                                     horizontalAlignment: Text.AlignRight
                                 }
+
+                                Item {
+                                    Layout.preferredWidth: 28
+                                    Layout.fillHeight: true
+                                }
+                            }
+
+                            Rectangle { // BUG: laggs on high file count
+                                id: treeFindBar
+                                anchors.right: parent.right
+                                anchors.rightMargin: 2
+                                anchors.verticalCenter: parent.verticalCenter
+                                z: 30
+
+                                property bool isOpen: false
+                                width: isOpen ? 250 : 26
+                                height: 26
+                                radius: 13
+
+                                color: isOpen ? Colors.bgElevated : (findBtnMouse.containsMouse ? Colors.bgHover : Colors.bgSurface)
+                                border.color: isOpen ? Colors.goldPrimary : (findBtnMouse.containsMouse ? Colors.goldPrimary : Colors.borderSubtle)
+                                border.width: isOpen ? 1.5 : 1
+
+                                Behavior on width {
+                                    NumberAnimation {
+                                        duration: 220
+                                        easing.type: Easing.OutCubic
+                                    }
+                                }
+                                Behavior on color { ColorAnimation { duration: 150 } }
+                                Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                                MouseArea {
+                                    id: findBtnMouse
+                                    anchors.fill: parent
+                                    enabled: !treeFindBar.isOpen
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        treeFindBar.openFind();
+                                    }
+                                }
+
+                                ToolTip.visible: findBtnMouse.containsMouse && !treeFindBar.isOpen
+                                ToolTip.delay: 400
+                                ToolTip.text: "Find files (Ctrl+F)"
+
+                                function openFind() {
+                                    isOpen = true;
+                                    Qt.callLater(function() {
+                                        treeFindInput.forceActiveFocus();
+                                        treeFindInput.selectAll();
+                                    });
+                                }
+
+                                function closeFind() {
+                                    treeFindInput.text = "";
+                                    window.mainTreeFindQuery = "";
+                                    isOpen = false;
+                                }
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: treeFindBar.isOpen ? 8 : 6
+                                    anchors.rightMargin: treeFindBar.isOpen ? 4 : 6
+                                    spacing: 4
+
+                                    Text {
+                                        text: "\ue8b6"
+                                        font.family: materialIcons.name
+                                        font.pixelSize: 13
+                                        color: treeFindBar.isOpen ? Colors.goldPrimary : (findBtnMouse.containsMouse ? Colors.goldPrimary : Colors.textMuted)
+                                        Layout.alignment: Qt.AlignVCenter
+                                        Layout.preferredWidth: 14
+                                        horizontalAlignment: Text.AlignHCenter
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            enabled: treeFindBar.isOpen
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                treeFindInput.forceActiveFocus();
+                                                treeFindInput.accepted();
+                                            }
+                                        }
+                                    }
+
+                                    Item {
+                                        Layout.fillWidth: true
+                                        Layout.fillHeight: true
+                                        visible: treeFindBar.isOpen || treeFindBar.width > 35
+                                        clip: true
+
+                                        TextInput {
+                                            id: treeFindInput
+                                            anchors.fill: parent
+                                            verticalAlignment: TextInput.AlignVCenter
+                                            font.family: Colors.fontFamily
+                                            font.pixelSize: 11
+                                            color: Colors.textMain
+                                            selectionColor: Colors.goldPrimary
+                                            selectedTextColor: Colors.textOnGold
+                                            selectByMouse: true
+                                            activeFocusOnTab: true
+
+                                            onAccepted: {
+                                                window.mainTreeFindQuery = text;
+                                                if (text.trim().length > 0 && archiveInterface && archiveInterface.treeModel) {
+                                                    archiveInterface.treeModel.expandAll();
+                                                }
+                                            }
+
+                                            onTextChanged: {
+                                                if (text.trim().length === 0 && window.mainTreeFindQuery.length > 0) {
+                                                    window.mainTreeFindQuery = "";
+                                                }
+                                            }
+
+                                            Keys.onEscapePressed: {
+                                                if (text.length > 0) {
+                                                    text = "";
+                                                    window.mainTreeFindQuery = "";
+                                                } else {
+                                                    treeFindBar.closeFind();
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            anchors.fill: parent
+                                            verticalAlignment: Text.AlignVCenter
+                                            visible: !treeFindInput.text && !treeFindInput.activeFocus
+                                            text: "Filter files by name..."
+                                            color: Colors.textMuted
+                                            font.family: Colors.fontFamily
+                                            font.pixelSize: 11
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        visible: treeFindBar.isOpen
+                                        Layout.preferredWidth: 18
+                                        Layout.preferredHeight: 18
+                                        Layout.alignment: Qt.AlignVCenter
+                                        radius: 9
+                                        color: closeMouse.containsMouse ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.08)) : "transparent"
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "\ue5cd"
+                                            font.family: materialIcons.name
+                                            font.pixelSize: 12
+                                            color: closeMouse.containsMouse ? Colors.goldPrimary : Colors.textMuted
+                                        }
+
+                                        MouseArea {
+                                            id: closeMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                if (treeFindInput.text.length > 0) {
+                                                    treeFindInput.text = "";
+                                                    window.mainTreeFindQuery = "";
+                                                    treeFindInput.forceActiveFocus();
+                                                } else {
+                                                    treeFindBar.closeFind();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-
-                        // 2. High-Performance Virtualized ListView
+                        
                         ListView {
                             id: mainTreeListView
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
                             boundsBehavior: Flickable.StopAtBounds
-                            spacing: 2
+                            spacing: (window.mainTreeFindQuery.trim().length > 0) ? 0 : 2
                             model: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.treeModel : null
 
-                            // Deselect when clicking on empty area below items
                             MouseArea {
                                 anchors.fill: parent
                                 z: -1
@@ -2646,14 +2747,27 @@ Window {
                             delegate: Item {
                                 id: rowDelegate
                                 width: mainTreeListView.width
-                                height: 34
+                                readonly property string nodeName: model.name || ""
+                                readonly property string filePathStr: model.filePath || ""
+                                readonly property bool isSearching: window.mainTreeFindQuery.trim().length > 0
+                                readonly property bool matchesFilter: {
+                                    if (!isSearching) return true;
+                                    let q = window.mainTreeFindQuery.trim().toLowerCase();
+                                    let nameMatch = nodeName.toLowerCase().indexOf(q) !== -1;
+                                    let pathMatch = filePathStr.toLowerCase().indexOf(q) !== -1;
+                                    return nameMatch || pathMatch;
+                                }
+                                readonly property bool isRowVisible: matchesFilter
+
+                                height: isRowVisible ? 34 : 0
+                                visible: isRowVisible
+                                clip: true
 
                                 readonly property bool isPending: model.pending
                                 readonly property bool isSelected: window.isItemSelected(model.filePath || rowDelegate.nodeName)
                                 readonly property bool canDrag: !isPending
                                 readonly property bool isFolder: model.isFolder
                                 readonly property bool isOpen: model.expanded
-                                readonly property string nodeName: model.name
 
                                 Component.onCompleted: {
                                     if (rowDelegate.isFolder) {
@@ -2670,14 +2784,13 @@ Window {
                                 Rectangle {
                                     id: itemRowRect
                                     anchors.fill: parent
+                                    anchors.bottomMargin: (window.mainTreeFindQuery.trim().length > 0) ? 2 : 0
                                     radius: 6
 
                                     readonly property bool isDropTargetHovered: (dragManager.isDragging && (dragManager.activeTargetPath === model.filePath || dragManager.activeTargetFolder === rowDelegate.nodeName)) || (treeDropArea.containsDrag && treeDropArea.externalTargetFolder && (treeDropArea.externalTargetFolder.path === model.filePath || treeDropArea.externalTargetFolder.name === rowDelegate.nodeName))
 
-                                    // Darkened Silver 70% opacity background for selection; Gold for pending; Fluent hover for normal
                                     color: isDropTargetHovered ? Colors.goldLightHover : rowDelegate.isPending ? (itemMouse.containsMouse ? Colors.goldLightHover : (Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.09) : Qt.rgba(0.69, 0.51, 0.12, 0.08))) : rowDelegate.isSelected ? (Colors.isDarkMode ? Qt.rgba(0.32, 0.36, 0.44, 0.70) : Qt.rgba(0.55, 0.58, 0.65, 0.70)) : itemMouse.containsPress ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(0, 0, 0, 0.08)) : itemMouse.containsMouse ? Colors.bgHover : "transparent"
 
-                                    // Darkened Silver border for selection; Gold for pending
                                     border.color: isDropTargetHovered ? Colors.goldPrimary : rowDelegate.isPending ? Colors.goldBorderHi : rowDelegate.isSelected ? (Colors.isDarkMode ? "#5f6c80" : "#64748b") : "transparent"
                                     border.width: isDropTargetHovered ? 2 : (rowDelegate.isSelected ? 1.5 : (rowDelegate.isPending ? 1 : 0))
 
@@ -2698,7 +2811,6 @@ Window {
                                         anchors.rightMargin: 12
                                         spacing: 8
 
-                                        // Left Indicator Bar (Gold for pending, Silver/White for selected)
                                         Rectangle {
                                             width: 3
                                             height: 18
@@ -2708,7 +2820,6 @@ Window {
                                             Layout.alignment: Qt.AlignVCenter
                                         }
 
-                                        // Expand/Collapse Chevron
                                         Text {
                                             text: rowDelegate.isFolder ? (rowDelegate.isOpen ? "\ue5cf" : "\ue5cc") : " "
                                             font.family: materialIcons.name
@@ -2728,7 +2839,6 @@ Window {
                                             }
                                         }
 
-                                        // Folder / File Icon
                                         Text {
                                             text: rowDelegate.isFolder ? (rowDelegate.isOpen ? "\ue2c8" : "\ue2c7") : (rowDelegate.isPending ? "\ue2c6" : "\ue873")
                                             font.family: materialIcons.name
@@ -2737,7 +2847,6 @@ Window {
                                             Layout.preferredWidth: 18
                                         }
 
-                                        // File / Folder Name
                                         Text {
                                             text: model.name || ""
                                             color: rowDelegate.isPending ? Colors.goldHover : (rowDelegate.isSelected ? (Colors.isDarkMode ? "#f8fafc" : "#0f172a") : Colors.textMain)
@@ -2747,6 +2856,34 @@ Window {
                                             font.italic: rowDelegate.isPending
                                             Layout.fillWidth: true
                                             elide: Text.ElideRight
+                                        }
+                                        
+                                        Rectangle {
+                                            visible: rowDelegate.isSearching && rowDelegate.matchesFilter
+                                            Layout.preferredHeight: 18
+                                            Layout.preferredWidth: 64
+                                            radius: 9
+                                            color: Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.18) : Qt.rgba(0.69, 0.51, 0.12, 0.14)
+                                            border.color: Colors.goldBorder
+                                            border.width: 1
+
+                                            RowLayout {
+                                                anchors.centerIn: parent
+                                                spacing: 3
+                                                Text {
+                                                    text: "\ue8b6"
+                                                    font.family: materialIcons.name
+                                                    font.pixelSize: 10
+                                                    color: Colors.goldPrimary
+                                                }
+                                                Text {
+                                                    text: "1 match"
+                                                    font.family: Colors.fontFamily
+                                                    font.pixelSize: 10
+                                                    font.weight: Font.DemiBold
+                                                    color: Colors.goldPrimary
+                                                }
+                                            }
                                         }
 
                                         // Target Drop Cue Pill
@@ -2856,16 +2993,14 @@ Window {
                                                 }
                                             }
                                         }
-
-                                        // Divider before CRC
+                                        
                                         Rectangle {
                                             visible: !itemRowRect.isDropTargetHovered
                                             width: 1
                                             height: 14
                                             color: rowDelegate.isSelected ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(0, 0, 0, 0.16)) : Colors.divider
                                         }
-
-                                        // Column 4: CRC (Health)
+                                        
                                         Rectangle {
                                             visible: !itemRowRect.isDropTargetHovered
                                             Layout.preferredWidth: window.colCrcWidth
@@ -2896,7 +3031,6 @@ Window {
                                         }
                                     }
 
-                                    // MouseArea for Selection, Right-Click Menu, and Drag Initiation
                                     MouseArea {
                                         id: itemMouse
                                         anchors.fill: parent
@@ -2986,7 +3120,6 @@ Window {
                         }
                     }
 
-                    // Loading State Placeholder during async archive open
                     Item {
                         id: loadingPlaceholder
                         anchors.fill: parent
@@ -3374,7 +3507,7 @@ Window {
                         radius: 8
                         color: Colors.isDarkMode ? Qt.rgba(0.12, 0.14, 0.18, 0.96) : Qt.rgba(0.98, 0.98, 0.99, 0.96)
                         border.color: Colors.goldPrimary
-                        border.width: 1.5
+                        border.width: 1
                         z: 100
 
                         visible: opacity > 0
@@ -3427,8 +3560,8 @@ Window {
                             }
                         }
                     }
-
-                    // Background Scanning & Adding Items Animation Overlay
+                    
+                    // Scanning items
                     Rectangle {
                         id: addingItemsOverlay
                         anchors.centerIn: parent
@@ -3437,7 +3570,7 @@ Window {
                         radius: 12
                         color: Colors.isDarkMode ? Qt.rgba(0.10, 0.12, 0.16, 0.96) : Qt.rgba(0.98, 0.98, 0.99, 0.96)
                         border.color: Colors.goldPrimary
-                        border.width: 1.5
+                        border.width: 1
                         z: 110
 
                         visible: opacity > 0
@@ -3450,15 +3583,15 @@ Window {
                             }
                         }
 
-                        // Subtle outer glow
                         Rectangle {
-                            anchors.fill: parent
-                            anchors.margins: -3
-                            radius: 15
-                            z: -1
-                            color: "transparent"
-                            border.color: Qt.rgba(0.9, 0.76, 0.35, 0.3)
-                            border.width: 2
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.leftMargin: 18
+                            anchors.rightMargin: 18
+                            height: 2.5
+                            radius: 1.25
+                            color: Colors.goldPrimary
                         }
 
                         RowLayout {
@@ -3498,7 +3631,7 @@ Window {
                                 spacing: 3
 
                                 Text {
-                                    text: "Scanning Folder Structure..."
+                                    text: "Scanning Folder"
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 12
                                     font.weight: Font.Bold
@@ -3506,7 +3639,7 @@ Window {
                                 }
 
                                 Text {
-                                    text: "Listing files and subdirectories in background"
+                                    text: "Indexing is in progress....."
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 10
                                     color: Colors.textMuted
@@ -3644,10 +3777,7 @@ Window {
                 }
             }
         }
-
-        // ==========================================
-        // --- Live Status Feedback Bar ---
-        // ==========================================
+        
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 22
@@ -3670,18 +3800,8 @@ Window {
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
-
-            Text {
-                text: "SecDet Engine v2.4 • Drag/Drop Ready"
-                color: Colors.textSubtle
-                font.family: Colors.fontFamily
-                font.pixelSize: 10
-            }
         }
 
-        // =========================================================
-        // --- Windows 11 Bottom Multi-Part Progress Bar & Commit ---
-        // =========================================================
         RowLayout {
             Layout.fillWidth: true
             Layout.preferredHeight: 36
@@ -3689,9 +3809,7 @@ Window {
             implicitHeight: 36
             spacing: 8
 
-            // =========================================================
-            // --- High-Performance Multi-Part Progress Bar ---
-            // =========================================================
+
             MultiPartProgressBar {
                 id: bottomProgressBar
                 Layout.fillWidth: true
@@ -3715,7 +3833,6 @@ Window {
                 }
             }
 
-            // Core Logic: Commit & Write Changes Button
             Rectangle {
                 id: bottomCommitButton
                 Layout.preferredWidth: commitRow.implicitWidth + 24
@@ -3729,7 +3846,7 @@ Window {
                 property bool hasPendingChanges: typeof archiveInterface !== "undefined" && archiveInterface && ((archiveInterface.hasUncommittedChanges !== undefined && archiveInterface.hasUncommittedChanges) || (archiveInterface.pendingJobCount !== undefined && archiveInterface.pendingJobCount > 0))
                 property int pendingCount: (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.pendingJobCount !== undefined) ? archiveInterface.pendingJobCount : 0
 
-                // Dynamic styling matching bottom multipart bar vibe
+
                 color: {
                     if (isOptimizing) {
                         return Colors.isDarkMode ? Qt.rgba(0.95, 0.65, 0.15, 0.22) : Qt.rgba(0.90, 0.55, 0.10, 0.18);
@@ -3793,7 +3910,7 @@ Window {
                 onIsCommittingChanged: resetCommitIconRotation()
                 onHasPendingChangesChanged: resetCommitIconRotation()
 
-                // Dynamic subtle breathing glow pulse when changes are staged or optimizing
+
                 SequentialAnimation on border.color {
                     running: (bottomCommitButton.hasPendingChanges || bottomCommitButton.isOptimizing) && !bottomCommitButton.isCommitting && !commitMouse.containsMouse
                     loops: Animation.Infinite
@@ -3820,10 +3937,10 @@ Window {
                         rotation: 0
                         text: {
                             if (bottomCommitButton.isOptimizing)
-                                return "\ue8b8"; // settings / gear (catchy mechanical optimizer)
+                                return "\ue8b8";
                             if (bottomCommitButton.isCommitting)
-                                return "\ue86a"; // sync
-                            return "\ue161"; // save
+                                return "\ue86a";
+                            return "\ue161";
                         }
                         font.family: materialIcons.name
                         font.pixelSize: 15
@@ -3874,7 +3991,7 @@ Window {
                         }
                     }
 
-                    // Staged jobs count badge
+
                     Rectangle {
                         visible: bottomCommitButton.hasPendingChanges && !bottomCommitButton.isCommitting && !bottomCommitButton.isOptimizing
                         Layout.preferredWidth: Math.max(18, countText.implicitWidth + 8)
@@ -3936,9 +4053,7 @@ Window {
         }
     }
 
-    // ==========================================
-    // --- Global Drag Overlay & Proxy Floating Item ---
-    // ==========================================
+
     MouseArea {
         id: globalDragOverlay
         anchors.fill: parent

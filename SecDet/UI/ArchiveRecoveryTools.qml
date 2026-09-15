@@ -30,53 +30,44 @@ Page {
         source: "Fonts/MaterialIconsRound-Regular.otf"
     }
 
-    // Independent Recovery State (bound to archiveInterface)
-    readonly property bool hasActiveArchive: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.hasRecoveryArchive : false
-    readonly property string archiveFilePath: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.recoveryFilePath : ""
-    readonly property string archiveFileName: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.recoveryFileName : ""
+    // Independent Recovery State (bound to recoveryInterface)
+    readonly property var backend: (typeof recoveryInterface !== "undefined" && recoveryInterface) ? recoveryInterface : null
+
+    readonly property bool hasActiveArchive: backend ? backend.hasArchive : false
+    readonly property string archiveFilePath: backend ? backend.archiveFilePath : ""
+    readonly property string archiveFileName: backend ? backend.archiveFileName : ""
     property var selectedItem: null
 
     // Metadata & TOC Diagnostic State
-    readonly property string metadataHealthState: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.recoveryMetadataHealthState : ""
-    readonly property string metadataDetails: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.recoveryMetadataDetails : ""
-    readonly property bool isMetadataHealthy: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.isRecoveryMetadataHealthy : false
+    readonly property string metadataHealthState: backend ? backend.metadataHealthState : ""
+    readonly property string metadataDetails: backend ? backend.metadataDetails : ""
+    readonly property bool isMetadataHealthy: backend ? backend.isMetadataHealthy : false
 
-    readonly property string tocHealthState: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.recoveryTocHealthState : ""
-    readonly property string tocDetails: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.recoveryTocDetails : ""
-    readonly property bool isTocHealthy: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.isRecoveryTocHealthy : false
+    readonly property string tocHealthState: backend ? backend.tocHealthState : ""
+    readonly property string tocDetails: backend ? backend.tocDetails : ""
+    readonly property bool isTocHealthy: backend ? backend.isTocHealthy : false
 
-    // Dynamic recovery state counters
-    readonly property int okCount: {
-        let count = 0;
-        for (let i = 0; i < recoveryListModel.count; ++i) {
-            if (recoveryListModel.get(i).state === "Ok") count++;
+    // Precalculated recovery state counters directly from C++ background worker
+    readonly property int okCount: backend ? backend.okCount : 0
+    readonly property int foundOkCount: backend ? backend.foundOkCount : 0
+    readonly property int truncatedCount: backend ? backend.truncatedCount : 0
+    readonly property int notFoundCount: backend ? backend.notFoundCount : 0
+
+    // Recovery Tree Find / Filter State & Shortcut
+    property string recoveryFindQuery: ""
+
+    Shortcut {
+        sequence: "Ctrl+F"
+        enabled: root.visible && root.hasActiveArchive
+        onActivated: {
+            if (stickyRecoveryHeaderFindBar) {
+                stickyRecoveryHeaderFindBar.openFind();
+            }
         }
-        return count;
-    }
-    readonly property int foundOkCount: {
-        let count = 0;
-        for (let i = 0; i < recoveryListModel.count; ++i) {
-            if (recoveryListModel.get(i).state === "Found OK") count++;
-        }
-        return count;
-    }
-    readonly property int truncatedCount: {
-        let count = 0;
-        for (let i = 0; i < recoveryListModel.count; ++i) {
-            if (recoveryListModel.get(i).state === "Found Truncated") count++;
-        }
-        return count;
-    }
-    readonly property int notFoundCount: {
-        let count = 0;
-        for (let i = 0; i < recoveryListModel.count; ++i) {
-            if (recoveryListModel.get(i).state === "Not Found") count++;
-        }
-        return count;
     }
 
     Connections {
-        target: (typeof archiveInterface !== "undefined") ? archiveInterface : null
+        target: root.backend
         function onRecoveryItemsChanged() {
             root.populateRecoveryData();
         }
@@ -155,8 +146,9 @@ Page {
         root.pendingRecoveryFilePath = "";
         root.selectedItem = null;
         recoveryListModel.clear();
-        if (typeof archiveInterface !== "undefined" && archiveInterface) {
-            archiveInterface.unloadRecoveryArchive();
+        root.selectedItemsCount = 0;
+        if (root.backend) {
+            root.backend.unloadArchive();
         }
     }
 
@@ -168,15 +160,27 @@ Page {
         }
     }
 
+    property int selectedItemsCount: 0
+
+    function updateSelectedItemsCount() {
+        let cnt = 0;
+        for (let i = 0; i < recoveryListModel.count; ++i) {
+            if (recoveryListModel.get(i).checked) cnt++;
+        }
+        root.selectedItemsCount = cnt;
+    }
+
     // Populate recovery state items from backend
     function populateRecoveryData() {
         recoveryListModel.clear();
-        if (typeof archiveInterface === "undefined" || !archiveInterface) return;
-        let items = archiveInterface.recoveryItems;
+        if (!root.backend) return;
+        let items = root.backend.recoveryItems;
         if (!items) return;
 
+        let selCount = 0;
         for (let i = 0; i < items.length; ++i) {
             let it = items[i];
+            if (it.checked) selCount++;
             recoveryListModel.append({
                 name: it.name,
                 path: it.path,
@@ -189,6 +193,7 @@ Page {
                 checked: it.checked
             });
         }
+        root.selectedItemsCount = selCount;
 
         if (recoveryListModel.count > 0) {
             root.selectedItem = recoveryListModel.get(0);
@@ -206,14 +211,7 @@ Page {
         for (let i = 0; i < recoveryListModel.count; ++i) {
             recoveryListModel.setProperty(i, "checked", selectAll);
         }
-    }
-
-    readonly property int selectedItemsCount: {
-        let cnt = 0;
-        for (let i = 0; i < recoveryListModel.count; ++i) {
-            if (recoveryListModel.get(i).checked) cnt++;
-        }
-        return cnt;
+        root.selectedItemsCount = selectAll ? recoveryListModel.count : 0;
     }
 
     readonly property bool allItemsChecked: (recoveryListModel.count > 0) && (selectedItemsCount === recoveryListModel.count)
@@ -263,27 +261,9 @@ Page {
             }
         }
 
-        let res = archiveInterface.testRecoveryBatch(pathsToCheck);
-        let passed = res.passed || 0;
-        let failed = res.failed || 0;
-        let missing = res.missing || 0;
-        let truncated = res.truncated || 0;
-
-        if (failed > 0 || missing > 0 || truncated > 0) {
-            errorDialog.showError(
-                "Integrity Anomalies Detected",
-                "CRC verification completed:\n\n" +
-                "• " + passed + " file(s) PASSED (CRC-32 checksum matched)\n" +
-                (truncated > 0 ? ("• " + truncated + " file(s) FAILED / TRUNCATED (CRC mismatch)\n") : "") +
-                (missing > 0 ? ("• " + missing + " file(s) NOT FOUND (missing payload stream)") : "")
-            );
-        } else {
-            testSuccessDialog.showTestOk(
-                "All Selected Files Passed",
-                "Integrity check verified " + passed + " files",
-                "All " + passed + " selected files passed CRC-32 integrity validation without errors.\nEvery data block matches its TOC entry.",
-                "\ue8e8"
-            );
+        progressWindow.show();
+        if (root.backend) {
+            root.backend.testRecoveryBatch(pathsToCheck);
         }
     }
 
@@ -305,7 +285,10 @@ Page {
         property var pendingPaths: []
         onAccepted: {
             let outDir = selectedFolder.toString();
-            archiveInterface.extractRecoveryBatch(pendingPaths, outDir);
+            progressWindow.show();
+            if (root.backend) {
+                root.backend.extractRecoveryBatch(pendingPaths, outDir);
+            }
         }
     }
 
@@ -865,6 +848,7 @@ Page {
 
                     // Sticky Tree Header
                     Rectangle {
+                        id: stickyRecoveryHeader
                         Layout.fillWidth: true
                         height: 28
                         color: Colors.bgElevated
@@ -957,6 +941,178 @@ Page {
                                 Layout.preferredWidth: 75
                                 horizontalAlignment: Text.AlignRight
                             }
+
+                            // Reserved space slot for circular find button
+                            Item {
+                                Layout.preferredWidth: 26
+                                Layout.fillHeight: true
+                            }
+                        }
+
+                        // Circular Find Button (Morphs into width-expanding text input)
+                        Rectangle {
+                            id: stickyRecoveryHeaderFindBar
+                            anchors.right: parent.right
+                            anchors.rightMargin: 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            z: 20
+
+                            property bool isOpen: false
+                            width: isOpen ? 230 : 24
+                            height: 24
+                            radius: 12
+
+                            color: isOpen ? Colors.bgElevated : (recFindBtnMouse.containsMouse ? Colors.bgHover : Colors.bgSurface)
+                            border.color: isOpen ? Colors.goldPrimary : (recFindBtnMouse.containsMouse ? Colors.goldPrimary : Colors.borderSubtle)
+                            border.width: isOpen ? 1.5 : 1
+
+                            Behavior on width {
+                                NumberAnimation {
+                                    duration: 220
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+                            Behavior on color { ColorAnimation { duration: 150 } }
+                            Behavior on border.color { ColorAnimation { duration: 150 } }
+
+                            MouseArea {
+                                id: recFindBtnMouse
+                                anchors.fill: parent
+                                enabled: !stickyRecoveryHeaderFindBar.isOpen
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    stickyRecoveryHeaderFindBar.openFind();
+                                }
+                            }
+
+                            ToolTip.visible: recFindBtnMouse.containsMouse && !stickyRecoveryHeaderFindBar.isOpen
+                            ToolTip.delay: 400
+                            ToolTip.text: "Find files (Ctrl+F)"
+
+                            function openFind() {
+                                isOpen = true;
+                                Qt.callLater(function() {
+                                    recFindInput.forceActiveFocus();
+                                    recFindInput.selectAll();
+                                });
+                            }
+
+                            function closeFind() {
+                                recFindInput.text = "";
+                                root.recoveryFindQuery = "";
+                                isOpen = false;
+                            }
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: stickyRecoveryHeaderFindBar.isOpen ? 7 : 5
+                                anchors.rightMargin: stickyRecoveryHeaderFindBar.isOpen ? 4 : 5
+                                spacing: 4
+
+                                Text {
+                                    text: "\ue8b6"
+                                    font.family: materialIcons.name
+                                    font.pixelSize: 13
+                                    color: stickyRecoveryHeaderFindBar.isOpen ? Colors.goldPrimary : (recFindBtnMouse.containsMouse ? Colors.goldPrimary : Colors.textMuted)
+                                    Layout.alignment: Qt.AlignVCenter
+                                    Layout.preferredWidth: 14
+                                    horizontalAlignment: Text.AlignHCenter
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: stickyRecoveryHeaderFindBar.isOpen
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            recFindInput.forceActiveFocus();
+                                            recFindInput.accepted();
+                                        }
+                                    }
+                                }
+
+                                Item {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    visible: stickyRecoveryHeaderFindBar.isOpen || stickyRecoveryHeaderFindBar.width > 35
+                                    clip: true
+
+                                    TextInput {
+                                        id: recFindInput
+                                        anchors.fill: parent
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        font.family: Colors.fontFamily
+                                        font.pixelSize: 11
+                                        color: Colors.textMain
+                                        selectionColor: Colors.goldPrimary
+                                        selectedTextColor: Colors.textOnGold
+                                        selectByMouse: true
+                                        activeFocusOnTab: true
+
+                                        onAccepted: {
+                                            root.recoveryFindQuery = text;
+                                        }
+
+                                        onTextChanged: {
+                                            if (text.trim().length === 0 && root.recoveryFindQuery.length > 0) {
+                                                root.recoveryFindQuery = "";
+                                            }
+                                        }
+
+                                        Keys.onEscapePressed: {
+                                            if (text.length > 0) {
+                                                text = "";
+                                                root.recoveryFindQuery = "";
+                                            } else {
+                                                stickyRecoveryHeaderFindBar.closeFind();
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        anchors.fill: parent
+                                        verticalAlignment: Text.AlignVCenter
+                                        visible: !recFindInput.text && !recFindInput.activeFocus
+                                        text: "Filter files..."
+                                        color: Colors.textMuted
+                                        font.family: Colors.fontFamily
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                    }
+                                }
+
+                                Rectangle {
+                                    visible: stickyRecoveryHeaderFindBar.isOpen
+                                    Layout.preferredWidth: 16
+                                    Layout.preferredHeight: 16
+                                    Layout.alignment: Qt.AlignVCenter
+                                    radius: 8
+                                    color: recCloseMouse.containsMouse ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.08)) : "transparent"
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "\ue5cd"
+                                        font.family: materialIcons.name
+                                        font.pixelSize: 12
+                                        color: recCloseMouse.containsMouse ? Colors.goldPrimary : Colors.textMuted
+                                    }
+
+                                    MouseArea {
+                                        id: recCloseMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (recFindInput.text.length > 0) {
+                                                recFindInput.text = "";
+                                                root.recoveryFindQuery = "";
+                                                recFindInput.forceActiveFocus();
+                                            } else {
+                                                stickyRecoveryHeaderFindBar.closeFind();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -966,7 +1122,7 @@ Page {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        spacing: 2
+                        spacing: (root.recoveryFindQuery.trim().length > 0) ? 0 : 2
                         boundsBehavior: Flickable.StopAtBounds
                         model: recoveryListModel
 
@@ -983,7 +1139,21 @@ Page {
                         delegate: Item {
                             id: rowDelegate
                             width: recoveryTreeListView.width
-                            height: 34
+                            readonly property string itemName: model.name || ""
+                            readonly property string itemPath: model.path || ""
+                            readonly property bool isSearching: root.recoveryFindQuery.trim().length > 0
+                            readonly property bool matchesFilter: {
+                                if (!isSearching) return true;
+                                let q = root.recoveryFindQuery.trim().toLowerCase();
+                                let nameMatch = itemName.toLowerCase().indexOf(q) !== -1;
+                                let pathMatch = itemPath.toLowerCase().indexOf(q) !== -1;
+                                return nameMatch || pathMatch;
+                            }
+                            readonly property bool isRowVisible: matchesFilter
+
+                            height: isRowVisible ? 34 : 0
+                            visible: isRowVisible
+                            clip: true
 
                             readonly property string itemState: model.state || "Ok"
                             readonly property bool isSelected: (root.selectedItem && root.selectedItem.path === model.path)
@@ -992,6 +1162,7 @@ Page {
                             Rectangle {
                                 id: rowBackground
                                 anchors.fill: parent
+                                anchors.bottomMargin: (root.recoveryFindQuery.trim().length > 0) ? 2 : 0
                                 radius: 6
                                 clip: true
 
@@ -1135,6 +1306,7 @@ Page {
                                                 mouse.accepted = true;
                                                 let nextVal = !Boolean(model.checked);
                                                 recoveryListModel.setProperty(index, "checked", nextVal);
+                                                if (nextVal) root.selectedItemsCount++; else root.selectedItemsCount--;
                                                 if (root.selectedItem && root.selectedItem.path === model.path) {
                                                     root.selectedItem.checked = nextVal;
                                                 }
@@ -1165,6 +1337,35 @@ Page {
                                         color: Colors.textMain
                                         elide: Text.ElideRight
                                         Layout.fillWidth: true
+                                    }
+
+                                    // Finding Match Badge
+                                    Rectangle {
+                                        visible: rowDelegate.isSearching && rowDelegate.matchesFilter
+                                        Layout.preferredHeight: 18
+                                        Layout.preferredWidth: 64
+                                        radius: 9
+                                        color: Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.18) : Qt.rgba(0.69, 0.51, 0.12, 0.14)
+                                        border.color: Colors.goldBorder
+                                        border.width: 1
+
+                                        RowLayout {
+                                            anchors.centerIn: parent
+                                            spacing: 3
+                                            Text {
+                                                text: "\ue8b6"
+                                                font.family: materialIcons.name
+                                                font.pixelSize: 10
+                                                color: Colors.goldPrimary
+                                            }
+                                            Text {
+                                                text: "1 match"
+                                                font.family: Colors.fontFamily
+                                                font.pixelSize: 10
+                                                font.weight: Font.DemiBold
+                                                color: Colors.goldPrimary
+                                            }
+                                        }
                                     }
 
                                     // Status Badge Pill
@@ -1293,6 +1494,7 @@ Page {
                                         if (mouse.x <= 34 && mouse.button === Qt.LeftButton) {
                                             let nextVal = !Boolean(model.checked);
                                             recoveryListModel.setProperty(index, "checked", nextVal);
+                                            if (nextVal) root.selectedItemsCount++; else root.selectedItemsCount--;
                                             if (root.selectedItem && root.selectedItem.path === model.path) {
                                                 root.selectedItem.checked = nextVal;
                                             }
@@ -1878,19 +2080,9 @@ Page {
                                 return;
                             }
 
-                            let res = archiveInterface.testRecoveryItem(item.path);
-                            if (res.success) {
-                                testSuccessDialog.showTestOk(
-                                    "CRC Check Passed",
-                                    "Integrity verification passed for " + item.name,
-                                    "Calculated CRC32 (" + res.computedCrc + ") perfectly matches TOC block checksum record (" + res.expectedCrc + ").\nAll payload blocks are intact.",
-                                    "\ue8e8"
-                                );
-                            } else {
-                                errorDialog.showError(
-                                    "CRC Check Failed",
-                                    "Integrity check failed for '" + item.name + "':\n\n" + res.message
-                                );
+                            progressWindow.show();
+                            if (root.backend) {
+                                root.backend.testRecoveryItem(item.path);
                             }
                         }
                     }
@@ -2275,7 +2467,10 @@ Page {
             if (path && path.length > 0) {
                 root.selectedItem = null;
                 recoveryListModel.clear();
-                archiveInterface.recoverArchive(path, password);
+                root.selectedItemsCount = 0;
+                if (root.backend) {
+                    root.backend.loadArchive(path, password);
+                }
             }
         }
         onRejected: {
@@ -2289,6 +2484,7 @@ Page {
     // =========================================================
     ProgressWindow {
         id: progressWindow
+        backend: root.backend
     }
 
     // =========================================================
@@ -2297,7 +2493,7 @@ Page {
     Rectangle {
         anchors.fill: parent
         color: Colors.isDarkMode ? Qt.rgba(0.06, 0.08, 0.11, 0.88) : Qt.rgba(0.96, 0.97, 0.99, 0.88)
-        visible: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.isRecovering : false
+        visible: root.backend ? root.backend.isLoading : false
         z: 100
 
         ColumnLayout {
@@ -2306,7 +2502,7 @@ Page {
 
             BusyIndicator {
                 Layout.alignment: Qt.AlignHCenter
-                running: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.isRecovering : false
+                running: root.backend ? root.backend.isLoading : false
             }
 
             ColumnLayout {

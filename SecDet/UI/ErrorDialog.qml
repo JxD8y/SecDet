@@ -13,6 +13,7 @@ Dialog {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     padding: 18
 
+
     property string errorTitle: "Archive Operation Error"
     property string errorMessage: ""
     property bool copyFeedback: false
@@ -82,9 +83,14 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 14
 
-        // ==========================================
-        // --- Header: Icon Badge, Title & Close ---
-        // ==========================================
+        focus: true;
+        Keys.onPressed: (event) =>{
+            if(event.key === Qt.Key_Enter || event.key === Qt.Key_Return){
+                errorDialog.close();
+                event.accepted = true;
+            }
+        }
+
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
@@ -99,7 +105,7 @@ Dialog {
 
                 Text {
                     anchors.centerIn: parent
-                    text: "\ue000" // error / warning round icon
+                    text: "\ue000"
                     font.family: materialIcons.name
                     font.pixelSize: 22
                     color: "#e05353"
@@ -128,7 +134,6 @@ Dialog {
                 }
             }
 
-            // Close button (X)
             Rectangle {
                 width: 26
                 height: 26
@@ -160,10 +165,7 @@ Dialog {
             height: 1
             color: Colors.divider
         }
-
-        // ==========================================
-        // --- Detailed Error Message Box ---
-        // ==========================================
+        
         Rectangle {
             Layout.fillWidth: true
             implicitHeight: detailCol.implicitHeight + 18
@@ -189,8 +191,7 @@ Dialog {
                         color: "#e05353"
                         Layout.fillWidth: true
                     }
-
-                    // Copy button
+                    
                     Item {
                         implicitWidth: copyRow.implicitWidth
                         implicitHeight: copyRow.implicitHeight
@@ -202,7 +203,7 @@ Dialog {
                             spacing: 4
 
                             Text {
-                                text: errorDialog.copyFeedback ? "\ue876" : "\ue14d" // checkmark or content_copy
+                                text: errorDialog.copyFeedback ? "\ue876" : "\ue14d"
                                 font.family: materialIcons.name
                                 font.pixelSize: 12
                                 color: errorDialog.copyFeedback ? "#4ade80" : Colors.textMuted
@@ -246,10 +247,7 @@ Dialog {
                 }
             }
         }
-
-        // ==========================================
-        // --- Recovery Recommendation Callout ---
-        // ==========================================
+        
         Rectangle {
             visible: errorDialog.showRecoveryButton
             Layout.fillWidth: true
@@ -274,7 +272,7 @@ Dialog {
 
                     Text {
                         anchors.centerIn: parent
-                        text: "\ue869" // build / repair tool icon
+                        text: "\ue869"
                         font.family: materialIcons.name
                         font.pixelSize: 15
                         color: Colors.isDarkMode ? "#34d399" : "#059669"
@@ -304,18 +302,14 @@ Dialog {
                 }
             }
         }
-
-        // ==========================================
-        // --- Footer: Action Buttons ---
-        // ==========================================
+        
         RowLayout {
             Layout.fillWidth: true
             spacing: 10
 
             Item { Layout.fillWidth: true }
-
-            // Recovery Action Button (Only visible when Error is invalid Toc during archive load)
-            Rectangle {
+           
+            Rectangle { // Recovery tool button
                 id: recoveryBtnRect
                 visible: errorDialog.showRecoveryButton
                 implicitWidth: recoveryRow.implicitWidth + 24
@@ -335,7 +329,7 @@ Dialog {
                     spacing: 6
 
                     Text {
-                        text: "\ue869" // build / wrench tool icon
+                        text: "\ue869"
                         font.family: materialIcons.name
                         font.pixelSize: 14
                         color: "#ffffff"

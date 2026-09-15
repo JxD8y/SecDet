@@ -20,6 +20,8 @@ Window {
     // ==========================================
     // --- Progress & Operation State Properties ---
     // ==========================================
+    property var backend: (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface : null
+
     property string currentFilePath: ""
     property string currentFileName: ""
     property real fileProgress: 0.0          // 0.0 to 1.0
@@ -29,8 +31,8 @@ Window {
         if (typeof multiPartProgress !== "undefined" && multiPartProgress && multiPartProgress.calculatedOverallProgress > 0.0) {
             return multiPartProgress.calculatedOverallProgress;
         }
-        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.overallProgress > 0.0) {
-            return archiveInterface.overallProgress;
+        if (backend && backend.overallProgress > 0.0) {
+            return backend.overallProgress;
         }
         return 0.0;
     }
@@ -63,8 +65,8 @@ Window {
     signal completed()
 
     onPauseToggled: function(paused) {
-        if (typeof archiveInterface !== "undefined" && archiveInterface) {
-            archiveInterface.setOperationPaused(paused);
+        if (backend) {
+            backend.setOperationPaused(paused);
         }
     }
 
@@ -75,13 +77,13 @@ Window {
         isPaused = false;
         elapsedSeconds = 0;
         remainingSeconds = 0;
-        lastObservedProgress = (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.overallProgress : 0.0;
+        lastObservedProgress = backend ? backend.overallProgress : 0.0;
         lastProgressChangeTime = Date.now();
         speedMBs = 0.0;
         smoothedSpeedMBs = 0.0;
         lastSampleTime = Date.now();
-        lastCompressedBytes = (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.totalCompressedBytes : 0;
-        lastProcessedBytes = (typeof archiveInterface !== "undefined" && archiveInterface) ? archiveInterface.totalProcessedBytes : 0;
+        lastCompressedBytes = backend ? backend.totalCompressedBytes : 0;
+        lastProcessedBytes = backend ? backend.totalProcessedBytes : 0;
         speedGraph.reset();
         testCloseTimer.stop();
         if (typeof testOkDialog !== "undefined" && testOkDialog) {
@@ -114,31 +116,31 @@ Window {
             isCanceling = false;
             isCompleted = false;
             isFailed = false;
-            var hasActiveTask = (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy);
+            var hasActiveTask = (backend && backend.isBusy);
             if (hasActiveTask) {
                 // Synchronize live progress and pause state with running background task
-                progressWindow.isPaused = archiveInterface.isPaused;
-                progressWindow.overallProgress = archiveInterface.overallProgress;
-                progressWindow.fileProgress = archiveInterface.fileProgress;
-                if (archiveInterface.totalFiles > 0) {
-                    progressWindow.processedFiles = archiveInterface.processedFiles;
-                    progressWindow.totalFiles = archiveInterface.totalFiles;
+                progressWindow.isPaused = backend.isPaused;
+                progressWindow.overallProgress = backend.overallProgress;
+                progressWindow.fileProgress = backend.fileProgress;
+                if (backend.totalFiles > 0) {
+                    progressWindow.processedFiles = backend.processedFiles;
+                    progressWindow.totalFiles = backend.totalFiles;
                 }
-                if (archiveInterface.currentFileName.length > 0) {
-                    progressWindow.currentFileName = archiveInterface.currentFileName;
-                    progressWindow.currentFilePath = archiveInterface.currentFileName;
+                if (backend.currentFileName && backend.currentFileName.length > 0) {
+                    progressWindow.currentFileName = backend.currentFileName;
+                    progressWindow.currentFilePath = backend.currentFileName;
                 }
-                if (archiveInterface.currentOperationName.length > 0) {
-                    progressWindow.title = archiveInterface.currentOperationName;
+                if (backend.currentOperationName && backend.currentOperationName.length > 0) {
+                    progressWindow.title = backend.currentOperationName;
                 }
-                if (archiveInterface.totalBytes > 0) {
-                    progressWindow.totalSizeMB = archiveInterface.totalBytes / (1024.0 * 1024.0);
-                } else if (archiveInterface.jobModel && archiveInterface.jobModel.totalBytes > 0) {
-                    progressWindow.totalSizeMB = archiveInterface.jobModel.totalBytes / (1024.0 * 1024.0);
-                } else if (archiveInterface.totalArchiveSize > 0) {
-                    progressWindow.totalSizeMB = archiveInterface.totalArchiveSize / (1024.0 * 1024.0);
+                if (backend.totalBytes > 0) {
+                    progressWindow.totalSizeMB = backend.totalBytes / (1024.0 * 1024.0);
+                } else if (backend.jobModel && backend.jobModel.totalBytes > 0) {
+                    progressWindow.totalSizeMB = backend.jobModel.totalBytes / (1024.0 * 1024.0);
+                } else if (backend.totalArchiveSize > 0) {
+                    progressWindow.totalSizeMB = backend.totalArchiveSize / (1024.0 * 1024.0);
                 }
-                var initProcBytes = archiveInterface.totalProcessedBytes;
+                var initProcBytes = backend.totalProcessedBytes;
                 if (initProcBytes > 0) {
                     progressWindow.processedSizeMB = initProcBytes / (1024.0 * 1024.0);
                 } else if (progressWindow.totalSizeMB > 0) {
@@ -148,9 +150,9 @@ Window {
                     }
                 }
                 progressWindow.lastSampleTime = Date.now();
-                progressWindow.lastCompressedBytes = archiveInterface.totalCompressedBytes;
-                progressWindow.lastProcessedBytes = archiveInterface.totalProcessedBytes;
-                progressWindow.lastObservedProgress = archiveInterface.overallProgress;
+                progressWindow.lastCompressedBytes = backend.totalCompressedBytes;
+                progressWindow.lastProcessedBytes = backend.totalProcessedBytes;
+                progressWindow.lastObservedProgress = backend.overallProgress;
                 progressWindow.lastProgressChangeTime = Date.now();
             } else {
                 resetProgressState();
@@ -166,8 +168,8 @@ Window {
             if (typeof errorDialog !== "undefined" && errorDialog) {
                 errorDialog.close();
             }
-            if (typeof archiveInterface !== "undefined" && archiveInterface && !archiveInterface.isBusy) {
-                archiveInterface.syncJobsList();
+            if (backend && !backend.isBusy && typeof backend.syncJobsList === "function") {
+                backend.syncJobsList();
             }
         }
     }
@@ -177,24 +179,24 @@ Window {
         if (typeof cancelConfirmDialog !== "undefined" && cancelConfirmDialog) {
             cancelConfirmDialog.close();
         }
-        if (typeof archiveInterface !== "undefined" && archiveInterface && !archiveInterface.isBusy) {
+        if (backend && !backend.isBusy && typeof backend.syncJobsList === "function") {
             resetProgressState();
-            archiveInterface.syncJobsList();
+            backend.syncJobsList();
         }
     }
 
     onCanceled: {
         isCanceling = true;
-        if (typeof archiveInterface !== "undefined" && archiveInterface) {
-            archiveInterface.cancelCurrentOperation();
+        if (backend) {
+            backend.cancelCurrentOperation();
         }
     }
 
     Connections {
-        target: typeof archiveInterface !== "undefined" ? archiveInterface : null
+        target: progressWindow.backend
         function onIsPausedChanged() {
-            if (archiveInterface) {
-                progressWindow.isPaused = archiveInterface.isPaused;
+            if (backend) {
+                progressWindow.isPaused = backend.isPaused;
                 if (!progressWindow.isPaused) {
                     progressWindow.lastProgressChangeTime = Date.now();
                     progressWindow.lastSampleTime = Date.now();
@@ -202,32 +204,32 @@ Window {
             }
         }
         function onProgressChanged() {
-            if (archiveInterface) {
-                if (archiveInterface.isBusy && (progressWindow.isCompleted || progressWindow.isFailed)) {
+            if (backend) {
+                if (backend.isBusy && (progressWindow.isCompleted || progressWindow.isFailed)) {
                     progressWindow.isCompleted = false;
                     progressWindow.isFailed = false;
                 }
-                progressWindow.overallProgress = archiveInterface.overallProgress;
-                progressWindow.fileProgress = archiveInterface.fileProgress;
-                if (archiveInterface.totalFiles > 0) {
-                    progressWindow.processedFiles = archiveInterface.processedFiles;
-                    progressWindow.totalFiles = archiveInterface.totalFiles;
+                progressWindow.overallProgress = backend.overallProgress;
+                progressWindow.fileProgress = backend.fileProgress;
+                if (backend.totalFiles > 0) {
+                    progressWindow.processedFiles = backend.processedFiles;
+                    progressWindow.totalFiles = backend.totalFiles;
                 }
-                if (archiveInterface.currentFileName.length > 0) {
-                    progressWindow.currentFileName = archiveInterface.currentFileName;
-                    progressWindow.currentFilePath = archiveInterface.currentFileName;
+                if (backend.currentFileName && backend.currentFileName.length > 0) {
+                    progressWindow.currentFileName = backend.currentFileName;
+                    progressWindow.currentFilePath = backend.currentFileName;
                 }
-                if (archiveInterface.currentOperationName.length > 0) {
-                    progressWindow.title = archiveInterface.currentOperationName;
+                if (backend.currentOperationName && backend.currentOperationName.length > 0) {
+                    progressWindow.title = backend.currentOperationName;
                 }
-                if (archiveInterface.totalBytes > 0) {
-                    progressWindow.totalSizeMB = archiveInterface.totalBytes / (1024.0 * 1024.0);
-                } else if (archiveInterface.jobModel && archiveInterface.jobModel.totalBytes > 0) {
-                    progressWindow.totalSizeMB = archiveInterface.jobModel.totalBytes / (1024.0 * 1024.0);
-                } else if (archiveInterface.totalArchiveSize > 0) {
-                    progressWindow.totalSizeMB = archiveInterface.totalArchiveSize / (1024.0 * 1024.0);
+                if (backend.totalBytes > 0) {
+                    progressWindow.totalSizeMB = backend.totalBytes / (1024.0 * 1024.0);
+                } else if (backend.jobModel && backend.jobModel.totalBytes > 0) {
+                    progressWindow.totalSizeMB = backend.jobModel.totalBytes / (1024.0 * 1024.0);
+                } else if (backend.totalArchiveSize > 0) {
+                    progressWindow.totalSizeMB = backend.totalArchiveSize / (1024.0 * 1024.0);
                 }
-                var liveProcBytes = archiveInterface.totalProcessedBytes;
+                var liveProcBytes = backend.totalProcessedBytes;
                 if (liveProcBytes > 0) {
                     progressWindow.processedSizeMB = liveProcBytes / (1024.0 * 1024.0);
                 } else if (progressWindow.totalSizeMB > 0) {
@@ -263,12 +265,12 @@ Window {
                 progressWindow.remainingSeconds = 0;
                 timeLeftTimer.stop();
                 progressWindow.completed();
-                if (op === "Test File" || op === "Test Archive") {
+                if (op === "Test File" || op === "Test Archive" || op === "Recovery CRC Check") {
                     testOkDialog.showTestOk(
-                        (op === "Test Archive") ? "Archive is OK" : "File is OK",
-                        (op === "Test Archive") ? "Integrity verification passed" : "CRC32 checksum verified",
-                        (op === "Test Archive") ? "All archive files and data blocks verified successfully!\nCRC32 checksums match TOC records." : "File data decrypted and verified successfully!\nCRC32 checksum matches archive entry.",
-                        (op === "Test Archive") ? "\ue8e8" : "\ue86c"
+                        (op === "Test Archive" || op === "Recovery CRC Check") ? "Archive is OK" : "File is OK",
+                        (op === "Test Archive" || op === "Recovery CRC Check") ? "Integrity verification passed" : "CRC32 checksum verified",
+                        msg ? msg : ((op === "Test Archive") ? "All archive files and data blocks verified successfully!\nCRC32 checksums match TOC records." : "File data decrypted and verified successfully!\nCRC32 checksum matches archive entry."),
+                        (op === "Test Archive" || op === "Recovery CRC Check") ? "\ue8e8" : "\ue86c"
                     );
                     testCloseTimer.restart();
                 } else {
@@ -298,8 +300,8 @@ Window {
             }
             progressWindow.close();
             progressWindow.resetProgressState();
-            if (typeof archiveInterface !== "undefined" && archiveInterface) {
-                archiveInterface.syncJobsList();
+            if (backend && typeof backend.syncJobsList === "function") {
+                backend.syncJobsList();
             }
         }
     }
@@ -311,8 +313,8 @@ Window {
         onTriggered: {
             progressWindow.close();
             progressWindow.resetProgressState();
-            if (typeof archiveInterface !== "undefined" && archiveInterface) {
-                archiveInterface.syncJobsList();
+            if (backend && typeof backend.syncJobsList === "function") {
+                backend.syncJobsList();
             }
         }
     }
@@ -355,19 +357,19 @@ Window {
             if (dt <= 0.05) dt = 1.0;
             progressWindow.lastSampleTime = now;
 
-            var hasActiveBackend = (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy);
+            var hasActiveBackend = (backend && backend.isBusy);
             if (hasActiveBackend) {
-                var curComp = archiveInterface.totalCompressedBytes;
-                var curProc = archiveInterface.totalProcessedBytes;
+                var curComp = backend.totalCompressedBytes;
+                var curProc = backend.totalProcessedBytes;
 
                 // Resilient fallback: If backend byte counters are zero but overallProgress and totalBytes exist,
                 // derive processed bytes from overall progress
-                var totB = archiveInterface.totalBytes;
-                if (totB <= 0 && archiveInterface.jobModel && archiveInterface.jobModel.totalBytes > 0) {
-                    totB = archiveInterface.jobModel.totalBytes;
+                var totB = backend.totalBytes;
+                if (totB <= 0 && backend.jobModel && backend.jobModel.totalBytes > 0) {
+                    totB = backend.jobModel.totalBytes;
                 }
-                if (totB <= 0 && archiveInterface.totalArchiveSize > 0) {
-                    totB = archiveInterface.totalArchiveSize;
+                if (totB <= 0 && backend.totalArchiveSize > 0) {
+                    totB = backend.totalArchiveSize;
                 }
 
                 var activePct = progressWindow.displayOverallProgress;

@@ -6,16 +6,13 @@ import UI
 Item {
     id: root
 
-    // =========================================================================
-    // --- Configurable Status Colors (Harmonized with SecDet Fluent / SeaGreen & Gold) ---
-    // =========================================================================
-    property color colorIdle:     Colors.isDarkMode ? "#475569" : "#838b99"  // Slate / Idle
-    property color colorPending:  Colors.isDarkMode ? "#5c6b84" : "#64748b"  // Slate steel / Queued
-    property color colorRunning:  Colors.isDarkMode ? "#2e8b57" : "#228b50"  // Refined SeaGreen / Running
-    property color colorPaused:   Colors.isDarkMode ? Colors.goldPrimary : Colors.goldHover  // Amber Gold / Paused
-    property color colorAborted:  Colors.isDarkMode ? "#c86541" : "#b05232"  // Muted Terracotta / Aborted
-    property color colorFailed:   Colors.isDarkMode ? "#cd5c5c" : "#b23a3a"  // Indian Red / Error
-    property color colorFinished: Colors.isDarkMode ? "#236d43" : "#1a6b3e"  // Slight darker SeaGreen / Completed
+    property color colorIdle:     Colors.isDarkMode ? "#475569" : "#838b99"
+    property color colorPending:  Colors.isDarkMode ? "#5c6b84" : "#64748b"
+    property color colorRunning:  Colors.isDarkMode ? "#2e8b57" : "#228b50"
+    property color colorPaused:   Colors.isDarkMode ? Colors.goldPrimary : Colors.goldHover
+    property color colorAborted:  Colors.isDarkMode ? "#c86541" : "#b05232"
+    property color colorFailed:   Colors.isDarkMode ? "#cd5c5c" : "#b23a3a"
+    property color colorFinished: Colors.isDarkMode ? "#236d43" : "#1a6b3e"
 
     // Sleeker, standard 36px height for Fluent status bar aesthetic
     implicitHeight: 36
@@ -52,9 +49,6 @@ Item {
         source: "Fonts/MaterialIconsRound-Regular.otf"
     }
 
-    // =========================================================================
-    // --- Data Model for Jobs ---
-    // =========================================================================
     readonly property var activeJobModel: (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.jobModel && archiveInterface.jobModel.count > 0)
                                           ? archiveInterface.jobModel
                                           : jobModel
@@ -82,9 +76,6 @@ Item {
         id: jobModel
     }
 
-    // =========================================================================
-    // --- O(1) Aggregate Counts & Status Computation ---
-    // =========================================================================
     readonly property int finishedCount: {
         if (activeJobModel && activeJobModel.finishedCount !== undefined) {
             return activeJobModel.finishedCount;
@@ -207,12 +198,10 @@ Item {
         return overallPct + " overall";
     }
 
-    // Mode determination: For small job sets (<= 5), show discrete proportional cells; for large batches (> 5), show HUD Capsule
+    // job <= 5
     readonly property bool isSegmentedMode: currentJobCount > 1 && currentJobCount <= 5
 
-    // =========================================================================
-    // --- Optimization & Deletion Sequence Properties ---
-    // =========================================================================
+
     property bool isOptimizingSequenceActive: false
     property string optimizationBannerText: ""
     property var optimizationCallback: null
@@ -246,15 +235,6 @@ Item {
         }
     }
 
-    function demoDeletionAnimation() {
-        playOptimizationDeletionSequence([1, 2], function() {
-            // Demo finished
-        });
-    }
-
-    // =========================================================================
-    // --- Helper Functions & State Resolution ---
-    // =========================================================================
     function getStatusColor(state) {
         switch (state) {
             case "idle":     return colorIdle;
@@ -270,13 +250,13 @@ Item {
 
     function getStatusIcon(state) {
         switch (state) {
-            case "idle":     return "\ue836"; // radio_button_unchecked
-            case "pending":  return "\ue8b5"; // schedule
-            case "running":  return "\ue86a"; // sync
-            case "paused":   return "\ue034"; // pause
-            case "aborted":  return "\ue5c9"; // cancel
-            case "failed":   return "\ue000"; // error
-            case "finished": return "\ue86c"; // check_circle
+            case "idle":     return "\ue836";
+            case "pending":  return "\ue8b5";
+            case "running":  return "\ue86a";
+            case "paused":   return "\ue034";
+            case "aborted":  return "\ue5c9";
+            case "failed":   return "\ue000";
+            case "finished": return "\ue86c";
             default:         return "\ue836";
         }
     }
@@ -293,10 +273,8 @@ Item {
             default:         return state;
         }
     }
-
-    // Public navigation & trigger methods (fully backwards-compatible)
+    
     function scrollToRunningJob(animated) {
-        // High-performance focus action: triggers tooltip or updates active head
         if (currentRunningJobIndex >= 0) {
             triggerRunningToolTip(currentRunningJobIndex);
         }
@@ -426,10 +404,6 @@ Item {
         return false;
     }
 
-
-    // =========================================================================
-    // --- Outer Container (Capsule Aesthetic, Windows 11 Fluent) ---
-    // =========================================================================
     Rectangle {
         id: containerRect
         anchors.fill: parent
@@ -437,9 +411,7 @@ Item {
         color: root.containerBackgroundColor
         clip: true
 
-        // =====================================================================
-        // --- 1. Empty State (currentJobCount === 0) ---
-        // =====================================================================
+
         Item {
             anchors.fill: parent
             visible: root.currentJobCount === 0 && !root.isBusyWithTask && !root.isCollapsed
@@ -454,14 +426,14 @@ Item {
                 anchors.centerIn: parent
                 spacing: 6
                 Text {
-                    text: "\ue836" // radio_button_unchecked
+                    text: "\ue836"
                     font.family: materialIcons.name
                     font.pixelSize: root.isMinimal ? 11 : 13
                     color: Colors.textMuted
                     opacity: 0.7
                 }
                 Text {
-                    text: root.isMinimal ? "Idle" : "No active operations • System Idle"
+                    text: root.isMinimal ? "Idle" : "No job is queued"
                     font.family: Colors.fontFamily
                     font.pixelSize: root.isMinimal ? 10 : 11
                     color: Colors.textMuted
@@ -469,10 +441,7 @@ Item {
             }
         }
 
-        // =====================================================================
-        // --- 2. Discrete Proportional Mode (For small workflows: 2 to 8 items) ---
-        // Zero scrolling, equal or proportional distribution across the width!
-        // =====================================================================
+        // Segmented job view 1~8 jobs
         RowLayout {
             anchors.fill: parent
             anchors.margins: 2
@@ -490,19 +459,21 @@ Item {
                     clip: true
                     color: Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.04) : Qt.rgba(0, 0, 0, 0.03)
 
-                    readonly property color cellColor: root.getStatusColor(model.state)
-                    readonly property bool isCellRunning: model.state === "running"
-                    readonly property bool isCellDone: model.state === "finished" || model.state === "done"
+                    readonly property string cellState: (typeof model !== "undefined" && model && model.state) ? model.state : "idle"
+                    readonly property real cellProgress: (typeof model !== "undefined" && model && model.progress !== undefined) ? model.progress : 0.0
+                    readonly property string cellName: (typeof model !== "undefined" && model && model.name) ? model.name : ("Part " + (index + 1))
+                    readonly property color cellColor: root.getStatusColor(cellState)
+                    readonly property bool isCellRunning: cellState === "running"
+                    readonly property bool isCellDone: cellState === "finished" || cellState === "done"
 
-                    // Progress fill inside this discrete segment
                     Rectangle {
                         anchors.left: parent.left
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
-                        width: isCellDone ? parent.width : Math.max(0, parent.width * (model.progress !== undefined ? model.progress : 0))
+                        width: segmentCell.isCellDone ? parent.width : Math.max(0, parent.width * segmentCell.cellProgress)
                         radius: 3
                         color: segmentCell.cellColor
-                        opacity: isCellDone ? 0.9 : 0.75
+                        opacity: segmentCell.isCellDone ? 0.9 : 0.75
 
                         Behavior on width {
                             enabled: !root.isSuspended
@@ -518,10 +489,10 @@ Item {
                         spacing: 4
 
                         Text {
-                            text: root.getStatusIcon(model.state)
+                            text: root.getStatusIcon(segmentCell.cellState)
                             font.family: materialIcons.name
                             font.pixelSize: 11
-                            color: isCellDone || isCellRunning ? "#ffffff" : Colors.textMuted
+                            color: segmentCell.isCellDone || segmentCell.isCellRunning ? "#ffffff" : Colors.textMuted
                             Layout.alignment: Qt.AlignVCenter
 
                             RotationAnimation on rotation {
@@ -532,22 +503,22 @@ Item {
                         }
 
                         Text {
-                            text: model.name || ("Part " + (index + 1))
+                            text: segmentCell.cellName
                             font.family: Colors.fontFamily
                             font.pixelSize: 10
                             font.weight: Font.DemiBold
-                            color: isCellDone || isCellRunning ? "#ffffff" : Colors.textMain
+                            color: segmentCell.isCellDone || segmentCell.isCellRunning ? "#ffffff" : Colors.textMain
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignVCenter
                         }
 
                         Text {
-                            text: isCellDone ? "Done" : (segmentCell.isCellRunning ? "Working" : "Queued")
+                            text: segmentCell.isCellDone ? "Done" : (segmentCell.isCellRunning ? "Working" : "Queued")
                             font.family: Colors.fontFamily
                             font.pixelSize: 9
                             font.weight: Font.Bold
-                            color: isCellDone || isCellRunning ? "#ffffff" : Colors.textMuted
+                            color: segmentCell.isCellDone || segmentCell.isCellRunning ? "#ffffff" : Colors.textMuted
                             visible: segmentCell.width >= 70
                             Layout.alignment: Qt.AlignVCenter
                         }
@@ -572,14 +543,12 @@ Item {
                 }
             }
 
-            // Overall percentage badge pinned to right in segmented mode
+            // right side percent
             Rectangle {
                 Layout.preferredWidth: overallSegBadgeRow.implicitWidth + 14
                 Layout.fillHeight: true
                 radius: 4
                 color: Colors.isDarkMode ? Qt.rgba(0, 0, 0, 0.35) : Qt.rgba(255, 255, 255, 0.45)
-                border.color: root.getStatusColor(root.overallState)
-                border.width: 1
 
                 RowLayout {
                     id: overallSegBadgeRow
