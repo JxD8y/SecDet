@@ -7,9 +7,6 @@ import UI
 Rectangle {
     id: root
 
-    // ==========================================
-    // --- Public Properties & Datasets ---
-    // ==========================================
     property var speedData: []
     property int maxDataPoints: 20
 
@@ -57,8 +54,7 @@ Rectangle {
         duration: 300
         easing.type: Easing.OutCubic
     }
-
-    // Time formatting helper: converts seconds to MM:SS or HH:MM:SS
+    
     function formatTimeSec(totalSecs) {
         var secs = Math.max(0, Math.floor(totalSecs));
         var h = Math.floor(secs / 3600);
@@ -70,8 +66,7 @@ Rectangle {
         }
         return pad(m) + ":" + pad(s);
     }
-
-    // Dynamic timeline labels derived declaratively from elapsedSeconds
+    
     readonly property int activeWindowSeconds: Math.min(root.elapsedSeconds, root.maxDataPoints)
     readonly property string startTimeText: root.formatTimeSec(Math.max(0, root.elapsedSeconds - root.activeWindowSeconds))
     readonly property string midTimeText: root.formatTimeSec(Math.max(0, root.elapsedSeconds - Math.floor(root.activeWindowSeconds / 2)))
@@ -117,11 +112,6 @@ Rectangle {
         }
         peakSpeed10s = max10;
 
-        // 2. Dynamic Y-Axis Adjustment:
-        // Keep the bars around the middle of the chart (~50% height) by setting
-        // target Y-axis maximum to ~2.0x of the active speed window.
-        // If speed rises, instantly scale up maximum to prevent clipping.
-        // If speed is lower, smoothly lower maximum according to the 10-second peak.
         var peakActive = Math.max(max10, sVal);
         var targetMax = Math.max(6.0, Math.ceil(peakActive * 2.0));
 
@@ -169,30 +159,8 @@ Rectangle {
                     color: root.themeColorLight
                 }
             }
-
-            // 10s Peak Indicator
-            Text {
-                visible: root.peakSpeed10s > 0.01
-                text: "(10s Peak: " + root.peakSpeed10s.toFixed(1) + " MB/s)"
-                font.family: Colors.fontFamily
-                font.pixelSize: 8
-                color: Colors.textMuted
-            }
-
-            Item { Layout.fillWidth: true }
-
-            // Dynamic Y-Axis Scale Indicator
-            Text {
-                text: "Y-Scale: " + Math.round(root.yAxisMax) + " MB/s"
-                font.family: Colors.fontFamily
-                font.pixelSize: 8
-                color: Colors.textSubtle
-            }
         }
-
-        // ==========================================
-        // --- Speed Graph Canvas with Floating Badge ---
-        // ==========================================
+        
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -314,10 +282,7 @@ Rectangle {
                     ctx.fill();
                 }
             }
-
-            // ========================================================
-            // --- Floating Speed Tip Badge ("Fuzzed" to Speed Tip) ---
-            // ========================================================
+            
             Item {
                 id: floatingTipBadge
                 visible: root.speedData.length > 0 && root.currentSpeed > 0.01

@@ -114,24 +114,10 @@ Item {
                                            (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy)
 
     readonly property real calculatedOverallProgress: {
-        if (customOverallProgress >= 0.0) {
-            return Math.max(0.0, Math.min(1.0, customOverallProgress));
+        if (typeof archiveInterface !== "undefined" && archiveInterface) {
+            return archiveInterface.overallProgress;
         }
-        if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.isBusy && archiveInterface.overallProgress !== undefined && archiveInterface.overallProgress > 0.0) {
-            return Math.max(0.0, Math.min(1.0, archiveInterface.overallProgress));
-        }
-        if (activeJobModel && activeJobModel.overallProgress !== undefined && activeJobModel.overallProgress > 0.0) {
-            return Math.max(0.0, Math.min(1.0, activeJobModel.overallProgress));
-        }
-        if (currentJobCount <= 0) return 0.0;
-        var progressSum = finishedCount;
-        if (currentRunningJobIndex >= 0 && currentRunningJobIndex < currentJobCount) {
-            var rItem = activeJobModel.get(currentRunningJobIndex);
-            if (rItem && rItem.progress !== undefined) {
-                progressSum += rItem.progress;
-            }
-        }
-        return Math.max(0.0, Math.min(1.0, progressSum / currentJobCount));
+        return 0;
     }
 
     readonly property string overallState: {
@@ -566,21 +552,15 @@ Item {
             }
         }
 
-        // =====================================================================
-        // --- 3. Adaptive Segmented Capsule Mode (For Batch Workflows: > 5 or 1 item) ---
-        // $O(1)$ Constant-Time Proportional Track + Live Head HUD. ZERO scrolling!
-        // =====================================================================
         Item {
             anchors.fill: parent
             anchors.margins: 2
             visible: (!root.isSegmentedMode && (root.currentJobCount > 0 || root.isBusyWithTask)) && !root.isCollapsed
 
-            // --- 3A. Proportional Background Multi-State Track ---
             Item {
                 anchors.fill: parent
                 clip: true
 
-                // Finished track segment (SeaGreen fill from far left)
                 Rectangle {
                     id: finishedTrack
                     anchors.left: parent.left
@@ -596,7 +576,6 @@ Item {
                     }
                 }
 
-                // Active task pulse slice (adjacent to finished track)
                 Rectangle {
                     id: activeTrack
                     anchors.left: finishedTrack.right
@@ -615,7 +594,6 @@ Item {
                         NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
                     }
 
-                    // Breathing ambient pulse for running head
                     SequentialAnimation on opacity {
                         running: root.runningCount > 0 && root.visible && !root.isSuspended
                         loops: Animation.Infinite
@@ -624,7 +602,6 @@ Item {
                     }
                 }
 
-                // Failed segment indicator (anchored to the far right if any errors exist)
                 Rectangle {
                     id: failedTrack
                     anchors.right: parent.right
@@ -639,7 +616,6 @@ Item {
                 }
             }
 
-            // --- 3B. Live Heads-Up Display (HUD) ---
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 8
@@ -652,32 +628,7 @@ Item {
                     spacing: 7
 
                     // Live Rotating Indicator or State Icon
-                    Rectangle {
-                        width: 20
-                        height: 20
-                        radius: 10
-                        color: Qt.rgba(root.getStatusColor(root.overallState).r,
-                                       root.getStatusColor(root.overallState).g,
-                                       root.getStatusColor(root.overallState).b,
-                                       Colors.isDarkMode ? 0.25 : 0.15)
-                        border.color: root.getStatusColor(root.overallState)
-                        border.width: 1
-                        Layout.alignment: Qt.AlignVCenter
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: root.getStatusIcon(root.overallState)
-                            font.family: materialIcons.name
-                            font.pixelSize: 12
-                            color: root.getStatusColor(root.overallState)
-
-                            RotationAnimation on rotation {
-                                running: root.overallState === "running" && root.visible
-                                loops: Animation.Infinite
-                                from: 0; to: 360; duration: 1100
-                            }
-                        }
-                    }
+                    
 
                     // Task name & status detail
                     ColumnLayout {

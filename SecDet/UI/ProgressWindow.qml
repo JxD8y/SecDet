@@ -457,15 +457,9 @@ Window {
         }
     }
 
-    // ==========================================
-    // --- Reusable Sleek Components ---
-    // ==========================================
-
-    // SeaGreen theme tokens for Progress Bars
     readonly property color seaGreenPrimary: Colors.isDarkMode ? "#2e8b57" : "#228b50"
     readonly property color seaGreenLight: Colors.isDarkMode ? "#3cb371" : "#2e8b57"
 
-    // Taller Sleek Progress Bar (Matching app style with SeaGreen gradient)
     component TallProgressBar : Item {
         id: pBar
         property real value: 0.0
@@ -553,9 +547,6 @@ Window {
         }
     }
 
-    // ==========================================
-    // --- Window Content Layout ---
-    // ==========================================
     Rectangle {
         id: bgContainer
         anchors.fill: parent
@@ -582,20 +573,10 @@ Window {
             anchors.margins: 12
             spacing: 8
 
-            // ==========================================
-            // --- Section 1: File Path & File Progress ---
-            // ==========================================
+
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 5
-
-                SectionHeader {
-                    iconGlyph: "\ue2c7" // folder / file archive
-                    titleText: "File Path"
-                    extraText: progressWindow.isPaused ? "Paused" : "Active"
-                }
-
-                // <Icon><File Name> + <on the far right the progress percent>
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 6
