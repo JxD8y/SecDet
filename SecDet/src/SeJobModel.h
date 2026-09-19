@@ -99,6 +99,8 @@ private:
     void recalculateAggregates();
     void rebuildDisplayMapping();
     static QString statusToStateString(JobStatus status);
+    [[nodiscard]] int findJobIndex(int id, const QString &fileName) const;
+    void indexJobFile(const QString &path, size_t index);
 
     std::vector<JobData> m_jobs;
     std::vector<int> m_displayToSource;

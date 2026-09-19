@@ -16,8 +16,6 @@
 #include <QTemporaryDir>
 #include <QUrl>
 
-#include <libsecdet/SeCRC32.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -31,1046 +29,947 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <libsecdet/SeCRC32.h>
 #include <libsecdet/SeMetadata.h>
+#include "DelayedExtractMimeData.h"
 
-ArchiveInterface::ArchiveInterface(QObject *parent)
-    : QObject(parent), m_metadata(new SeMetadataObject(this)),
-      m_treeModel(new ArchiveTreeModel(this)),
-      m_jobModel(new SeJobModel(this)) {
+ArchiveInterface::ArchiveInterface(QObject *parent): QObject(parent),m_metadata(new SeMetadataObject(this)),
+                                                                    m_treeModel(new ArchiveTreeModel(this)),
+                                                                    m_jobModel(new SeJobModel(this))
+{
 
-  connect(m_jobModel, &SeJobModel::progressChanged, this,
-          &ArchiveInterface::progressChanged);
-  connect(m_jobModel, &SeJobModel::overallProgressChanged, this, [this]() {
-    m_overallProgress = m_jobModel->overallProgress();
-    emit progressChanged();
-  });
+    connect(m_jobModel, &SeJobModel::progressChanged, this, &ArchiveInterface::progressChanged);
+
+    connect(m_jobModel, &SeJobModel::overallProgressChanged, this, [this]() {
+        m_overallProgress = m_jobModel->overallProgress();
+        emit progressChanged();
+    });
 }
 
 ArchiveInterface::~ArchiveInterface() = default;
 
 int ArchiveInterface::pendingJobCount() const {
-  if (m_jobModel && m_jobModel->count() > 0) {
-    return m_jobModel->count();
-  }
-  return static_cast<int>(m_jobsList.size());
+    if (m_jobModel && m_jobModel->count() > 0) {
+        return m_jobModel->count();
+    }
+    return static_cast<int>(m_jobsList.size());
 }
 
 bool ArchiveInterface::hasUncommittedChanges() const {
-  if (pendingJobCount() > 0) {
-    return true;
-  }
-  if (!m_stagedPendingItems.empty()) {
-    return true;
-  }
-  if (m_archive && !m_archive->GetJobs().empty()) {
-    return true;
-  }
-  return false;
+    if (pendingJobCount() > 0) {
+        return true;
+    }
+    if (!m_stagedPendingItems.empty()) {
+        return true;
+    }
+    if (m_archive && !m_archive->GetJobs().empty()) {
+        return true;
+    }
+    return false;
 }
 
 QString ArchiveInterface::archiveFileName() const {
-  if (m_archivePath.isEmpty()) {
-    return QStringLiteral("No Archive");
-  }
-  return QFileInfo(m_archivePath).fileName();
+    if (m_archivePath.isEmpty()) {
+        return QStringLiteral("No Archive");
+    }
+    return QFileInfo(m_archivePath).fileName();
 }
 
 void ArchiveInterface::setBusy(bool busy) {
-  if (m_isBusy != busy) {
-    m_isBusy = busy;
-    emit isBusyChanged(busy);
-  }
+    if (m_isBusy != busy) {
+        m_isBusy = busy;
+        emit isBusyChanged(busy);
+    }
 }
 
 void ArchiveInterface::setStatusMessage(const QString &message) {
-  if (m_statusMessage != message) {
-    m_statusMessage = message;
-    emit statusMessageChanged(message);
-  }
+    if (m_statusMessage != message) {
+        m_statusMessage = message;
+        emit statusMessageChanged(message);
+    }
 }
 
 bool ArchiveInterface::createEmptyFile(const QString &filePath) {
-  if (filePath.isEmpty()) {
-    return false;
-  }
-  QString cleanPath = filePath;
-  if (cleanPath.startsWith(QStringLiteral("file:///"))) {
-    cleanPath = QUrl(cleanPath).toLocalFile();
-  } else if (cleanPath.startsWith(QStringLiteral("file://"))) {
-    cleanPath = cleanPath.mid(7);
-  }
-  if (!cleanPath.endsWith(QStringLiteral(".sda"), Qt::CaseInsensitive)) {
-    cleanPath += QStringLiteral(".sda");
-  }
-
-  QFileInfo fi(cleanPath);
-  cleanPath = fi.absoluteFilePath();
-
-  std::filesystem::path fsPath(cleanPath.toStdWString());
-  try {
-    if (fsPath.has_parent_path()) {
-      std::error_code ec;
-      std::filesystem::create_directories(fsPath.parent_path(), ec);
+    if (filePath.isEmpty()) {
+        return false;
     }
-    std::ofstream ofs(fsPath, std::ios::binary | std::ios::trunc);
-    if (!ofs.is_open()) {
-      return false;
+    QString cleanPath = filePath;
+    if (cleanPath.startsWith(QStringLiteral("file:///"))) {
+        cleanPath = QUrl(cleanPath).toLocalFile();
+    } else if (cleanPath.startsWith(QStringLiteral("file://"))) {
+        cleanPath = cleanPath.mid(7);
     }
-    ofs.close();
-    return true;
-  } catch (...) {
-    return false;
-  }
+    if (!cleanPath.endsWith(QStringLiteral(".sda"), Qt::CaseInsensitive)) {
+        cleanPath += QStringLiteral(".sda");
+    }
+
+    QFileInfo fi(cleanPath);
+    cleanPath = fi.absoluteFilePath();
+
+    std::filesystem::path fsPath(cleanPath.toStdWString());
+    try {
+        if (fsPath.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(fsPath.parent_path(), ec);
+        }
+        std::ofstream ofs(fsPath, std::ios::binary | std::ios::trunc);
+        if (!ofs.is_open()) {
+            return false;
+        }
+        ofs.close();
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
-bool ArchiveInterface::createArchive(const QString &filePath,
-                                     const QString &password,
-                                     int compressionLevel,
-                                     bool preserveMetadata,
-                                     const QStringList &initialFiles) {
-  if (filePath.isEmpty()) {
-    setStatusMessage(
-        QStringLiteral("Archive creation failed: empty path specified."));
-    emit errorOccurred(QStringLiteral("Create Archive Error"),
-                       QStringLiteral("Please specify an archive file path."));
-    return false;
-  }
+bool ArchiveInterface::createArchive(const QString &filePath,const QString &password,int compressionLevel,bool preserveMetadata,const QStringList &initialFiles) {
+    if (filePath.isEmpty()) {
+        setStatusMessage( QStringLiteral("Archive creation failed: empty path specified."));
+        emit errorOccurred(QStringLiteral("Create Archive Error"), QStringLiteral("Please specify an archive file path."));
+        return false;
+    }
 
-  QString cleanPath = filePath;
-  if (cleanPath.startsWith(QStringLiteral("file:///"))) {
-    cleanPath = QUrl(cleanPath).toLocalFile();
-  } else if (cleanPath.startsWith(QStringLiteral("file://"))) {
-    cleanPath = cleanPath.mid(7);
-  }
+    QString cleanPath = filePath;
+    if (cleanPath.startsWith(QStringLiteral("file:///"))) { // Open file dialog is QML object and returns qurl ready strings
+        cleanPath = QUrl(cleanPath).toLocalFile();
+    } else if (cleanPath.startsWith(QStringLiteral("file://"))) {
+        cleanPath = cleanPath.mid(7);
+    }
 
-  // Ensure .sda extension if none specified
-  if (!cleanPath.endsWith(QStringLiteral(".sda"), Qt::CaseInsensitive)) {
-    cleanPath += QStringLiteral(".sda");
-  }
+    if (!cleanPath.endsWith(QStringLiteral(".sda"), Qt::CaseInsensitive)) {
+        cleanPath += QStringLiteral(".sda");
+    }
 
-  QFileInfo fi(cleanPath);
-  cleanPath = fi.absoluteFilePath();
+    QFileInfo fi(cleanPath);
+    cleanPath = fi.absoluteFilePath();
 
-  // 1. Create the physical file on disk (prerequisite for
-  // SeArchive::CreateArchive)
-  if (!createEmptyFile(cleanPath)) {
-    QString errMsg =
-        QStringLiteral("Could not create archive file on disk: ") + cleanPath;
-    setStatusMessage(errMsg);
-    emit errorOccurred(QStringLiteral("File Error"), errMsg);
-    return false;
-  }
+    if (!createEmptyFile(cleanPath)) {
+        QString errMsg = QStringLiteral("Could not create archive file on disk: ") + cleanPath;
+        setStatusMessage(errMsg);
+        emit errorOccurred(QStringLiteral("File Error"), errMsg);
+        return false;
+    }
 
-  // 2. Call SeArchive::CreateArchive with password (registers key and calculates PVV inside)
-  uint16_t compLvl = static_cast<uint16_t>(std::clamp(compressionLevel, 1, 3));
-  auto arcRes = SeArchive::CreateArchive(1, compLvl, preserveMetadata,
-                                         cleanPath.toStdU16String(),
-                                         password.toStdString());
-  if (!arcRes) {
-    QString errMsg = QString::fromLocal8Bit(arcRes.error().message().c_str());
-    setStatusMessage(QStringLiteral("SeArchive creation failed: ") + errMsg);
-    emit errorOccurred(QStringLiteral("Archive Creation Failed"), errMsg);
-    return false;
-  }
-
-  auto tempArchive = std::make_unique<SeArchive>(std::move(*arcRes));
-
-  // 4. Call SaveArchive (SaveChangesSync) to save initial user metadata and TOC to disk immediately upon creation
-  auto saveRes = tempArchive->SaveChangesSync(nullptr, std::stop_token());
-  if (!saveRes) {
-    QString errMsg = QString::fromLocal8Bit(saveRes.error().message().c_str());
-    setStatusMessage(QStringLiteral("Failed to save archive metadata: ") +
-                     errMsg);
-    emit errorOccurred(QStringLiteral("Save Archive Failed"), errMsg);
-    return false;
-  }
-
-  // Release the temporary creation instance so the file is unlocked
-  tempArchive.reset();
-
-  // 5. Open the newly created archive in the main window and stage any initial files as jobs
-  return loadArchive(cleanPath, password, initialFiles);
-}
-
-bool ArchiveInterface::loadArchive(const QString &filePath,
-                                   const QString &password,
-                                   const QStringList &initialFilesToStage) {
-  m_stopSource.request_stop();
-  m_stopSource = std::stop_source();
-
-  QString cleanPath = filePath;
-  if (cleanPath.startsWith(QStringLiteral("file:///"))) {
-    cleanPath = QUrl(cleanPath).toLocalFile();
-  } else if (cleanPath.startsWith(QStringLiteral("file://"))) {
-    cleanPath = cleanPath.mid(7);
-  }
-  cleanPath = QUrl::fromPercentEncoding(cleanPath.toUtf8());
-
-  QFileInfo fi(cleanPath);
-  if (!fi.exists() || !fi.isFile()) {
-    QString errMsg =
-        QStringLiteral("Archive file not found:\n%1").arg(cleanPath);
-    setStatusMessage(errMsg);
-    emit errorOccurred(QStringLiteral("Open Archive Failed"), errMsg);
-    return false;
-  }
-
-  if (!cleanPath.endsWith(QStringLiteral(".sda"), Qt::CaseInsensitive)) {
-    QString errMsg =
-        QStringLiteral(
-            "The selected file '%1' is not a valid SecDet Archive (.sda).")
-            .arg(fi.fileName());
-    setStatusMessage(errMsg);
-    emit errorOccurred(QStringLiteral("Invalid Archive"), errMsg);
-    return false;
-  }
-
-  m_lastAttemptedArchivePath = cleanPath;
-  emit lastAttemptedArchivePathChanged();
-
-  setBusy(true);
-  m_isLoadingArchive = true;
-  emit isLoadingArchiveChanged(true);
-  setStatusMessage(QStringLiteral("Opening archive: ") + fi.fileName() +
-                   QStringLiteral("..."));
-
-  // Reset entropy calculations cleanly without forcing an immediate heavy disk
-  // scan on load
-  m_entropyRegions.clear();
-  m_averageEntropy = 0.0;
-  m_totalArchiveSize = 0;
-  m_isCalculatingEntropy = false;
-  emit entropyRegionsChanged();
-  emit entropyCalculationChanged();
-
-  std::stop_token stopToken = m_stopSource.get_token();
-
-  std::thread([this, cleanPath, password, initialFilesToStage, stopToken]() {
-    if (stopToken.stop_requested())
-      return;
-
-    auto arcRes = SeArchive::LoadArchiveFile(cleanPath.toStdU16String());
-    if (stopToken.stop_requested())
-      return;
+    uint16_t compLvl = static_cast<uint16_t>(std::clamp(compressionLevel, 1, 3));
+    auto arcRes = SeArchive::CreateArchive(1, compLvl, preserveMetadata,cleanPath.toStdU16String(), password.toStdString());
 
     if (!arcRes) {
-      auto err = arcRes.error();
-      QString errMsg = QString::fromLocal8Bit(err.message().c_str());
-      QString errTitle = QStringLiteral("Load Error");
-      if (err == SeError::InvalidTOCMagic || err == SeError::NoTOCFound ||
-          err == SeError::BufferUnderflow || err == SeError::BufferStringOverflow) {
-        errTitle = QStringLiteral("Invalid TOC");
-      }
-      QMetaObject::invokeMethod(
-          this,
-          [this, errTitle, errMsg]() {
-            m_isLoadingArchive = false;
-            emit isLoadingArchiveChanged(false);
-            setBusy(false);
-            setStatusMessage(QStringLiteral("Cannot open archive: ") + errMsg);
-            emit errorOccurred(errTitle, errMsg);
-          },
-          Qt::QueuedConnection);
-      return;
+        QString errMsg = QString::fromLocal8Bit(arcRes.error().message().c_str());
+        setStatusMessage(QStringLiteral("SeArchive creation failed: ") + errMsg);
+        emit errorOccurred(QStringLiteral("Archive Creation Failed"), errMsg);
+        return false;
     }
 
-    auto loadedArchive = std::make_unique<SeArchive>(std::move(*arcRes));
+    auto tempArchive = std::make_unique<SeArchive>(std::move(*arcRes));
 
-    bool isKeyRegistered = false;
-    if (!password.isEmpty()) {
-      auto keyRes = loadedArchive->RegisterKey(password.toStdString());
-      isKeyRegistered = keyRes.has_value();
-    } else {
-      isKeyRegistered = loadedArchive->IsKeyPresent();
+    auto saveRes = tempArchive->SaveChangesSync(nullptr, std::stop_token());
+    if (!saveRes) {
+        QString errMsg = QString::fromLocal8Bit(saveRes.error().message().c_str());
+        setStatusMessage(QStringLiteral("Failed to save archive metadata: ") + errMsg);
+        emit errorOccurred(QStringLiteral("Save Archive Failed"), errMsg);
+        return false;
+    }
+    tempArchive.reset();
+
+    return loadArchive(cleanPath, password, initialFiles);
+}
+
+bool ArchiveInterface::loadArchive(const QString &filePath,const QString &password,const QStringList &initialFilesToStage) {
+
+    m_stopSource.request_stop();
+    m_stopSource = std::stop_source(); // Stop source is global , doing this to stop any ongoing operation
+
+    QString cleanPath = filePath;
+    if (cleanPath.startsWith(QStringLiteral("file:///"))) {
+        cleanPath = QUrl(cleanPath).toLocalFile();
+    } else if (cleanPath.startsWith(QStringLiteral("file://"))) {
+        cleanPath = cleanPath.mid(7);
     }
 
-    if (stopToken.stop_requested())
-      return;
+    cleanPath = QUrl::fromPercentEncoding(cleanPath.toUtf8());
 
-    QMetaObject::invokeMethod(
-        this,
-        [this, cleanPath, password, initialFilesToStage,
-         arc = std::move(loadedArchive), isKeyRegistered]() mutable {
-          m_archive = std::move(arc);
-          m_archivePath = cleanPath;
-          m_metadata->updateFromSeMetadata(m_archive->GetMetadata());
-          m_metadata->setArchiveFileName(cleanPath);
-          m_isKeyRegistered = isKeyRegistered;
-          emit keyStatusChanged(m_isKeyRegistered);
+    QFileInfo fi(cleanPath);
+    if (!fi.exists() || !fi.isFile()) {
+        QString errMsg = QStringLiteral("Archive file not found:\n%1").arg(cleanPath);
+        setStatusMessage(errMsg);
+        emit errorOccurred(QStringLiteral("Open Archive Failed"), errMsg);
+        return false;
+    }
 
-          m_stagedPendingItems.clear();
-          refreshArchiveView();
+    if (!cleanPath.endsWith(QStringLiteral(".sda"), Qt::CaseInsensitive)) {
+        QString errMsg = QStringLiteral("The selected file '%1' is not a sda formated file.").arg(fi.fileName());
+        setStatusMessage(errMsg);
+        emit errorOccurred(QStringLiteral("Invalid file"), errMsg);
+        return false;
+    }
 
-          if (m_isKeyRegistered && !password.isEmpty()) {
-            std::thread([this, passStr = password.toStdString()]() {
-              this->testArchiveEntriesKey(passStr);
-            }).detach();
-          }
+    m_lastAttemptedArchivePath = cleanPath;
+    emit lastAttemptedArchivePathChanged();
 
-          m_isLoadingArchive = false;
-          emit isLoadingArchiveChanged(false);
-          setBusy(false);
-          setStatusMessage(QStringLiteral("Loaded archive: ") +
-                           archiveFileName());
-          emit archiveLoadedChanged(true);
+    setBusy(true);
+    m_isLoadingArchive = true;
+    emit isLoadingArchiveChanged(true);
+    setStatusMessage(QStringLiteral("Opening archive: ") + fi.fileName() + QStringLiteral("..."));
 
-          if (!initialFilesToStage.isEmpty()) {
-            this->addFilesToArchive(initialFilesToStage, QStringLiteral("/"));
-          }
-        },
-        Qt::QueuedConnection);
-  }).detach();
+    // ENTROPY CONCEPT IS REMOVED
 
-  return true;
+    std::stop_token stopToken = m_stopSource.get_token();
+
+    std::thread([this, cleanPath, password, initialFilesToStage, stopToken]() {
+        // Archive loader worker
+
+        if (stopToken.stop_requested())
+            return;
+
+        auto arcRes = SeArchive::LoadArchiveFile(cleanPath.toStdU16String());
+        if (stopToken.stop_requested())
+            return;
+
+        if (!arcRes) {
+            auto err = arcRes.error();
+            QString errMsg = QString::fromLocal8Bit(err.message().c_str());
+            QString errTitle = QStringLiteral("Load Error");
+
+            if (err == SeError::InvalidTOCMagic || err == SeError::NoTOCFound || err == SeError::BufferUnderflow || err == SeError::BufferStringOverflow) {
+                errTitle = QStringLiteral("Invalid TOC");
+            }
+
+            QMetaObject::invokeMethod( // XThread calling ui
+                this,
+                [this, errTitle, errMsg]() {
+                    m_isLoadingArchive = false;
+                    emit isLoadingArchiveChanged(false);
+                    setBusy(false);
+                    setStatusMessage(QStringLiteral("Cannot open archive: ") + errMsg);
+                    emit errorOccurred(errTitle, errMsg);
+                },
+                Qt::QueuedConnection);
+            return;
+        }
+
+        auto loadedArchive = std::make_unique<SeArchive>(std::move(*arcRes));
+
+        bool isKeyRegistered = false;
+        if (!password.isEmpty()) {
+            auto keyRes = loadedArchive->RegisterKey(password.toStdString());
+            isKeyRegistered = keyRes.has_value();
+        } else {
+            isKeyRegistered = loadedArchive->IsKeyPresent();
+        }
+
+        if (stopToken.stop_requested())
+            return;
+
+        QMetaObject::invokeMethod(
+            this,
+            [this, cleanPath, password, initialFilesToStage,
+                arc = std::move(loadedArchive), isKeyRegistered]() mutable {
+                m_archive = std::move(arc);
+                m_archivePath = cleanPath;
+                m_metadata->updateFromSeMetadata(m_archive->GetMetadata());
+                m_metadata->setArchiveFileName(cleanPath);
+                m_isKeyRegistered = isKeyRegistered;
+                emit keyStatusChanged(m_isKeyRegistered);
+
+                m_stagedPendingItems.clear();
+                refreshArchiveView();
+
+                // REPLACED WITH PVV
+
+                m_isLoadingArchive = false;
+                emit isLoadingArchiveChanged(false);
+                setBusy(false);
+                setStatusMessage(QStringLiteral("Loaded archive: ") + archiveFileName());
+                emit archiveLoadedChanged(true);
+
+                if (!initialFilesToStage.isEmpty()) {
+                    this->addFilesToArchive(initialFilesToStage, QStringLiteral("/"));
+                }
+            },
+            Qt::QueuedConnection);
+    }).detach();
+
+    return true;
 }
 
 void ArchiveInterface::closeArchive() {
-  m_fileMapCalcGeneration.fetch_add(1);
-  m_stopSource.request_stop();
-  m_stopSource = std::stop_source();
+    m_fileMapCalcGeneration.fetch_add(1);
+    m_stopSource.request_stop();
+    m_stopSource = std::stop_source();
 
-  m_isLoadingArchive = false;
-  emit isLoadingArchiveChanged(false);
-  m_isOptimizing = false;
-  emit isOptimizingChanged(false);
-  m_isCommitting = false;
-  emit isCommittingChanged(false);
-  m_isAddingFiles = false;
-  emit isAddingFilesChanged(false);
-  m_indexedFolders = 0;
-  m_indexedFiles = 0;
-  emit indexingCountersChanged();
+    m_isLoadingArchive = false;
+    emit isLoadingArchiveChanged(false);
+    m_isOptimizing = false;
+    emit isOptimizingChanged(false);
+    m_isCommitting = false;
+    emit isCommittingChanged(false);
+    m_isAddingFiles = false;
+    emit isAddingFilesChanged(false);
+    m_indexedFolders = 0;
+    m_indexedFiles = 0;
+    emit indexingCountersChanged();
 
-  m_archive = nullptr;
-  m_archivePath.clear();
-  m_isKeyRegistered = false;
-  if (m_treeModel)
+    m_archive = nullptr;
+    m_archivePath.clear();
+    m_isKeyRegistered = false;
+    if (m_treeModel)
     m_treeModel->clear();
-  if (m_jobModel)
+    if (m_jobModel)
     m_jobModel->clear();
-  m_archiveTree.clear();
-  m_jobsList.clear();
-  m_stagedPendingItems.clear();
+    m_archiveTree.clear();
+    m_jobsList.clear();
+    m_stagedPendingItems.clear();
 
-  m_entropyRegions.clear();
-  m_averageEntropy = 0.0;
-  m_totalArchiveSize = 0;
-  m_isCalculatingEntropy = false;
-  emit entropyRegionsChanged();
-  emit entropyCalculationChanged();
 
-  emit archiveLoadedChanged(false);
-  emit keyStatusChanged(false);
-  emit archiveTreeChanged();
-  emit jobsChanged();
-  setStatusMessage(QStringLiteral("No Archive Open"));
+    emit archiveLoadedChanged(false);
+    emit keyStatusChanged(false);
+    emit archiveTreeChanged();
+    emit jobsChanged();
+    setStatusMessage(QStringLiteral("No Archive Open"));
 }
 
 bool ArchiveInterface::registerKey(const QString &password) {
-  if (!m_archive) {
-    setStatusMessage(QStringLiteral("No active archive to register key."));
-    return false;
-  }
+    if (!m_archive) {
+        setStatusMessage(QStringLiteral("No active archive to register key."));
+        return false;
+    }
 
-  std::string passStr = password.toStdString();
-  auto keyRes = m_archive->RegisterKey(passStr);
-  if (!keyRes) {
-    QString errMsg = QString::fromLocal8Bit(keyRes.error().message().c_str());
-    setStatusMessage(QStringLiteral("Key registration failed: ") + errMsg);
-    emit errorOccurred(QStringLiteral("Key Registration Failed"), errMsg);
-    m_isKeyRegistered = false;
-    emit keyStatusChanged(false);
-    return false;
-  }
+    std::string passStr = password.toStdString();
+    auto keyRes = m_archive->RegisterKey(passStr);
+    if (!keyRes) {
+        QString errMsg = QString::fromLocal8Bit(keyRes.error().message().c_str());
+        setStatusMessage(QStringLiteral("Key registration failed: ") + errMsg);
+        emit errorOccurred(QStringLiteral("Key Registration Failed"), errMsg);
+        m_isKeyRegistered = false;
+        emit keyStatusChanged(false);
+        return false;
+    }
 
-  m_isKeyRegistered = true;
-  emit keyStatusChanged(true);
-  setStatusMessage(
-      QStringLiteral("Verifying encryption keys across archive entries..."));
+    m_isKeyRegistered = true;
+    emit keyStatusChanged(true);
 
-  // Spawn a background worker thread to test and update each entry in file tree
-  std::thread([this, passStr]() {
-    this->testArchiveEntriesKey(passStr);
-  }).detach();
-
-  return true;
+    return true;
 }
 
-void ArchiveInterface::testArchiveEntriesKey(const std::string &password) {
-  if (!m_archive)
-    return;
+bool ArchiveInterface::addFilesToArchive(const QStringList &fileUrls, const QString &targetArchiveFolder) {
+    if (!m_archive) {
+        setStatusMessage(QStringLiteral("Cannot add files: no open archive."));
+        return false;
+    }
 
-  const auto &entries = m_archive->GetTOC().GetEntries();
-  std::unordered_map<QString, bool> statusMap;
-  statusMap.reserve(entries.size());
+    if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
+        emit passwordRequired(m_archivePath);
+        return false;
+    }
 
-  int unlockedCount = 0;
-  int totalFileEntries = 0;
+    QString normTargetDir = targetArchiveFolder;
+    if (!normTargetDir.startsWith(u'/'))
+        normTargetDir.prepend(u'/');
 
-  for (const auto &entry : entries) {
-    if (entry.isDirectory())
-      continue;
-    totalFileEntries++;
+    if (!normTargetDir.endsWith(u'/'))
+        normTargetDir.append(u'/');
 
-    QString qPath = QString::fromStdU16String(entry.path);
-    if (!qPath.startsWith(u'/'))
-      qPath.prepend(u'/');
+    m_indexedFolders = 0;
+    m_indexedFiles = 0;
+    emit indexingCountersChanged();
 
-    auto testRes = m_archive->TestKeySync(entry, "");
-    bool isOk = testRes.has_value() && *testRes;
-    statusMap[qPath] = isOk;
-    if (isOk)
-      unlockedCount++;
-  }
+    m_isAddingFiles = true;
+    emit isAddingFilesChanged(true);
+    setStatusMessage(QStringLiteral("Indexing is in progress..."));
 
-  QMetaObject::invokeMethod(
-      this,
-      [this, statusMap = std::move(statusMap), unlockedCount,
-       totalFileEntries]() {
-        if (m_treeModel) {
-          m_treeModel->updateLockStatus(statusMap);
+    std::thread([this, fileUrls, normTargetDir]() {
+
+        std::vector<PendingStagedItem> newPendingItems;
+        int stagedCount = 0;
+        int totalFoldersIndexed = 0;
+        int totalFilesIndexed = 0;
+        auto lastUiPostTime = std::chrono::steady_clock::now();
+
+        for (const QString &rawUrl : fileUrls) { 
+            QString localPath = rawUrl;
+
+            if (localPath.startsWith(QStringLiteral("file:///"))) {
+                localPath = QUrl(localPath).toLocalFile();
+            }
+            else if (localPath.startsWith(QStringLiteral("file://"))) {
+                localPath = localPath.mid(7);
+            }
+            localPath = QUrl::fromPercentEncoding(localPath.toUtf8());
+
+            QFileInfo fi(localPath);
+            if (!fi.exists()) {
+                continue;
+            }
+
+            if (!m_archive)
+                break;
+
+            if (fi.isDir()) {
+            int baseFolders = totalFoldersIndexed;
+            int baseFiles = totalFilesIndexed;
+
+            auto progressCb = [&](size_t fCount, size_t dCount) {
+                totalFoldersIndexed = baseFolders + static_cast<int>(dCount);
+                totalFilesIndexed = baseFiles + static_cast<int>(fCount);
+
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUiPostTime).count() >= 40) {
+                lastUiPostTime = now;
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, d = totalFoldersIndexed, f = totalFilesIndexed]() {
+                        m_indexedFolders = d;
+                        m_indexedFiles = f;
+                        emit indexingCountersChanged();
+                    },
+                    Qt::QueuedConnection);
+                }
+            };
+
+            auto res = m_archive->AddDirectoryWithDetails(localPath.toStdU16String(),
+                                                            normTargetDir.toStdU16String(),
+                                                            progressCb);
+            if (res) {
+                for (const auto &discovered : *res) {
+                    PendingStagedItem item;
+                    item.localDiskPath = QString::fromStdU16String(discovered.diskPath);
+                    item.name = QString::fromStdU16String(discovered.name);
+                    item.archiveRelPath = QString::fromStdU16String(discovered.archiveRelPath);
+                    item.isDirectory = discovered.isDirectory;
+                    item.size = discovered.size;
+                    newPendingItems.push_back(std::move(item));
+                    stagedCount++;
+                }
+            } else {
+                QString errMsg =
+                    QString::fromLocal8Bit(res.error().message().c_str());
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, errMsg]() {
+                    emit errorOccurred(QStringLiteral("Add Directory Failed"),
+                                        errMsg);
+                    },
+                    Qt::QueuedConnection);
+            }
+            } 
+            else {
+                QString destRelPath = normTargetDir + fi.fileName();
+                auto res = m_archive->AddFile(destRelPath.toStdU16String(),localPath.toStdU16String());
+
+                if (res) {
+                    PendingStagedItem item;
+                    item.localDiskPath = localPath;
+                    item.name = fi.fileName();
+                    item.archiveRelPath = destRelPath;
+                    item.isDirectory = false;
+                    item.size = static_cast<qulonglong>(fi.size());
+                    newPendingItems.push_back(item);
+                    stagedCount++;
+                    totalFilesIndexed++;
+
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUiPostTime).count() >= 40) {
+                    lastUiPostTime = now;
+
+                    QMetaObject::invokeMethod(this,
+                        [this, d = totalFoldersIndexed, f = totalFilesIndexed]() {
+                            m_indexedFolders = d;
+                            m_indexedFiles = f;
+                            emit indexingCountersChanged();
+                        },
+                        Qt::QueuedConnection);
+                    }
+                } 
+                else {
+                    QString errMsg =
+                        QString::fromLocal8Bit(res.error().message().c_str());
+                    QMetaObject::invokeMethod(this,
+                        [this, errMsg]() {
+                            emit errorOccurred(QStringLiteral("Add File Failed"), errMsg);
+                        },
+                        Qt::QueuedConnection);
+                }
+            }
         }
-        if (unlockedCount > 0) {
-          setStatusMessage(
-              QStringLiteral("Key verified • %1 of %2 file(s) unlocked.")
-                  .arg(unlockedCount)
-                  .arg(totalFileEntries));
-        } else {
-          setStatusMessage(QStringLiteral(
-              "Key registered, but no matching encrypted files found."));
-        }
-      },
-      Qt::QueuedConnection);
+
+        QMetaObject::invokeMethod(this,[this, d = totalFoldersIndexed, f = totalFilesIndexed]() {
+                m_indexedFolders = d;
+                m_indexedFiles = f;
+                emit indexingCountersChanged();
+            },
+            Qt::QueuedConnection);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(600)); // delay beofore closing indexing popup
+
+        QMetaObject::invokeMethod(this,
+            [this, items = std::move(newPendingItems), stagedCount]() mutable {
+                for (auto &it : items) { // Possible UI chocking point
+                    m_stagedPendingItems.insert(it.archiveRelPath, std::move(it));
+                }
+                m_isAddingFiles = false;
+                emit isAddingFilesChanged(false);
+                syncJobsList();
+                buildArchiveTree();
+                setStatusMessage(QStringLiteral("Added %1 item(s) to archive (Staged for commit)").arg(stagedCount));
+            },
+            Qt::QueuedConnection);
+    }).detach();
+
+    return true;
 }
 
-bool ArchiveInterface::addFilesToArchive(const QStringList &fileUrls,
-                                         const QString &targetArchiveFolder) {
-  if (!m_archive) {
-    setStatusMessage(QStringLiteral("Cannot add files: no open archive."));
-    return false;
-  }
-
-  if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
-    emit passwordRequired(m_archivePath);
-    return false;
-  }
-
-  QString normTargetDir = targetArchiveFolder;
-  if (!normTargetDir.startsWith(u'/'))
-    normTargetDir.prepend(u'/');
-  if (!normTargetDir.endsWith(u'/'))
-    normTargetDir.append(u'/');
-
-  m_indexedFolders = 0;
-  m_indexedFiles = 0;
-  emit indexingCountersChanged();
-
-  m_isAddingFiles = true;
-  emit isAddingFilesChanged(true);
-  setStatusMessage(
-      QStringLiteral("Scanning folder structure in background..."));
-
-  std::thread([this, fileUrls, normTargetDir]() {
-    std::vector<PendingStagedItem> newPendingItems;
-    int stagedCount = 0;
-    int totalFoldersIndexed = 0;
-    int totalFilesIndexed = 0;
-    auto lastUiPostTime = std::chrono::steady_clock::now();
-
-    for (const QString &rawUrl : fileUrls) {
-      QString localPath = rawUrl;
-      if (localPath.startsWith(QStringLiteral("file:///"))) {
+void ArchiveInterface::scanFolderAsync(const QString &folderUrl, const QJSValue &callback) {
+    QString localPath = folderUrl;
+    if (localPath.startsWith(QStringLiteral("file:///"))) {
         localPath = QUrl(localPath).toLocalFile();
-      } else if (localPath.startsWith(QStringLiteral("file://"))) {
+    } else if (localPath.startsWith(QStringLiteral("file://"))) {
         localPath = localPath.mid(7);
-      }
-      localPath = QUrl::fromPercentEncoding(localPath.toUtf8());
+    }
+    localPath = QUrl::fromPercentEncoding(localPath.toUtf8());
 
-      QFileInfo fi(localPath);
-      if (!fi.exists() || !m_archive) {
-        continue;
-      }
+    QJSValue cbCopy = callback;
 
-      if (!m_archive)
-        break;
+    std::thread([this, localPath, cb = cbCopy]() mutable {
+        QFileInfo fi(localPath);
+        if (!fi.exists()) {
+            return;
+        }
 
-      if (fi.isDir()) {
-        int baseFolders = totalFoldersIndexed;
-        int baseFiles = totalFilesIndexed;
+        if (fi.isFile()) { // Using QVariant for file tree source is memory consuming
+            QVariantMap fileNode;
+            fileNode[QStringLiteral("name")] = fi.fileName();
+            fileNode[QStringLiteral("filePath")] = fi.absoluteFilePath();
+            fileNode[QStringLiteral("isFolder")] = false;
+            fileNode[QStringLiteral("realSize")] = SeFileEntryObject::formatBytes(fi.size());
+            fileNode[QStringLiteral("children")] = QVariantList();
 
-        auto progressCb = [&](size_t fCount, size_t dCount) {
-          totalFoldersIndexed = baseFolders + static_cast<int>(dCount);
-          totalFilesIndexed = baseFiles + static_cast<int>(fCount);
-
-          auto now = std::chrono::steady_clock::now();
-          if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUiPostTime).count() >= 40) {
-            lastUiPostTime = now;
-            QMetaObject::invokeMethod(
-                this,
-                [this, d = totalFoldersIndexed, f = totalFilesIndexed]() {
-                  m_indexedFolders = d;
-                  m_indexedFiles = f;
-                  emit indexingCountersChanged();
+            QMetaObject::invokeMethod(this,
+                [this, cb, fileNode]() mutable {
+                if (cb.isCallable()) {
+                    QJSEngine *engine = qjsEngine(this);
+                    if (engine) {
+                        QJSValue arg = engine->toScriptValue(fileNode);
+                        cb.call(QJSValueList{arg});
+                    }
+                }
                 },
                 Qt::QueuedConnection);
-          }
+            return;
+        }
+
+        if (!fi.isDir()) {
+            return;
+        }
+
+        std::function<QVariantMap(const QFileInfo &)> scanDirRecursive = [&](const QFileInfo &dirFi) -> QVariantMap
+        {
+            QVariantMap node;
+            node[QStringLiteral("name")] = dirFi.fileName();
+            node[QStringLiteral("filePath")] = dirFi.absoluteFilePath();
+            node[QStringLiteral("isFolder")] = true;
+            node[QStringLiteral("expanded")] = false;
+            node[QStringLiteral("realSize")] = QStringLiteral("-");
+
+            QDir dir(dirFi.absoluteFilePath());
+            QFileInfoList entries =
+                dir.entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot,
+                                QDir::DirsFirst | QDir::Name);
+            QVariantList children;
+            for (const auto &entry : entries) {
+            if (entry.isDir()) {
+                children.append(scanDirRecursive(entry));
+            } else {
+                QVariantMap fileNode;
+                fileNode[QStringLiteral("name")] = entry.fileName();
+                fileNode[QStringLiteral("filePath")] = entry.absoluteFilePath();
+                fileNode[QStringLiteral("isFolder")] = false;
+                fileNode[QStringLiteral("realSize")] =
+                    SeFileEntryObject::formatBytes(entry.size());
+                fileNode[QStringLiteral("children")] = QVariantList();
+                children.append(fileNode);
+            }
+            }
+            node[QStringLiteral("children")] = children;
+            return node;
         };
 
-        auto res = m_archive->AddDirectoryWithDetails(localPath.toStdU16String(),
-                                                      normTargetDir.toStdU16String(),
-                                                      progressCb);
-        if (res) {
-          for (const auto &discovered : *res) {
-            PendingStagedItem item;
-            item.localDiskPath = QString::fromStdU16String(discovered.diskPath);
-            item.name = QString::fromStdU16String(discovered.name);
-            item.archiveRelPath = QString::fromStdU16String(discovered.archiveRelPath);
-            item.isDirectory = discovered.isDirectory;
-            item.size = discovered.size;
-            newPendingItems.push_back(std::move(item));
-            stagedCount++;
-          }
-        } else {
-          QString errMsg =
-              QString::fromLocal8Bit(res.error().message().c_str());
-          QMetaObject::invokeMethod(
-              this,
-              [this, errMsg]() {
-                emit errorOccurred(QStringLiteral("Add Directory Failed"),
-                                   errMsg);
-              },
-              Qt::QueuedConnection);
-        }
-      } else {
-        QString destRelPath = normTargetDir + fi.fileName();
-        auto res = m_archive->AddFile(destRelPath.toStdU16String(),
-                                      localPath.toStdU16String());
-        if (res) {
-          PendingStagedItem item;
-          item.localDiskPath = localPath;
-          item.name = fi.fileName();
-          item.archiveRelPath = destRelPath;
-          item.isDirectory = false;
-          item.size = static_cast<qulonglong>(fi.size());
-          newPendingItems.push_back(item);
-          stagedCount++;
-          totalFilesIndexed++;
+        QVariantMap result = scanDirRecursive(fi);
 
-          auto now = std::chrono::steady_clock::now();
-          if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUiPostTime).count() >= 40) {
-            lastUiPostTime = now;
-            QMetaObject::invokeMethod(
-                this,
-                [this, d = totalFoldersIndexed, f = totalFilesIndexed]() {
-                  m_indexedFolders = d;
-                  m_indexedFiles = f;
-                  emit indexingCountersChanged();
-                },
-                Qt::QueuedConnection);
-          }
-        } else {
-          QString errMsg =
-              QString::fromLocal8Bit(res.error().message().c_str());
-          QMetaObject::invokeMethod(
-              this,
-              [this, errMsg]() {
-                emit errorOccurred(QStringLiteral("Add File Failed"), errMsg);
-              },
-              Qt::QueuedConnection);
-        }
-      }
-    }
-
-    // Immediately post the exact final counts to the UI
-    QMetaObject::invokeMethod(
-        this,
-        [this, d = totalFoldersIndexed, f = totalFilesIndexed]() {
-          m_indexedFolders = d;
-          m_indexedFiles = f;
-          emit indexingCountersChanged();
-        },
-        Qt::QueuedConnection);
-
-    // Wait 600 ms before closure so the user can see the final counts
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
-
-    QMetaObject::invokeMethod(
-        this,
-        [this, items = std::move(newPendingItems), stagedCount]() mutable {
-          for (auto &it : items) {
-            m_stagedPendingItems.insert(it.archiveRelPath, std::move(it));
-          }
-          m_isAddingFiles = false;
-          emit isAddingFilesChanged(false);
-          syncJobsList();
-          buildArchiveTree();
-          setStatusMessage(
-              QStringLiteral("Added %1 item(s) to archive (Staged for commit)")
-                  .arg(stagedCount));
-        },
-        Qt::QueuedConnection);
-  }).detach();
-
-  return true;
+        QMetaObject::invokeMethod(
+            this,
+            [this, cb, result]() mutable {
+                if (cb.isCallable()) {
+                    QJSEngine *engine = qjsEngine(this);
+                    if (engine) {
+                        QJSValue arg = engine->toScriptValue(result);
+                        cb.call(QJSValueList{arg});
+                    }
+                }
+            },
+            Qt::QueuedConnection);
+    }).detach();
 }
 
-void ArchiveInterface::scanFolderAsync(const QString &folderUrl,
-                                       const QJSValue &callback) {
-  QString localPath = folderUrl;
-  if (localPath.startsWith(QStringLiteral("file:///"))) {
-    localPath = QUrl(localPath).toLocalFile();
-  } else if (localPath.startsWith(QStringLiteral("file://"))) {
-    localPath = localPath.mid(7);
-  }
-  localPath = QUrl::fromPercentEncoding(localPath.toUtf8());
+bool ArchiveInterface::removeArchiveItem(const QString &archiveRelativePath, bool isDirectory) {
+    if (!m_archive)
+        return false;
 
-  QJSValue cbCopy = callback;
+    QString normPath = archiveRelativePath;
+    normPath.replace(u'\\', u'/');
 
-  std::thread([this, localPath, cb = cbCopy]() mutable {
-    QFileInfo fi(localPath);
-    if (!fi.exists()) {
-      return;
+    while (normPath.contains(QStringLiteral("//"))) {
+        normPath.replace(QStringLiteral("//"), QStringLiteral("/"));
     }
 
-    if (fi.isFile()) {
-      QVariantMap fileNode;
-      fileNode[QStringLiteral("name")] = fi.fileName();
-      fileNode[QStringLiteral("filePath")] = fi.absoluteFilePath();
-      fileNode[QStringLiteral("isFolder")] = false;
-      fileNode[QStringLiteral("realSize")] =
-          SeFileEntryObject::formatBytes(fi.size());
-      fileNode[QStringLiteral("children")] = QVariantList();
-
-      QMetaObject::invokeMethod(
-          this,
-          [this, cb, fileNode]() mutable {
-            if (cb.isCallable()) {
-              QJSEngine *engine = qjsEngine(this);
-              if (engine) {
-                QJSValue arg = engine->toScriptValue(fileNode);
-                cb.call(QJSValueList{arg});
-              }
-            }
-          },
-          Qt::QueuedConnection);
-      return;
+    if (!normPath.startsWith(u'/')) {
+        normPath.prepend(u'/');
     }
 
-    if (!fi.isDir()) {
-      return;
-    }
-
-    std::function<QVariantMap(const QFileInfo &)> scanDirRecursive =
-        [&](const QFileInfo &dirFi) -> QVariantMap {
-      QVariantMap node;
-      node[QStringLiteral("name")] = dirFi.fileName();
-      node[QStringLiteral("filePath")] = dirFi.absoluteFilePath();
-      node[QStringLiteral("isFolder")] = true;
-      node[QStringLiteral("expanded")] = false;
-      node[QStringLiteral("realSize")] = QStringLiteral("-");
-
-      QDir dir(dirFi.absoluteFilePath());
-      QFileInfoList entries =
-          dir.entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot,
-                            QDir::DirsFirst | QDir::Name);
-      QVariantList children;
-      for (const auto &entry : entries) {
-        if (entry.isDir()) {
-          children.append(scanDirRecursive(entry));
-        } else {
-          QVariantMap fileNode;
-          fileNode[QStringLiteral("name")] = entry.fileName();
-          fileNode[QStringLiteral("filePath")] = entry.absoluteFilePath();
-          fileNode[QStringLiteral("isFolder")] = false;
-          fileNode[QStringLiteral("realSize")] =
-              SeFileEntryObject::formatBytes(entry.size());
-          fileNode[QStringLiteral("children")] = QVariantList();
-          children.append(fileNode);
-        }
-      }
-      node[QStringLiteral("children")] = children;
-      return node;
-    };
-
-    QVariantMap result = scanDirRecursive(fi);
-
-    QMetaObject::invokeMethod(
-        this,
-        [this, cb, result]() mutable {
-          if (cb.isCallable()) {
-            QJSEngine *engine = qjsEngine(this);
-            if (engine) {
-              QJSValue arg = engine->toScriptValue(result);
-              cb.call(QJSValueList{arg});
-            }
-          }
-        },
-        Qt::QueuedConnection);
-  }).detach();
-}
-
-bool ArchiveInterface::removeArchiveItem(const QString &archiveRelativePath,
-                                         bool isDirectory) {
-  if (!m_archive)
-    return false;
-
-  QString normPath = archiveRelativePath;
-  normPath.replace(u'\\', u'/');
-  while (normPath.contains(QStringLiteral("//"))) {
-    normPath.replace(QStringLiteral("//"), QStringLiteral("/"));
-  }
-  if (!normPath.startsWith(u'/')) {
-    normPath.prepend(u'/');
-  }
-
-  QString pathWithSlash = normPath.endsWith(u'/') ? normPath : (normPath + u'/');
-  QString pathNoSlash = (normPath.length() > 1 && normPath.endsWith(u'/'))
+    QString pathWithSlash = normPath.endsWith(u'/') ? normPath : (normPath + u'/');
+    QString pathNoSlash = (normPath.length() > 1 && normPath.endsWith(u'/'))
                             ? normPath.left(normPath.length() - 1)
                             : normPath;
 
-  // Determine if target is a directory
-  bool isDir = isDirectory || normPath.endsWith(u'/');
-  if (!isDir) {
-    auto it1 = m_stagedPendingItems.constFind(pathWithSlash);
-    if (it1 != m_stagedPendingItems.constEnd() && it1->isDirectory) {
-      isDir = true;
-    } else {
-      auto it2 = m_stagedPendingItems.constFind(pathNoSlash);
-      if (it2 != m_stagedPendingItems.constEnd() && it2->isDirectory) {
-        isDir = true;
-      }
+    // Determine if target is a directory
+    bool isDir = isDirectory || normPath.endsWith(u'/');
+    if (!isDir) {
+        auto it1 = m_stagedPendingItems.constFind(pathWithSlash);
+        if (it1 != m_stagedPendingItems.constEnd() && it1->isDirectory) {
+            isDir = true;
+        }
+        else {
+            auto it2 = m_stagedPendingItems.constFind(pathNoSlash);
+            if (it2 != m_stagedPendingItems.constEnd() && it2->isDirectory) {
+                isDir = true;
+            }
+        }
     }
-  }
-  if (!isDir && m_archive) {
+
+    std::vector<int> jobIdsToRemove;
+    if (!isDir && m_archive) {
+        std::u16string u16Slash = pathWithSlash.toStdU16String();
+        std::u16string u16NoSlash = pathNoSlash.toStdU16String();
+        for (const auto &job : m_archive->GetJobs()) {
+            if (job.GetJobType() == JobType::CreateArchiveDirectory ||
+                job.GetJobType() == JobType::AddDirectory ||
+                job.GetJobType() == JobType::DeleteDirectory ||
+                job.GetJobType() == JobType::MoveDirectory)
+            {
+
+                if (job.GetFileName() == u16Slash || job.GetFileName() == u16NoSlash) { // BUG: Seams like job.FileName can have two type of URL
+                    isDir = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!isDir && m_archive) {
+        std::u16string u16Slash = pathWithSlash.toStdU16String();
+        std::u16string u16NoSlash = pathNoSlash.toStdU16String();
+        if (m_archive->GetTOC().IsDirectory(u16Slash) || m_archive->GetTOC().IsDirectory(u16NoSlash)) {
+            isDir = true;
+        }
+    }
+
     std::u16string u16Slash = pathWithSlash.toStdU16String();
     std::u16string u16NoSlash = pathNoSlash.toStdU16String();
+
+    // 1. Identify all matching jobs to remove in m_archive->GetJobs()
+    
     for (const auto &job : m_archive->GetJobs()) {
-      if (job.GetJobType() == JobType::CreateArchiveDirectory ||
-          job.GetJobType() == JobType::AddDirectory ||
-          job.GetJobType() == JobType::DeleteDirectory ||
-          job.GetJobType() == JobType::MoveDirectory) {
-        if (job.GetFileName() == u16Slash || job.GetFileName() == u16NoSlash) {
-          isDir = true;
-          break;
+        std::u16string jobFile = job.GetFileName();
+        bool match = false;
+        if (isDir) {
+            if (jobFile == u16Slash || jobFile == u16NoSlash) {
+                match = true;
+            }
+            else if (jobFile.starts_with(u16Slash)) {
+                match = true;
+            }
+            else if (job.GetJobType() == JobType::CreateArchiveDirectory || job.GetJobType() == JobType::AddDirectory) {
+                std::u16string jobDirWithSlash = jobFile;
+                if (!jobDirWithSlash.empty() && jobDirWithSlash.back() != u'/') {
+                    jobDirWithSlash.push_back(u'/');
+                }
+                if (jobDirWithSlash == u16Slash || jobDirWithSlash.starts_with(u16Slash)) {
+                    match = true;
+                }
+            }
+            if (job.GetJobType() == JobType::MoveArchiveFile || job.GetJobType() == JobType::MoveDirectory) {
+                std::u16string jobDst = job.GetFilePath();
+                if (jobDst.starts_with(u16Slash)) {
+                    match = true;
+                }
+            }
+        } else {
+            if (jobFile == u16NoSlash || jobFile == u16Slash) {
+                match = true;
+            }
         }
-      }
-    }
-  }
-  if (!isDir && m_archive) {
-    std::u16string u16Slash = pathWithSlash.toStdU16String();
-    std::u16string u16NoSlash = pathNoSlash.toStdU16String();
-    if (m_archive->GetTOC().IsDirectory(u16Slash) || m_archive->GetTOC().IsDirectory(u16NoSlash)) {
-      isDir = true;
-    }
-  }
 
-  std::u16string u16Slash = pathWithSlash.toStdU16String();
-  std::u16string u16NoSlash = pathNoSlash.toStdU16String();
-
-  // 1. Identify all matching jobs to remove in m_archive->GetJobs()
-  std::vector<int> jobIdsToRemove;
-  for (const auto &job : m_archive->GetJobs()) {
-    std::u16string jobFile = job.GetFileName();
-    bool match = false;
-    if (isDir) {
-      // Directory matches itself (with or without slash)
-      if (jobFile == u16Slash || jobFile == u16NoSlash) {
-        match = true;
-      } else if (jobFile.starts_with(u16Slash)) {
-        // Any child file or subfolder inside this directory
-        match = true;
-      } else if (job.GetJobType() == JobType::CreateArchiveDirectory ||
-                 job.GetJobType() == JobType::AddDirectory) {
-        std::u16string jobDirWithSlash = jobFile;
-        if (!jobDirWithSlash.empty() && jobDirWithSlash.back() != u'/') {
-          jobDirWithSlash.push_back(u'/');
+        if (match) {
+            jobIdsToRemove.push_back(job.GetId());
         }
-        if (jobDirWithSlash == u16Slash || jobDirWithSlash.starts_with(u16Slash)) {
-          match = true;
+    }
+
+    std::vector<QString> stagedToRemove;
+    for (auto it = m_stagedPendingItems.constBegin(); it != m_stagedPendingItems.constEnd(); ++it) { // Pending path check
+        const QString &sPath = it.key();
+        if (sPath == pathWithSlash || sPath == pathNoSlash) {
+            stagedToRemove.push_back(it.value().archiveRelPath);
+        } 
+        else if (isDir && (sPath.startsWith(pathWithSlash) || (!sPath.endsWith(u'/') && (sPath + u'/').startsWith(pathWithSlash)))) {
+            stagedToRemove.push_back(it.value().archiveRelPath);
         }
-      }
-      // Also check if it's a Move job where destination is inside this directory
-      if (job.GetJobType() == JobType::MoveArchiveFile || job.GetJobType() == JobType::MoveDirectory) {
-        std::u16string jobDst = job.GetFilePath();
-        if (jobDst.starts_with(u16Slash)) {
-          match = true;
+    }
+
+    for (const auto &p : stagedToRemove) {
+        std::u16string u16p = p.toStdU16String();
+        for (const auto &job : m_archive->GetJobs()) {
+            if (job.GetFileName() == u16p) {
+                if (std::find(jobIdsToRemove.begin(), jobIdsToRemove.end(), job.GetId()) == jobIdsToRemove.end()) {
+                    jobIdsToRemove.push_back(job.GetId());
+                }
+            }
         }
-      }
-    } else {
-      // File match
-      if (jobFile == u16NoSlash || jobFile == u16Slash) {
-        match = true;
-      }
     }
 
-    if (match) {
-      jobIdsToRemove.push_back(job.GetId());
+    for (int id : jobIdsToRemove) {
+        (void)m_archive->RemoveJob(id);
     }
-  }
 
-  // Also collect matching paths from m_stagedPendingItems
-  std::vector<QString> stagedToRemove;
-  for (auto it = m_stagedPendingItems.constBegin(); it != m_stagedPendingItems.constEnd(); ++it) {
-    const QString &sPath = it.key();
-    if (sPath == pathWithSlash || sPath == pathNoSlash) {
-      stagedToRemove.push_back(it.value().archiveRelPath);
-    } else if (isDir && (sPath.startsWith(pathWithSlash) || (!sPath.endsWith(u'/') && (sPath + u'/').startsWith(pathWithSlash)))) {
-      stagedToRemove.push_back(it.value().archiveRelPath);
+    for (const auto &p : stagedToRemove) {
+        m_stagedPendingItems.remove(p);
     }
-  }
 
-  for (const auto &p : stagedToRemove) {
-    std::u16string u16p = p.toStdU16String();
-    for (const auto &job : m_archive->GetJobs()) {
-      if (job.GetFileName() == u16p) {
-        if (std::find(jobIdsToRemove.begin(), jobIdsToRemove.end(), job.GetId()) == jobIdsToRemove.end()) {
-          jobIdsToRemove.push_back(job.GetId());
+    bool existsInToc = m_archive->GetTOC().CheckPath(u16Slash) || m_archive->GetTOC().CheckPath(u16NoSlash);
+
+    bool wasPending = (!jobIdsToRemove.empty()) || (!stagedToRemove.empty());
+
+    if (existsInToc) { // Add a delete job
+        if (isDir) {
+            auto res = m_archive->DeleteDirectory(u16Slash);
+            if (!res) {
+            QString errMsg = QString::fromLocal8Bit(res.error().message().c_str());
+            setStatusMessage(QStringLiteral("Failed to remove directory: ") + errMsg);
+            emit errorOccurred(QStringLiteral("Delete Directory Failed"), errMsg);
+            return false;
+            }
+        } else {
+            auto res = m_archive->RemoveFile(u16NoSlash);
+            if (!res) {
+            QString errMsg = QString::fromLocal8Bit(res.error().message().c_str());
+            setStatusMessage(QStringLiteral("Failed to remove file: ") + errMsg);
+            emit errorOccurred(QStringLiteral("Remove File Failed"), errMsg);
+            return false;
+            }
         }
-      }
+        syncJobsList();
+        buildArchiveTree();
+        setStatusMessage(QStringLiteral("Removed '%1' (Staged for commit)").arg(archiveRelativePath));
+        return true;
     }
-  }
 
-  // 2. Safely remove matching jobs from m_archive (no iterator invalidation)
-  for (int id : jobIdsToRemove) {
-    (void)m_archive->RemoveJob(id);
-  }
-
-  // 3. Remove from m_stagedPendingItems
-  for (const auto &p : stagedToRemove) {
-    m_stagedPendingItems.remove(p);
-  }
-
-  // 4. Check if the item itself exists in the committed archive TOC
-  bool existsInToc = m_archive->GetTOC().CheckPath(u16Slash) ||
-                     m_archive->GetTOC().CheckPath(u16NoSlash);
-
-  bool wasPending = (!jobIdsToRemove.empty()) || (!stagedToRemove.empty());
-
-  if (existsInToc) {
-    // Committed archive item: queue DeleteDirectory or RemoveFile in m_archive
-    if (isDir) {
-      auto res = m_archive->DeleteDirectory(u16Slash);
-      if (!res) {
-        QString errMsg = QString::fromLocal8Bit(res.error().message().c_str());
-        setStatusMessage(QStringLiteral("Failed to remove directory: ") + errMsg);
-        emit errorOccurred(QStringLiteral("Delete Directory Failed"), errMsg);
-        return false;
-      }
-    } else {
-      auto res = m_archive->RemoveFile(u16NoSlash);
-      if (!res) {
-        QString errMsg = QString::fromLocal8Bit(res.error().message().c_str());
-        setStatusMessage(QStringLiteral("Failed to remove file: ") + errMsg);
-        emit errorOccurred(QStringLiteral("Remove File Failed"), errMsg);
-        return false;
-      }
+    if (wasPending) {
+        syncJobsList();
+        buildArchiveTree();
+        setStatusMessage(QStringLiteral("Discarded staged item '%1'").arg(archiveRelativePath));
+        return true;
     }
+
     syncJobsList();
     buildArchiveTree();
-    setStatusMessage(QStringLiteral("Removed '%1' (Staged for commit)").arg(archiveRelativePath));
-    return true;
-  }
-
-  // If item was pending (and not in TOC), do NOT call DeleteDirectory/RemoveFile on archive
-  if (wasPending) {
-    syncJobsList();
-    buildArchiveTree();
-    setStatusMessage(QStringLiteral("Discarded staged item '%1'").arg(archiveRelativePath));
-    return true;
-  }
-
-  syncJobsList();
-  buildArchiveTree();
-  setStatusMessage(QStringLiteral("Item '%1' not found in archive.").arg(archiveRelativePath));
-  return false;
+    setStatusMessage(QStringLiteral("Item '%1' not found in archive.").arg(archiveRelativePath));
+    return false;
 }
 
-bool ArchiveInterface::moveArchiveItem(const QString &sourceRelativePath,
-                                       const QString &destRelativePath,
-                                       bool isDirectory) {
-  if (!m_archive)
-    return false;
+bool ArchiveInterface::moveArchiveItem(const QString &sourceRelativePath, const QString &destRelativePath, bool isDirectory) {
+    if (!m_archive)
+        return false;
 
-  QString normSrc = sourceRelativePath;
-  if (!normSrc.startsWith(u'/'))
-    normSrc.prepend(u'/');
-  QString normDst = destRelativePath;
-  if (!normDst.startsWith(u'/'))
-    normDst.prepend(u'/');
-  if (!normDst.endsWith(u'/'))
-    normDst.append(u'/'); // Destination must always be a directory
+    QString normSrc = sourceRelativePath;
 
-  // 1. Check if source item is in m_stagedPendingItems (staged files added in
-  // this session)
-  bool foundInStaged = false;
-  std::vector<QString> keysToUpdate;
-  for (auto it = m_stagedPendingItems.constBegin(); it != m_stagedPendingItems.constEnd(); ++it) {
-    if (it.key() == normSrc || (isDirectory && it.key().startsWith(normSrc))) {
-      keysToUpdate.push_back(it.key());
-    }
-  }
+    if (!normSrc.startsWith(u'/'))
+        normSrc.prepend(u'/');
 
-  for (const auto &oldKey : keysToUpdate) {
-    PendingStagedItem staged = m_stagedPendingItems.take(oldKey);
-    QString oldRelPath = staged.archiveRelPath;
-    if (staged.archiveRelPath == normSrc) {
-      QString fn = staged.name;
-      staged.archiveRelPath =
-          normDst + fn +
-          (staged.isDirectory ? QStringLiteral("/") : QStringLiteral(""));
-    } else if (isDirectory && staged.archiveRelPath.startsWith(normSrc)) {
-      QString relPart = staged.archiveRelPath.mid(normSrc.length());
-      QString dirName = QFileInfo(normSrc.endsWith(u'/')
-                                      ? normSrc.left(normSrc.length() - 1)
-                                      : normSrc)
-                            .fileName();
-      staged.archiveRelPath =
-          normDst + dirName + QStringLiteral("/") + relPart;
-    }
+    QString normDst = destRelativePath;
+    if (!normDst.startsWith(u'/'))
+        normDst.prepend(u'/');
 
-    // Update matching job in m_archive if any
-    std::u16string u16Old = oldRelPath.toStdU16String();
-    for (const auto &job : m_archive->GetJobs()) {
-      if (job.GetFileName() == u16Old) {
-        (void)m_archive->RemoveJob(job.GetId());
-        if (!staged.isDirectory && !staged.localDiskPath.isEmpty()) {
-          (void)m_archive->AddFile(staged.archiveRelPath.toStdU16String(),
-                                   staged.localDiskPath.toStdU16String());
+    if (!normDst.endsWith(u'/'))
+        normDst.append(u'/'); // Destination must always be a directory
+
+
+    bool foundInStaged = false;
+    std::vector<QString> keysToUpdate;
+    for (auto it = m_stagedPendingItems.constBegin(); it != m_stagedPendingItems.constEnd(); ++it) {
+        if (it.key() == normSrc || (isDirectory && it.key().startsWith(normSrc))) {
+            keysToUpdate.push_back(it.key());
         }
-        break;
-      }
     }
-    m_stagedPendingItems.insert(staged.archiveRelPath, std::move(staged));
-    foundInStaged = true;
-  }
-  if (foundInStaged) {
+
+    for (const auto &oldKey : keysToUpdate) {
+        PendingStagedItem staged = m_stagedPendingItems.take(oldKey);
+        QString oldRelPath = staged.archiveRelPath;
+        if (staged.archiveRelPath == normSrc) {
+            QString fn = staged.name;
+            staged.archiveRelPath =
+                normDst + fn +
+                (staged.isDirectory ? QStringLiteral("/") : QStringLiteral(""));
+        }
+        else if (isDirectory && staged.archiveRelPath.startsWith(normSrc)) {
+            QString relPart = staged.archiveRelPath.mid(normSrc.length());
+            QString dirName = QFileInfo(normSrc.endsWith(u'/')
+                                            ? normSrc.left(normSrc.length() - 1)
+                                            : normSrc)
+                                .fileName();
+            staged.archiveRelPath =
+                normDst + dirName + QStringLiteral("/") + relPart;
+        }
+
+        // Update matching job in m_archive if any
+        std::u16string u16Old = oldRelPath.toStdU16String();
+        for (const auto &job : m_archive->GetJobs()) {
+            if (job.GetFileName() == u16Old) {
+                (void)m_archive->RemoveJob(job.GetId());
+                if (!staged.isDirectory && !staged.localDiskPath.isEmpty()) {
+                    (void)m_archive->AddFile(staged.archiveRelPath.toStdU16String(),staged.localDiskPath.toStdU16String());
+                }
+                break;
+            }
+        }
+        m_stagedPendingItems.insert(staged.archiveRelPath, std::move(staged));
+        foundInStaged = true;
+    }
+    if (foundInStaged) {
+        syncJobsList();
+        buildArchiveTree();
+        setStatusMessage(QStringLiteral("Moved staged item '%1' to '%2'")
+                                .arg(sourceRelativePath, destRelativePath));
+        return true;
+    }
+
+    if (isDirectory) {
+        if (!normSrc.endsWith(u'/'))
+            normSrc.append(u'/');
+
+        auto res = m_archive->MoveDirectory(normSrc.toStdU16String(),
+                                            normDst.toStdU16String());
+        if (!res) {
+            QString errMsg = QString::fromLocal8Bit(res.error().message().c_str());
+            setStatusMessage(QStringLiteral("Failed to move directory: ") + errMsg);
+            emit errorOccurred(QStringLiteral("Move Directory Failed"), errMsg);
+            return false;
+        }
+    }
+    else {
+        if (normSrc.endsWith(u'/'))
+            normSrc.chop(1);
+        auto res = m_archive->MoveArchiveFile(normSrc.toStdU16String(),
+                                                normDst.toStdU16String());
+        if (!res) {
+            QString errMsg = QString::fromLocal8Bit(res.error().message().c_str());
+            setStatusMessage(QStringLiteral("Failed to move file: ") + errMsg);
+            emit errorOccurred(QStringLiteral("Move File Failed"), errMsg);
+            return false;
+        }
+    }
+
     syncJobsList();
     buildArchiveTree();
-    setStatusMessage(QStringLiteral("Moved staged item '%1' to '%2'")
-                         .arg(sourceRelativePath, destRelativePath));
+    setStatusMessage(QStringLiteral("Moved '%1' to '%2' (Staged for commit)").arg(sourceRelativePath, destRelativePath));
     return true;
-  }
-
-  // 2. Otherwise it is an item in the archive TOC, connect to libsecdet move
-  // logics
-  if (isDirectory) {
-    if (!normSrc.endsWith(u'/'))
-      normSrc.append(u'/');
-    auto res = m_archive->MoveDirectory(normSrc.toStdU16String(),
-                                        normDst.toStdU16String());
-    if (!res) {
-      QString errMsg = QString::fromLocal8Bit(res.error().message().c_str());
-      setStatusMessage(QStringLiteral("Failed to move directory: ") + errMsg);
-      emit errorOccurred(QStringLiteral("Move Directory Failed"), errMsg);
-      return false;
-    }
-  } else {
-    if (normSrc.endsWith(u'/'))
-      normSrc.chop(1);
-    auto res = m_archive->MoveArchiveFile(normSrc.toStdU16String(),
-                                          normDst.toStdU16String());
-    if (!res) {
-      QString errMsg = QString::fromLocal8Bit(res.error().message().c_str());
-      setStatusMessage(QStringLiteral("Failed to move file: ") + errMsg);
-      emit errorOccurred(QStringLiteral("Move File Failed"), errMsg);
-      return false;
-    }
-  }
-
-  syncJobsList();
-  buildArchiveTree();
-  setStatusMessage(QStringLiteral("Moved '%1' to '%2' (Staged for commit)")
-                       .arg(sourceRelativePath, destRelativePath));
-  return true;
 }
 
 bool ArchiveInterface::saveChanges() {
-  if (!m_archive) {
-    setStatusMessage(QStringLiteral("No archive open to save."));
-    return false;
-  }
+    if (!m_archive) {
+        setStatusMessage(QStringLiteral("No archive open to save."));
+        return false;
+    }
 
-  if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
-    emit passwordRequired(m_archivePath);
-    return false;
-  }
+    if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
+        emit passwordRequired(m_archivePath);
+        return false;
+    }
 
-  m_stopSource = std::stop_source();
-  m_lastExtractOutputDir.clear();
-  m_lastExtractRelPath.clear();
+    m_stopSource = std::stop_source();
+    m_lastExtractOutputDir.clear();
+    m_lastExtractRelPath.clear();
 
-  // Synchronize jobs model with the post-optimization queue so that
-  // execution proceeds strictly according to the clean, ordered queue
-  syncJobsList();
+    // Synchronize jobs model with the post-optimization queue so that
+    // execution proceeds strictly according to the clean, ordered queue
+    syncJobsList();
 
-  setBusy(true);
-  m_isCommitting = true;
-  emit isCommittingChanged(true);
-  m_currentOperationName = QStringLiteral("Writing Archive Changes");
-  setStatusMessage(QStringLiteral("Saving changes to archive..."));
-  m_overallProgress = 0.0;
-  m_fileProgress = 0.0;
-  emit progressChanged();
+    setBusy(true);
+    m_isCommitting = true;
+    emit isCommittingChanged(true);
+    m_currentOperationName = QStringLiteral("Writing Archive Changes");
+    setStatusMessage(QStringLiteral("Saving changes to archive..."));
+    m_overallProgress = 0.0;
+    m_fileProgress = 0.0;
+    emit progressChanged();
 
-  struct BatchState {
-    std::mutex mtx;
-    std::vector<SeJob> pending;
-    int64_t lastDispatchMs = 0;
-  };
+    struct BatchState {
+        std::mutex mtx;
+        std::vector<SeJob> pending;
+        int64_t lastDispatchMs = 0;
+    };
+
     auto batchState = std::make_shared<BatchState>();
 
     auto flushBatch = [this, batchState](bool force) {
-      std::vector<SeJob> toSend;
-      {
-        std::lock_guard<std::mutex> lock(batchState->mtx);
-        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now().time_since_epoch())
-                       .count();
-        if (force || (now - batchState->lastDispatchMs >= 33)) {
-          if (!batchState->pending.empty()) {
-            toSend.swap(batchState->pending);
-            batchState->lastDispatchMs = now;
-          }
+        std::vector<SeJob> toSend;
+        {
+            std::lock_guard<std::mutex> lock(batchState->mtx);
+            auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+            if (force || (now - batchState->lastDispatchMs >= 33)) {
+                if (!batchState->pending.empty()) {
+                    toSend.swap(batchState->pending);
+                    batchState->lastDispatchMs = now;
+                }
+            }
         }
-      }
-      if (!toSend.empty()) {
+        if (!toSend.empty()) {
         QMetaObject::invokeMethod(
             this,
             [this, batch = std::move(toSend)]() {
-              this->onJobsBatchProgressUpdated(batch);
+                this->onJobsBatchProgressUpdated(batch);
             },
             Qt::QueuedConnection);
-      }
+        }
     };
 
     auto callback = [batchState, flushBatch](const SeJob &job) {
-      {
-        std::lock_guard<std::mutex> lock(batchState->mtx);
-        batchState->pending.push_back(job);
-      }
-      flushBatch(false);
+        {
+            std::lock_guard<std::mutex> lock(batchState->mtx);
+            batchState->pending.push_back(job);
+        }// End of critical section
+        flushBatch(false);
     };
 
-    auto taskHandle = std::make_shared<SeTaskHandle<void>>(
-        m_archive->SaveChangesAsync(callback));
+    auto taskHandle = std::make_shared<SeTaskHandle<void>>(m_archive->SaveChangesAsync(callback));
     m_currentTask = taskHandle;
     emit isPausedChanged(false);
 
     std::thread([this, taskHandle, flushBatch]() {
-      auto res = taskHandle->get();
+        auto res = taskHandle->get();
 
-      // Flush any remaining unposted jobs
-      flushBatch(true);
+        // Flush unposted jobs
+        flushBatch(true);
 
-      QMetaObject::invokeMethod(
-          this,
-          [this, success = res.has_value(),
-           errMsg =
-               res ? QString()
-                   : QString::fromLocal8Bit(res.error().message().c_str())]() {
-            this->onSaveCompleted(success, errMsg);
-          },
-          Qt::QueuedConnection);
+        QMetaObject::invokeMethod(
+            this,
+            [this, success = res.has_value(),
+                errMsg =
+                    res ? QString()
+                        : QString::fromLocal8Bit(res.error().message().c_str())]() {
+                this->onSaveCompleted(success, errMsg);
+            },
+            Qt::QueuedConnection);
     }).detach();
 
     return true;
@@ -1079,151 +978,148 @@ bool ArchiveInterface::saveChanges() {
 bool ArchiveInterface::saveArchive() { return saveChanges(); }
 
 void ArchiveInterface::optimizeJobsAsync() {
-  if (!m_archive) {
-    setStatusMessage(QStringLiteral("No archive open to optimize."));
-    emit optimizationCompleted(QVariantList());
-    return;
-  }
-
-  if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
-    emit passwordRequired(m_archivePath);
-    return;
-  }
-
-  if (m_isOptimizing || m_isCommitting) {
-    return;
-  }
-
-  m_isOptimizing = true;
-  emit isOptimizingChanged(true);
-  setStatusMessage(QStringLiteral("Optimizing archive jobs queue..."));
-
-  std::thread([this]() {
-    // Run SeArchive::optimizeJobs on a separate worker thread
-    auto deletedIds = m_archive->optimizeJobs();
-
-    QVariantList qDeletedIds;
-    qDeletedIds.reserve(static_cast<qsizetype>(deletedIds.size()));
-    for (int id : deletedIds) {
-      qDeletedIds.append(id);
+    if (!m_archive) {
+        setStatusMessage(QStringLiteral("No archive open to optimize."));
+        emit optimizationCompleted(QVariantList());
+        return;
     }
 
-    QMetaObject::invokeMethod(
-        this,
-        [this, qDeletedIds]() {
-          m_isOptimizing = false;
-          emit isOptimizingChanged(false);
-          setStatusMessage(QStringLiteral("Job queue optimization completed."));
-          emit optimizationCompleted(qDeletedIds);
-        },
-        Qt::QueuedConnection);
-  }).detach();
+    if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
+        emit passwordRequired(m_archivePath);
+        return;
+    }
+
+    if (m_isOptimizing || m_isCommitting) {
+        return;
+    }
+
+    m_isOptimizing = true;
+    emit isOptimizingChanged(true);
+    setStatusMessage(QStringLiteral("Optimizing archive jobs queue..."));
+
+    std::thread([this]() {
+        auto deletedIds = m_archive->optimizeJobs();
+
+        QVariantList qDeletedIds;
+        qDeletedIds.reserve(static_cast<qsizetype>(deletedIds.size()));
+        for (int id : deletedIds) {
+            qDeletedIds.append(id);
+        }
+
+        QMetaObject::invokeMethod(
+            this,
+            [this, qDeletedIds]() {
+                m_isOptimizing = false;
+                emit isOptimizingChanged(false);
+                setStatusMessage(QStringLiteral("Job queue optimization completed."));
+                emit optimizationCompleted(qDeletedIds);
+            },
+            Qt::QueuedConnection);
+    }).detach();
 }
 
-bool ArchiveInterface::extractItem(const QString &archiveRelativePath,
-                                   const QString &outputDir) {
-  if (!m_archive)
-    return false;
+bool ArchiveInterface::extractItem(const QString &archiveRelativePath,const QString &outputDir) {
+    if (!m_archive)
+        return false;
 
-  if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
-    emit passwordRequired(m_archivePath);
-    return false;
-  }
+    if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
+        emit passwordRequired(m_archivePath);
+        return false;
+    }
 
-  QString cleanOut = outputDir;
-  if (cleanOut.startsWith(QStringLiteral("file:///"))) {
-    cleanOut = QUrl(cleanOut).toLocalFile();
-  } else if (cleanOut.startsWith(QStringLiteral("file://"))) {
-    cleanOut = cleanOut.mid(7);
-  }
+    QString cleanOut = outputDir;
+    if (cleanOut.startsWith(QStringLiteral("file:///"))) {
+        cleanOut = QUrl(cleanOut).toLocalFile();
+    }
+    else if (cleanOut.startsWith(QStringLiteral("file://"))) {
+        cleanOut = cleanOut.mid(7);
+    }
 
-  QString normPath = archiveRelativePath;
-  if (!normPath.startsWith(u'/'))
+    QString normPath = archiveRelativePath;
+    if (!normPath.startsWith(u'/'))
     normPath.prepend(u'/');
 
-  m_stopSource = std::stop_source();
-  m_lastExtractOutputDir = cleanOut;
-  m_lastExtractRelPath = normPath;
+    m_stopSource = std::stop_source();
+    m_lastExtractOutputDir = cleanOut;
+    m_lastExtractRelPath = normPath;
 
-  setBusy(true);
-  m_currentOperationName = QStringLiteral("Extracting: ") + normPath;
-  setStatusMessage(QStringLiteral("Extracting item..."));
-  m_overallProgress = 0.0;
-  m_fileProgress = 0.0;
-  m_processedFiles = 0;
-  m_totalFiles = 0;
-  m_extractTotalBytes = 0;
-  m_extractProcessedBytes = 0;
-  m_extractCompressedBytes = 0;
+    setBusy(true);
+    m_currentOperationName = QStringLiteral("Extracting: ") + normPath;
+    setStatusMessage(QStringLiteral("Extracting item..."));
+    m_overallProgress = 0.0;
+    m_fileProgress = 0.0;
+    m_processedFiles = 0;
+    m_totalFiles = 0;
+    m_extractTotalBytes = 0;
+    m_extractProcessedBytes = 0;
+    m_extractCompressedBytes = 0;
 
-  if (m_archive) {
+    if (m_archive) {
     qulonglong extBytes = 0;
     int extFileCount = 0;
     QStringList extractJobPaths;
     const auto &entries = m_archive->GetTOC().GetEntries();
+
     for (const auto &e : entries) {
-      if (e.path == u"/") continue;
-      if (!e.isDirectory()) {
-        QString ep = QString::fromStdU16String(e.path);
-        if (normPath == u"/" || ep.startsWith(normPath)) {
-          extBytes += e.uncompressed_size;
-          extFileCount++;
-          extractJobPaths.append(ep);
+        if (e.path == u"/") continue;
+            if (!e.isDirectory()) {
+                QString ep = QString::fromStdU16String(e.path);
+                if (normPath == u"/" || ep.startsWith(normPath)) {
+                    extBytes += e.uncompressed_size;
+                    extFileCount++;
+                    extractJobPaths.append(ep);
+                }
+            }
         }
-      }
+        m_totalFiles = extFileCount;
+        m_extractTotalBytes = extBytes;
+        if (m_jobModel) {
+            m_jobModel->setExtractJobs(extractJobPaths);
+        }
     }
-    m_totalFiles = extFileCount;
-    m_extractTotalBytes = extBytes;
-    if (m_jobModel) {
-      m_jobModel->setExtractJobs(extractJobPaths);
-    }
-  }
-  emit progressChanged();
+    emit progressChanged();
 
-  bool isDir = normPath.endsWith(u'/');
+    bool isDir = normPath.endsWith(u'/');
 
-  auto lastDispatch = std::make_shared<std::atomic<int64_t>>(0);
+    auto lastDispatch = std::make_shared<std::atomic<int64_t>>(0);
+
     auto callback = [this, lastDispatch](const SeJob &job) {
-      auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                     std::chrono::steady_clock::now().time_since_epoch())
-                     .count();
-      bool isStateChange = (job.GetStatus() != JobStatus::Running &&
-                            job.GetStatus() != JobStatus::Pending) ||
-                           job.percentage == 0 || job.percentage == 100;
-      int64_t last = lastDispatch->load(std::memory_order_relaxed);
-      if (isStateChange || (now - last >= 33)) {
-        lastDispatch->store(now, std::memory_order_relaxed);
+        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        bool isStateChange = (job.GetStatus() != JobStatus::Running && job.GetStatus() != JobStatus::Pending) || job.percentage == 0 || job.percentage == 100;\
+
+        int64_t last = lastDispatch->load(std::memory_order_relaxed);
+        if (isStateChange || (now - last >= 33)) {
+            lastDispatch->store(now, std::memory_order_relaxed);
+
         QMetaObject::invokeMethod(
             this, [this, job]() { this->onJobProgressUpdated(job); },
             Qt::QueuedConnection);
-      }
+        }
     };
 
     std::shared_ptr<SeTaskHandle<size_t>> taskHandle;
     if (isDir) {
-      taskHandle = std::make_shared<SeTaskHandle<size_t>>(
-          m_archive->ExtractDirectoryAsync(
-              normPath.toStdU16String(), cleanOut.toStdU16String(), callback));
-    } else {
-      taskHandle = std::make_shared<SeTaskHandle<size_t>>(
-          m_archive->ExtractFileAsync(normPath.toStdU16String(),
-                                      cleanOut.toStdU16String(), callback));
+        taskHandle = std::make_shared<SeTaskHandle<size_t>>(
+            m_archive->ExtractDirectoryAsync(normPath.toStdU16String(), cleanOut.toStdU16String(), callback));
+    } 
+    else {
+        taskHandle = std::make_shared<SeTaskHandle<size_t>>(m_archive->ExtractFileAsync(normPath.toStdU16String(),cleanOut.toStdU16String(), callback));
     }
     m_currentTask = taskHandle;
     emit isPausedChanged(false);
 
     std::thread([this, taskHandle, normPath]() {
-      auto res = taskHandle->get();
-      bool isCryptoFail = (!res && res.error() == SeError::CRYPTOGenericFailure);
-      QMetaObject::invokeMethod(
-          this,
-          [this, success = res.has_value(), isCryptoFail, normPath,
-           errMsg =
-               res ? QString()
-                   : QString::fromLocal8Bit(res.error().message().c_str())]() {
+        auto res = taskHandle->get();
+        bool isCryptoFail = (!res && res.error() == SeError::CRYPTOGenericFailure);
+        QMetaObject::invokeMethod(
+            this,
+            [this, success = res.has_value(), isCryptoFail, normPath,
+            errMsg =
+                res ? QString()
+                    : QString::fromLocal8Bit(res.error().message().c_str())]() {
             this->onExtractCompleted(success, errMsg, isCryptoFail, normPath);
-          },
-          Qt::QueuedConnection);
+            },
+            Qt::QueuedConnection);
     }).detach();
 
     return true;
@@ -1233,725 +1129,476 @@ bool ArchiveInterface::extractAll(const QString &outputDir) {
   return extractItem(QStringLiteral("/"), outputDir);
 }
 
-class DelayedExtractMimeData : public QMimeData {
-public:
-  DelayedExtractMimeData(ArchiveInterface *iface,
-                         const QStringList &archivePaths,
-                         const QString &displayName,
-                         bool isFolder)
-      : m_iface(iface),
-        m_archivePaths(archivePaths),
-        m_displayName(displayName),
-        m_isFolder(isFolder) {}
-
-  QStringList formats() const override {
-    QStringList f = QMimeData::formats();
-    if (!f.contains(QStringLiteral("text/uri-list"))) {
-      f.append(QStringLiteral("text/uri-list"));
-    }
-    return f;
-  }
-
-  bool hasFormat(const QString &mimetype) const override {
-    if (mimetype == QStringLiteral("text/uri-list")) {
-      return true;
-    }
-    return QMimeData::hasFormat(mimetype);
-  }
-
-protected:
-  QVariant retrieveData(const QString &mimetype, QMetaType preferredType) const override {
-    if (mimetype == QStringLiteral("text/uri-list")) {
-      if (!m_extracted) {
-        performExtraction();
-      }
-      return QVariant::fromValue(m_stagedUrls);
-    }
-    return QMimeData::retrieveData(mimetype, preferredType);
-  }
-
-private:
-  void performExtraction() const {
-    if (m_extracted) return;
-    m_extracted = true;
-
-    if (!m_iface || !m_iface->m_archive) return;
-
-    struct ExtractedItemInfo {
-      QString normPath;
-      QString itemFileName;
-      bool isDir;
-      qulonglong uncompressedSize;
-    };
-
-    std::vector<ExtractedItemInfo> items;
-    QStringList jobFilePaths;
-    qulonglong totalBytes = 0;
-
-    const auto &entries = m_iface->m_archive->GetTOC().GetEntries();
-
-    for (int i = 0; i < m_archivePaths.size(); ++i) {
-      QString normPath = m_archivePaths.at(i);
-      if (!normPath.startsWith(u'/')) {
-        normPath.prepend(u'/');
-      }
-
-      auto entryOpt = m_iface->m_archive->GetTOC().GetEntry(normPath.toStdU16String());
-      bool itemIsDir = m_isFolder || normPath.endsWith(u'/') || (entryOpt && entryOpt->isDirectory());
-
-      QString itemFileName;
-      if (m_archivePaths.size() == 1 && !m_displayName.isEmpty()) {
-        itemFileName = m_displayName;
-      } else {
-        QString stripped = normPath;
-        if (stripped.endsWith(u'/') && stripped.length() > 1) {
-          stripped.chop(1);
-        }
-        itemFileName = stripped.section(u'/', -1);
-      }
-      if (itemFileName.isEmpty()) {
-        itemFileName = QStringLiteral("Item_%1").arg(i + 1);
-      }
-
-      qulonglong sz = (entryOpt ? entryOpt->uncompressed_size : 0);
-      items.push_back({normPath, itemFileName, itemIsDir, sz});
-
-      if (itemIsDir) {
-        QString prefix = normPath;
-        if (!prefix.endsWith(u'/')) prefix.append(u'/');
-        for (const auto &e : entries) {
-          if (e.path == u"/") continue;
-          if (!e.isDirectory()) {
-            QString ePath = QString::fromStdU16String(e.path);
-            if (ePath.startsWith(prefix)) {
-              jobFilePaths.append(ePath);
-              totalBytes += e.uncompressed_size;
-            }
-          }
-        }
-      } else {
-        jobFilePaths.append(normPath);
-        totalBytes += sz;
-      }
-    }
-
-    if (jobFilePaths.isEmpty() && !items.empty()) {
-      jobFilePaths.append(items.front().normPath);
-    }
-
-    m_iface->setBusy(true);
-    m_iface->m_totalFiles = static_cast<int>(jobFilePaths.size());
-    m_iface->m_processedFiles = 0;
-    m_iface->m_extractTotalBytes = totalBytes;
-    m_iface->m_extractProcessedBytes = 0;
-    m_iface->m_extractCompressedBytes = 0;
-    m_iface->m_overallProgress = 0.0;
-    m_iface->m_fileProgress = 0.0;
-    m_iface->m_currentOperationName = QStringLiteral("Extracting: ") + (m_displayName.isEmpty() ? (items.empty() ? QStringLiteral("Export") : items.front().itemFileName) : m_displayName);
-    m_iface->m_currentFileName = m_displayName;
-    m_iface->setStatusMessage(QStringLiteral("Extracting for export..."));
-
-    if (m_iface->m_jobModel) {
-      m_iface->m_jobModel->setExtractJobs(jobFilePaths);
-    }
-
-    emit m_iface->dragStagingStarted(m_displayName);
-    emit m_iface->progressChanged();
-    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
-
-    QString stagingBaseDir = QDir::tempPath() + QStringLiteral("/SecDet_Drag_") +
-                             QString::number(QCoreApplication::applicationPid()) + QStringLiteral("_") +
-                             QString::number(QDateTime::currentMSecsSinceEpoch());
-    QDir().mkpath(stagingBaseDir);
-
-    auto extractCb = [this, totalAllBytes = totalBytes](const SeJob &job) {
-      QString jobFile = QString::fromStdU16String(job.GetFileName());
-      if (!jobFile.isEmpty()) {
-        m_iface->m_currentFileName = jobFile.section(u'/', -1);
-      }
-      m_iface->m_fileProgress = static_cast<qreal>(job.percentage) / 100.0;
-      m_iface->m_extractProcessedBytes = job.processedBytes;
-      m_iface->m_extractTotalBytes = (job.totalBytes > 0) ? job.totalBytes : totalAllBytes;
-      m_iface->m_extractCompressedBytes = job.compressedBytes;
-
-      if (m_iface->m_jobModel && m_iface->m_jobModel->count() > 0) {
-        m_iface->m_jobModel->updateJob(job);
-        m_iface->m_overallProgress = m_iface->m_jobModel->overallProgress();
-        m_iface->m_processedFiles = m_iface->m_jobModel->finishedCount();
-      } else {
-        m_iface->m_overallProgress = m_iface->m_fileProgress;
-      }
-
-      emit m_iface->progressChanged();
-      QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 10);
-    };
-
-    for (const auto &item : items) {
-      QString stagedItemPath = stagingBaseDir + QStringLiteral("/") + item.itemFileName;
-      if (item.isDir) {
-        auto res = m_iface->m_archive->ExtractDirectorySync(item.normPath.toStdU16String(), stagingBaseDir.toStdU16String(), extractCb);
-        if (!res) {
-          emit m_iface->dragStagingCompleted();
-          m_iface->setBusy(false);
-          emit m_iface->operationCompleted(QStringLiteral("Drag Export"), false, QString::fromLocal8Bit(res.error().message().c_str()));
-          return;
-        }
-      } else {
-        auto res = m_iface->m_archive->ExtractFileSync(item.normPath.toStdU16String(), stagingBaseDir.toStdU16String(), extractCb);
-        if (!res) {
-          emit m_iface->dragStagingCompleted();
-          m_iface->setBusy(false);
-          emit m_iface->operationCompleted(QStringLiteral("Drag Export"), false, QString::fromLocal8Bit(res.error().message().c_str()));
-          return;
-        }
-      }
-      if (QFile::exists(stagedItemPath)) {
-        m_stagedUrls.append(QUrl::fromLocalFile(stagedItemPath));
-      }
-    }
-
-    m_iface->m_overallProgress = 1.0;
-    m_iface->m_fileProgress = 1.0;
-    m_iface->m_processedFiles = m_iface->m_totalFiles;
-    emit m_iface->progressChanged();
-    m_iface->setBusy(false);
-    emit m_iface->dragStagingCompleted();
-    emit m_iface->operationCompleted(QStringLiteral("Drag Export"), true, QStringLiteral("Export completed successfully"));
-    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
-  }
-
-  ArchiveInterface *m_iface;
-  QStringList m_archivePaths;
-  QString m_displayName;
-  bool m_isFolder;
-  mutable bool m_extracted = false;
-  mutable QList<QUrl> m_stagedUrls;
-};
-
 bool ArchiveInterface::startNativeDrag(const QVariant &pathsOrPath, const QString &displayName, bool isFolder) {
-  if (!m_archive) {
-    return false;
-  }
-
-  if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
-    emit passwordRequired(m_archivePath);
-    return false;
-  }
-
-  QStringList paths;
-  if (pathsOrPath.canConvert<QStringList>()) {
-    paths = pathsOrPath.toStringList();
-  } else if (pathsOrPath.userType() == QMetaType::QVariantList) {
-    const auto list = pathsOrPath.toList();
-    for (const auto &v : list) {
-      paths.append(v.toString());
+    if (!m_archive) {
+        return false;
     }
-  } else {
-    QString p = pathsOrPath.toString();
-    if (!p.isEmpty()) {
-      paths.append(p);
+
+    if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
+        emit passwordRequired(m_archivePath);
+        return false;
     }
-  }
 
-  if (paths.isEmpty()) {
-    return false;
-  }
-
-  QString primaryItemName;
-  bool primaryIsDir = false;
-
-  QString firstPath = paths.first();
-  if (!firstPath.startsWith(u'/')) {
-    firstPath.prepend(u'/');
-  }
-
-  auto entryOpt = m_archive->GetTOC().GetEntry(firstPath.toStdU16String());
-  primaryIsDir = isFolder || firstPath.endsWith(u'/') || (entryOpt && entryOpt->isDirectory());
-  if (paths.size() == 1 && !displayName.isEmpty()) {
-    primaryItemName = displayName;
-  } else {
-    QString stripped = firstPath;
-    if (stripped.endsWith(u'/') && stripped.length() > 1) {
-      stripped.chop(1);
+    QStringList paths;
+    if (pathsOrPath.canConvert<QStringList>()) {
+        paths = pathsOrPath.toStringList();
     }
-    primaryItemName = stripped.section(u'/', -1);
-  }
-  if (primaryItemName.isEmpty()) {
-    primaryItemName = QStringLiteral("Item");
-  }
+    else if (pathsOrPath.userType() == QMetaType::QVariantList) {
+        const auto list = pathsOrPath.toList();
+        for (const auto &v : list) {
+            paths.append(v.toString());
+        }
+    } 
+    else {
+        QString p = pathsOrPath.toString();
+        if (!p.isEmpty()) {
+            paths.append(p);
+        }
+    }
 
-  // Build DelayedExtractMimeData for on-drop lazy extraction
-  DelayedExtractMimeData *mimeData = new DelayedExtractMimeData(this, paths, primaryItemName, primaryIsDir);
-  mimeData->setData(QStringLiteral("application/x-secdet-item"), firstPath.toUtf8());
-  mimeData->setData(QStringLiteral("application/x-secdet-isfolder"), primaryIsDir ? "1" : "0");
-  mimeData->setText(paths.size() == 1 ? firstPath : QStringLiteral("%1 items").arg(paths.size()));
+    if (paths.isEmpty()) {
+        return false;
+    }
 
-  // Construct QDrag
-  QDrag *drag = new QDrag(this);
-  drag->setMimeData(mimeData);
+    QString primaryItemName;
+    bool primaryIsDir = false;
 
-  // Generate Drag Pixmap Overlay
-  const int badgeW = 230;
-  const int badgeH = 44;
-  qreal dpr = qApp ? qApp->devicePixelRatio() : 1.0;
-  QPixmap pixmap(static_cast<int>(badgeW * dpr), static_cast<int>(badgeH * dpr));
-  pixmap.setDevicePixelRatio(dpr);
-  pixmap.fill(Qt::transparent);
+    QString firstPath = paths.first();
+    if (!firstPath.startsWith(u'/')) {
+        firstPath.prepend(u'/');
+    }
 
-  {
-    QPainter p(&pixmap);
-    p.setRenderHint(QPainter::Antialiasing, true);
-    p.setRenderHint(QPainter::TextAntialiasing, true);
+    auto entryOpt = m_archive->GetTOC().GetEntry(firstPath.toStdU16String());
+    primaryIsDir = isFolder || firstPath.endsWith(u'/') || (entryOpt && entryOpt->isDirectory());
 
-    QRectF badgeRect(1.0, 1.0, badgeW - 2.0, badgeH - 2.0);
-    QPainterPath path;
-    path.addRoundedRect(badgeRect, 8.0, 8.0);
+    if (paths.size() == 1 && !displayName.isEmpty()) {
+        primaryItemName = displayName;
+    }
+    else {
+        QString stripped = firstPath;
+        if (stripped.endsWith(u'/') && stripped.length() > 1) {
+            stripped.chop(1);
+        }
+        primaryItemName = stripped.section(u'/', -1);
+    }
 
-    QLinearGradient bgGrad(0, 0, 0, badgeH);
-    bgGrad.setColorAt(0.0, QColor(32, 38, 50, 245));
-    bgGrad.setColorAt(1.0, QColor(18, 22, 30, 245));
-    p.fillPath(path, bgGrad);
+    if (primaryItemName.isEmpty()) {
+        primaryItemName = QStringLiteral("Item");
+    }
 
-    QPen borderPen(QColor(212, 175, 55, 230));
-    borderPen.setWidthF(1.5);
-    p.strokePath(path, borderPen);
+    // DelayedExtractMimeData for on-drop lazy extraction
+    DelayedExtractMimeData *mimeData = new DelayedExtractMimeData(this, paths, primaryItemName, primaryIsDir);
+    mimeData->setData(QStringLiteral("application/x-secdet-item"), firstPath.toUtf8());
+    mimeData->setData(QStringLiteral("application/x-secdet-isfolder"), primaryIsDir ? "1" : "0");
+    mimeData->setText(paths.size() == 1 ? firstPath : QStringLiteral("%1 items").arg(paths.size()));
 
-    int iconX = 12;
-    int iconY = 12;
-    if (primaryIsDir) {
-      p.setPen(Qt::NoPen);
-      p.setBrush(QColor(229, 192, 123));
-      p.drawRoundedRect(iconX, iconY, 8, 4, 1, 1);
-      p.drawRoundedRect(iconX, iconY + 3, 18, 14, 2, 2);
+    // Construct QDrag
+    QDrag *drag = new QDrag(this);
+    drag->setMimeData(mimeData);
+
+    // Drag overlay Removed
+
+    setStatusMessage(QStringLiteral("Dragging '%1' • Drop outside window to extract immediately, or on folder to move").arg(primaryItemName));
+
+    Qt::DropAction dropAction = drag->exec(Qt::CopyAction | Qt::MoveAction);
+    drag->deleteLater();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50); // BUG : CRITC FAIL -> removed the drag overlay , upon test we will know if it got fixed or not
+
+    if (dropAction != Qt::IgnoreAction) {
+        setStatusMessage(QStringLiteral("Extracted '%1' to drop destination").arg(primaryItemName));
+        return true;
     } else {
-      p.setPen(Qt::NoPen);
-      p.setBrush(QColor(212, 175, 55));
-      p.drawRoundedRect(iconX + 2, iconY, 14, 18, 2, 2);
-
-      p.setBrush(QColor(18, 22, 30));
-      QPolygon corner;
-      corner << QPoint(iconX + 11, iconY) << QPoint(iconX + 16, iconY + 5) << QPoint(iconX + 11, iconY + 5);
-      p.drawPolygon(corner);
-
-      p.setPen(QPen(QColor(18, 22, 30), 1.5));
-      p.drawLine(iconX + 5, iconY + 8, iconX + 12, iconY + 8);
-      p.drawLine(iconX + 5, iconY + 12, iconX + 13, iconY + 12);
+        setStatusMessage(QStringLiteral("Drag canceled"));
+        return false;
     }
-
-    QFont font(QStringLiteral("Segoe UI"));
-    font.setPixelSize(12);
-    font.setWeight(QFont::DemiBold);
-    p.setFont(font);
-    p.setPen(QColor(245, 247, 250));
-
-    QFontMetrics fm(font);
-    QString displayTitle = primaryItemName;
-    if (paths.size() > 1) {
-      displayTitle += QStringLiteral(" (+%1)").arg(paths.size() - 1);
-    }
-    QString elidedName = fm.elidedText(displayTitle, Qt::ElideMiddle, 135);
-    p.drawText(QRect(38, 7, 135, 18), Qt::AlignLeft | Qt::AlignVCenter, elidedName);
-
-    QFont subFont(QStringLiteral("Segoe UI"));
-    subFont.setPixelSize(10);
-    p.setFont(subFont);
-    p.setPen(QColor(190, 170, 120));
-    QString subText = (paths.size() > 1) ? QStringLiteral("%1 items • Extract").arg(paths.size()) : (primaryIsDir ? QStringLiteral("Folder • Extract") : QStringLiteral("File • Extract"));
-    p.drawText(QRect(38, 24, 135, 14), Qt::AlignLeft | Qt::AlignVCenter, subText);
-
-    p.setPen(QColor(212, 175, 55, 190));
-    QFont arrowFont(QStringLiteral("Segoe UI Symbol"));
-    arrowFont.setPixelSize(13);
-    p.setFont(arrowFont);
-    p.drawText(QRect(badgeW - 28, 0, 20, badgeH), Qt::AlignCenter, QStringLiteral("➔"));
-  }
-
-  drag->setPixmap(pixmap);
-  drag->setHotSpot(QPoint(22, 22));
-
-  setStatusMessage(QStringLiteral("Dragging '%1' • Drop outside window to extract immediately, or on folder to move").arg(primaryItemName));
-
-  Qt::DropAction dropAction = drag->exec(Qt::CopyAction | Qt::MoveAction);
-  drag->deleteLater();
-  QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-
-  if (dropAction != Qt::IgnoreAction) {
-    setStatusMessage(QStringLiteral("Extracted '%1' to drop destination").arg(primaryItemName));
-    return true;
-  } else {
-    setStatusMessage(QStringLiteral("Drag canceled"));
-    return false;
-  }
 }
 
 bool ArchiveInterface::removeJob(int jobId, int modelIndex) {
-  if (!m_archive)
-    return false;
+    if (!m_archive)
+        return false;
 
-  QString targetPath;
-  bool isDirJob = false;
-  std::vector<int> childJobIds;
+    QString targetPath;
+    bool isDirJob = false;
+    std::vector<int> childJobIds;
 
-  for (const auto &j : m_archive->GetJobs()) {
-    if (j.GetId() == jobId) {
-      targetPath = QString::fromStdU16String(j.GetFileName());
-      if (j.GetJobType() == JobType::CreateArchiveDirectory ||
-          j.GetJobType() == JobType::AddDirectory ||
-          j.GetJobType() == JobType::DeleteDirectory ||
-          j.GetJobType() == JobType::MoveDirectory) {
-        isDirJob = true;
-      }
-      break;
-    }
-  }
-
-  if (jobId > 0) {
-    (void)m_archive->RemoveJob(jobId);
-  }
-
-  // If this was a directory job, also remove all nested child jobs under it!
-  if (isDirJob && !targetPath.isEmpty()) {
-    QString dirSlash = targetPath.endsWith(u'/') ? targetPath : (targetPath + u'/');
-    std::u16string u16DirSlash = dirSlash.toStdU16String();
     for (const auto &j : m_archive->GetJobs()) {
-      if (j.GetFileName().starts_with(u16DirSlash)) {
-        childJobIds.push_back(j.GetId());
-      }
-    }
-    for (int childId : childJobIds) {
-      (void)m_archive->RemoveJob(childId);
-    }
-  }
+        if (j.GetId() == jobId) {
+            targetPath = QString::fromStdU16String(j.GetFileName());
 
-  // Clean up m_stagedPendingItems by path match, NOT by modelIndex!
-  if (!targetPath.isEmpty()) {
+            if (j.GetJobType() == JobType::CreateArchiveDirectory ||
+                j.GetJobType() == JobType::AddDirectory ||
+                j.GetJobType() == JobType::DeleteDirectory ||
+                j.GetJobType() == JobType::MoveDirectory)
+            {
+                isDirJob = true;
+            }
+            break;
+        }
+    }
+
+    if (jobId > 0) {
+        (void)m_archive->RemoveJob(jobId);
+    }
+
+    if (isDirJob && !targetPath.isEmpty()) {
+        QString dirSlash = targetPath.endsWith(u'/') ? targetPath : (targetPath + u'/');
+        std::u16string u16DirSlash = dirSlash.toStdU16String();
+        for (const auto &j : m_archive->GetJobs()) {
+            if (j.GetFileName().starts_with(u16DirSlash)) {
+            childJobIds.push_back(j.GetId());
+            }
+        }
+        for (int childId : childJobIds) {
+            (void)m_archive->RemoveJob(childId);
+        }
+    }
+
+    // Clean up m_stagedPendingItems by path match, NOT by modelIndex!
+    if (!targetPath.isEmpty()) {
     QString targetSlash = targetPath.endsWith(u'/') ? targetPath : (targetPath + u'/');
-    QString targetNoSlash = (targetPath.length() > 1 && targetPath.endsWith(u'/'))
-                                ? targetPath.left(targetPath.length() - 1)
-                                : targetPath;
+    QString targetNoSlash = (targetPath.length() > 1 && targetPath.endsWith(u'/')) ? targetPath.left(targetPath.length() - 1) : targetPath;
+
     if (!isDirJob) {
-      m_stagedPendingItems.remove(targetSlash);
-      m_stagedPendingItems.remove(targetNoSlash);
-    } else {
-      std::vector<QString> toRem;
-      for (auto it = m_stagedPendingItems.constBegin(); it != m_stagedPendingItems.constEnd(); ++it) {
-        const QString &sPath = it.key();
-        if (sPath == targetSlash || sPath == targetNoSlash ||
-            sPath.startsWith(targetSlash) ||
-            (!sPath.endsWith(u'/') && (sPath + u'/').startsWith(targetSlash))) {
-          toRem.push_back(sPath);
-        }
-      }
-      for (const auto &k : toRem) {
-        m_stagedPendingItems.remove(k);
-      }
+        m_stagedPendingItems.remove(targetSlash);
+        m_stagedPendingItems.remove(targetNoSlash);
     }
-  }
+    else {
+        std::vector<QString> toRem;
+        for (auto it = m_stagedPendingItems.constBegin(); it != m_stagedPendingItems.constEnd(); ++it) {
+            const QString &sPath = it.key();
+            if (sPath == targetSlash || sPath == targetNoSlash ||
+                sPath.startsWith(targetSlash) ||
+                (!sPath.endsWith(u'/') && (sPath + u'/').startsWith(targetSlash))) {
+                toRem.push_back(sPath);
+            }
+        }
+        for (const auto &k : toRem) {
+            m_stagedPendingItems.remove(k);
+        }
+    }
+    }
 
-  if (m_jobModel) {
-    if (modelIndex >= 0 && modelIndex < m_jobModel->count()) {
-      m_jobModel->remove(modelIndex);
-    } else if (jobId > 0) {
-      for (int i = 0; i < m_jobModel->count(); ++i) {
-        if (m_jobModel->get(i).value(QStringLiteral("id")).toInt() == jobId) {
-          m_jobModel->remove(i);
-          break;
+    if (m_jobModel) {
+        if (modelIndex >= 0 && modelIndex < m_jobModel->count()) {
+            m_jobModel->remove(modelIndex);
+        } else if (jobId > 0) {
+            for (int i = 0; i < m_jobModel->count(); ++i) {
+                if (m_jobModel->get(i).value(QStringLiteral("id")).toInt() == jobId) {
+                    m_jobModel->remove(i);
+                    break;
+                }
+            }
         }
-      }
-    }
-    for (int cid : childJobIds) {
-      for (int i = 0; i < m_jobModel->count(); ++i) {
-        if (m_jobModel->get(i).value(QStringLiteral("id")).toInt() == cid) {
-          m_jobModel->remove(i);
-          break;
+        for (int cid : childJobIds) {
+            for (int i = 0; i < m_jobModel->count(); ++i) {
+                if (m_jobModel->get(i).value(QStringLiteral("id")).toInt() == cid) {
+                    m_jobModel->remove(i);
+                    break;
+                }
+            }
         }
-      }
     }
-  }
 
-  syncJobsList();
-  buildArchiveTree();
-  setStatusMessage(QStringLiteral("Removed job from queue."));
-  return true;
+    syncJobsList();
+    buildArchiveTree();
+    setStatusMessage(QStringLiteral("Removed job from queue."));
+    return true;
 }
 
 bool ArchiveInterface::retryJob(int jobId, int modelIndex) {
-  m_stopSource = std::stop_source();
+    m_stopSource = std::stop_source();
 
-  if (m_archive) {
-    if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
-      emit passwordRequired(m_archivePath);
-      return false;
+    if (m_archive) {
+        if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
+            emit passwordRequired(m_archivePath);
+            return false;
+        }
+        (void)m_archive->ResetJob(jobId);
     }
-    (void)m_archive->ResetJob(jobId);
-  }
 
-  if (m_jobModel) {
-    if (modelIndex >= 0 && modelIndex < m_jobModel->count()) {
-      m_jobModel->setProperty(modelIndex, QStringLiteral("state"),
-                              QStringLiteral("pending"));
-      m_jobModel->setProperty(modelIndex, QStringLiteral("progress"), 0.0);
-      m_jobModel->setProperty(modelIndex, QStringLiteral("detail"),
-                              QStringLiteral("Queued for retry"));
+    if (m_jobModel) {
+        if (modelIndex >= 0 && modelIndex < m_jobModel->count()) {
+            m_jobModel->setProperty(modelIndex, QStringLiteral("state"),
+                                    QStringLiteral("pending"));
+            m_jobModel->setProperty(modelIndex, QStringLiteral("progress"), 0.0);
+            m_jobModel->setProperty(modelIndex, QStringLiteral("detail"),
+                                    QStringLiteral("Queued for retry"));
+        }
+        for (int i = 0; i < m_jobModel->count(); ++i) {
+            QString st = m_jobModel->get(i).value(QStringLiteral("state")).toString();
+            if (st == QStringLiteral("failed") || st == QStringLiteral("aborted")) {
+            m_jobModel->setProperty(i, QStringLiteral("state"),
+                                    QStringLiteral("pending"));
+            m_jobModel->setProperty(i, QStringLiteral("progress"), 0.0);
+            m_jobModel->setProperty(i, QStringLiteral("detail"),
+                                    QStringLiteral("Queued"));
+            }
+        }
     }
-    for (int i = 0; i < m_jobModel->count(); ++i) {
-      QString st = m_jobModel->get(i).value(QStringLiteral("state")).toString();
-      if (st == QStringLiteral("failed") || st == QStringLiteral("aborted")) {
-        m_jobModel->setProperty(i, QStringLiteral("state"),
-                                QStringLiteral("pending"));
-        m_jobModel->setProperty(i, QStringLiteral("progress"), 0.0);
-        m_jobModel->setProperty(i, QStringLiteral("detail"),
-                                QStringLiteral("Queued"));
-      }
-    }
-  }
 
-  if (!m_lastExtractOutputDir.isEmpty()) {
-    setStatusMessage(QStringLiteral("Retrying extraction..."));
-    return extractItem(m_lastExtractRelPath, m_lastExtractOutputDir);
-  } else {
-    setStatusMessage(QStringLiteral("Retrying archive operations..."));
-    return saveChanges();
-  }
+    if (!m_lastExtractOutputDir.isEmpty()) {
+        setStatusMessage(QStringLiteral("Retrying extraction..."));
+        return extractItem(m_lastExtractRelPath, m_lastExtractOutputDir);
+    } else {
+        setStatusMessage(QStringLiteral("Retrying archive operations..."));
+        return saveChanges();
+    }
 }
 
 void ArchiveInterface::cancelCurrentOperation() {
-  m_stopSource.request_stop();
-  if (m_currentTask) {
-    m_currentTask->cancel();
-  }
-  m_currentOperationName = QStringLiteral("Cancelling operation...");
-  setStatusMessage(QStringLiteral("Cancelling operation..."));
-  if (m_jobModel) {
-    m_jobModel->abortRunningJobs();
-  }
-  emit progressChanged();
+    m_stopSource.request_stop();
+    if (m_currentTask) {
+        m_currentTask->cancel();
+    }
+
+    m_currentOperationName = QStringLiteral("Cancelling operation...");
+    setStatusMessage(QStringLiteral("Cancelling operation..."));
+    if (m_jobModel) {
+        m_jobModel->abortRunningJobs();
+    }
+    emit progressChanged();
 }
 
 void ArchiveInterface::pauseCurrentOperation() {
-  if (m_currentTask) {
-    m_currentTask->pause();
-    emit isPausedChanged(true);
-  }
+    if (m_currentTask) {
+        m_currentTask->pause();
+        emit isPausedChanged(true);
+    }
 }
 
 void ArchiveInterface::resumeCurrentOperation() {
-  if (m_currentTask) {
-    m_currentTask->resume();
-    emit isPausedChanged(false);
-  }
+    if (m_currentTask) {
+        m_currentTask->resume();
+        emit isPausedChanged(false);
+    }
 }
 
 void ArchiveInterface::togglePauseCurrentOperation() {
-  if (m_currentTask) {
-    bool paused = m_currentTask->toggle_pause();
-    emit isPausedChanged(paused);
-  }
+    if (m_currentTask) {
+        bool paused = m_currentTask->toggle_pause();
+        emit isPausedChanged(paused);
+    }
 }
 
 void ArchiveInterface::setOperationPaused(bool paused) {
-  if (m_currentTask) {
-    if (paused) {
-      m_currentTask->pause();
-    } else {
-      m_currentTask->resume();
+    if (m_currentTask) {
+        if (paused) {
+            m_currentTask->pause();
+        } else {
+            m_currentTask->resume();
+        }
+        emit isPausedChanged(m_currentTask->is_paused());
     }
-    emit isPausedChanged(m_currentTask->is_paused());
-  }
 }
 
 bool ArchiveInterface::addCompressionLevelJob(int level) {
-  if (level < 1 || level > 3) {
-    qWarning() << "addCompressionLevelJob: invalid compression level" << level;
-    return false;
-  }
-  if (!m_archive) {
-    setStatusMessage(QStringLiteral("No archive open to set compression level."));
-    return false;
-  }
-  if (isBusy()) {
-    emit errorOccurred(QStringLiteral("Busy"), QStringLiteral("Another operation is already in progress."));
-    return false;
-  }
+    if (level < 1 || level > 3) {
+        qWarning() << "addCompressionLevelJob: invalid compression level" << level;
+        return false;
+    }
+    if (!m_archive) {
+        setStatusMessage(QStringLiteral("No archive open to set compression level."));
+        return false;
+    }
+    if (isBusy()) {
+        emit errorOccurred(QStringLiteral("Busy"), QStringLiteral("Another operation is already in progress."));
+        return false;
+    }
 
-  auto res = m_archive->ChangeCompressionLevel(static_cast<uint32_t>(level));
-  if (!res) {
-    emit errorOccurred(QStringLiteral("Job Error"), QStringLiteral("Could not queue compression level change."));
-    return false;
-  }
+    auto res = m_archive->ChangeCompressionLevel(static_cast<uint32_t>(level));
+    if (!res) {
+        emit errorOccurred(QStringLiteral("Job Error"), QStringLiteral("Could not queue compression level change."));
+        return false;
+    }
 
-  m_metadata->setCompressionLevel(level);
-  syncJobsList();
-  emit jobsChanged();
+    m_metadata->setCompressionLevel(level);
+    syncJobsList();
+    emit jobsChanged();
 
-  QString lvlName = (level == 1) ? QStringLiteral("Fast (Store)")
-                  : (level == 2) ? QStringLiteral("Balanced")
-                  : QStringLiteral("Ultra");
-  setStatusMessage(QStringLiteral("Queued compression level change to %1.").arg(lvlName));
-  return true;
+    QString lvlName = (level == 1) ? QStringLiteral("Fast")
+                    : (level == 2) ? QStringLiteral("Balanced")
+                    : QStringLiteral("Ultra");
+
+    setStatusMessage(QStringLiteral("Queued compression level change to %1.").arg(lvlName));
+    return true;
 }
 
 void ArchiveInterface::setCompressionLevel(int level) {
-  if (level < 1 || level > 3) {
-    return;
-  }
-  if (m_archive) {
-    addCompressionLevelJob(level);
-  } else {
-    m_metadata->setCompressionLevel(level);
-  }
+    if (level < 1 || level > 3) {
+        return;
+    }
+    if (m_archive) {
+        addCompressionLevelJob(level);
+    } else {
+        m_metadata->setCompressionLevel(level);
+    }
 }
 
 void ArchiveInterface::setPreserveMetadata(bool preserve) {
-  if (m_archive) {
-    m_archive->SetPreserveMetadata(preserve);
-  }
-  m_metadata->setPreserveMetadata(preserve);
+    if (m_archive) {
+        m_archive->SetPreserveMetadata(preserve);
+    }
+    m_metadata->setPreserveMetadata(preserve);
 }
 
 void ArchiveInterface::refreshArchiveView() {
-  if (m_archive) {
-    m_metadata->updateFromSeMetadata(m_archive->GetMetadata());
-  }
-  buildArchiveTree();
-  syncJobsList();
+    if (m_archive) {
+        m_metadata->updateFromSeMetadata(m_archive->GetMetadata());
+    }
+    buildArchiveTree();
+    syncJobsList();
 }
 
 void ArchiveInterface::onJobProgressUpdated(const SeJob &job) {
-  if (m_stopSource.stop_requested()) {
-    if (m_jobModel) {
-      m_jobModel->abortRunningJobs();
-    }
-    return;
-  }
-
-  if (job.GetJobType() == JobType::CompressionLevelChange) {
-    int lvl = !job.GetFileName().empty() ? (job.GetFileName()[0] - u'0') : 0;
-    m_currentFileName = (lvl == 1) ? QStringLiteral("Fast (Store)")
-                      : (lvl == 2) ? QStringLiteral("Balanced")
-                      : (lvl == 3) ? QStringLiteral("Ultra")
-                      : QStringLiteral("Level %1").arg(lvl);
-  } else {
-    m_currentFileName = QString::fromStdU16String(job.GetFileName());
-  }
-  if (job.GetJobType() == JobType::ExtractDirectory ||
-      job.GetJobType() == JobType::AddDirectory ||
-      job.GetJobType() == JobType::ExtractFile ||
-      job.GetJobType() == JobType::TestFile) {
-    m_extractTotalBytes = job.totalBytes;
-    m_extractProcessedBytes = job.processedBytes;
-    m_extractCompressedBytes = job.compressedBytes;
-    m_overallProgress = static_cast<qreal>(job.percentage) / 100.0;
-    m_fileProgress = (job.GetStatus() == JobStatus::Finished || job.percentage == 100) ? 1.0 : 0.0;
-    if (m_jobModel && m_jobModel->count() > 0) {
-      m_jobModel->updateJob(job);
-      m_overallProgress = m_jobModel->overallProgress();
-      m_processedFiles = m_jobModel->finishedCount();
-      m_totalFiles = m_jobModel->count();
-    }
-  } else {
-    m_fileProgress = static_cast<qreal>(job.percentage) / 100.0;
-    if (m_isCommitting && m_jobModel && m_jobModel->count() > 0) {
-      m_jobModel->updateJob(job);
-      m_overallProgress = m_jobModel->overallProgress();
-      m_processedFiles = m_jobModel->finishedCount();
-      m_totalFiles = m_jobModel->count();
-    } else {
-      m_overallProgress = m_fileProgress;
-      m_extractTotalBytes = job.totalBytes;
-      m_extractProcessedBytes = job.processedBytes;
-      m_extractCompressedBytes = job.compressedBytes;
-    }
-  }
-
-  // Defer ArchiveTreeModel updates during commit to avoid freezing the UI thread with linear scans.
-  // Tree is rebuilt cleanly in onSaveCompleted() -> refreshArchiveView().
-  if (!m_isCommitting && job.GetStatus() == JobStatus::Finished &&
-      (job.GetJobType() == JobType::AddFile ||
-       job.GetJobType() == JobType::CreateArchiveDirectory ||
-       job.GetJobType() == JobType::AddDirectory)) {
-    QString relPath = QString::fromStdU16String(job.GetFileName());
-    if (!relPath.startsWith(u'/')) {
-      relPath.prepend(u'/');
-    }
-
-    QString relSlash = relPath.endsWith(u'/') ? relPath : (relPath + u'/');
-    QString relNoSlash = (relPath.length() > 1 && relPath.endsWith(u'/'))
-                             ? relPath.left(relPath.length() - 1)
-                             : relPath;
-
-    // Remove from m_stagedPendingItems with O(1) hash removal
-    if (!m_stagedPendingItems.isEmpty()) {
-      if (!m_stagedPendingItems.remove(relPath)) {
-        if (!m_stagedPendingItems.remove(relSlash)) {
-          m_stagedPendingItems.remove(relNoSlash);
+    if (m_stopSource.stop_requested()) {
+        if (m_jobModel) {
+            m_jobModel->abortRunningJobs();
         }
-      }
+        return;
     }
 
-    quint32 crc32 = job.crc32;
-    if (m_treeModel) {
-      m_treeModel->markItemCommitted(relPath, static_cast<qulonglong>(job.compressedBytes), crc32);
+    if (job.GetJobType() != JobType::CompressionLevelChange) {
+        /*int lvl = !job.GetFileName().empty() ? (job.GetFileName()[0] - u'0') : 0;
+        m_currentFileName = (lvl == 1) ? QStringLiteral("Fast (Store)")
+                            : (lvl == 2) ? QStringLiteral("Balanced")
+                            : (lvl == 3) ? QStringLiteral("Ultra")
+                            : QStringLiteral("Level %1").arg(lvl);*/
+        m_currentFileName = QString::fromStdU16String(job.GetFileName());
     }
-  }
 
-  emit progressChanged();
+    if (job.GetJobType() == JobType::ExtractDirectory ||
+        job.GetJobType() == JobType::AddDirectory ||
+        job.GetJobType() == JobType::ExtractFile ||
+        job.GetJobType() == JobType::TestFile)
+    {
+        m_extractTotalBytes = job.totalBytes;
+        m_extractProcessedBytes = job.processedBytes;
+        m_extractCompressedBytes = job.compressedBytes;
+        m_overallProgress = static_cast<qreal>(job.percentage) / 100.0;
+
+        m_fileProgress = (job.GetStatus() == JobStatus::Finished || job.percentage == 100) ? 1.0 : 0.0;
+        if (m_jobModel && m_jobModel->count() > 0) {
+            m_jobModel->updateJob(job);
+            m_overallProgress = m_jobModel->overallProgress();
+            m_processedFiles = m_jobModel->finishedCount();
+            m_totalFiles = m_jobModel->count();
+        }
+    } 
+    else {
+        m_fileProgress = static_cast<qreal>(job.percentage) / 100.0;
+        if (m_jobModel && m_jobModel->count() > 0) {
+            m_jobModel->updateJob(job);
+            m_overallProgress = m_jobModel->overallProgress();
+            m_processedFiles = m_jobModel->finishedCount();
+            m_totalFiles = m_jobModel->count();
+        } else {
+            m_overallProgress = m_fileProgress;
+            m_extractTotalBytes = job.totalBytes;
+            m_extractProcessedBytes = job.processedBytes;
+            m_extractCompressedBytes = job.compressedBytes;
+        }
+    }
+
+    // Defer ArchiveTreeModel updates during commit to avoid freezing the UI thread with linear scans.
+    // Tree is rebuilt cleanly in onSaveCompleted() -> refreshArchiveView().
+    if (!m_isCommitting && job.GetStatus() == JobStatus::Finished &&
+        (job.GetJobType() == JobType::AddFile ||
+        job.GetJobType() == JobType::CreateArchiveDirectory ||
+        job.GetJobType() == JobType::AddDirectory))
+    {
+        QString relPath = QString::fromStdU16String(job.GetFileName());
+        if (!relPath.startsWith(u'/')) {
+            relPath.prepend(u'/');
+        }
+
+        QString relSlash = relPath.endsWith(u'/') ? relPath : (relPath + u'/');
+        QString relNoSlash = (relPath.length() > 1 && relPath.endsWith(u'/')) ? relPath.left(relPath.length() - 1) : relPath;
+
+        if (!m_stagedPendingItems.isEmpty()) { // remove from pending items
+            if (!m_stagedPendingItems.remove(relPath)) {
+                if (!m_stagedPendingItems.remove(relSlash)) {
+                    m_stagedPendingItems.remove(relNoSlash);
+                }
+            }
+        }
+
+        quint32 crc32 = job.crc32;
+        if (m_treeModel) {
+            m_treeModel->markItemCommitted(relPath, static_cast<qulonglong>(job.compressedBytes), crc32);
+        }
+    }
+
+    emit progressChanged();
 }
 
 void ArchiveInterface::onJobsBatchProgressUpdated(const std::vector<SeJob> &batch) {
-  if (batch.empty())
-    return;
+    if (batch.empty())
+        return;
 
-  if (m_stopSource.stop_requested()) {
-    if (m_jobModel) {
-      m_jobModel->abortRunningJobs();
+    if (m_stopSource.stop_requested()) {
+        if (m_jobModel) {
+            m_jobModel->abortRunningJobs();
+        }
+        return;
     }
-    return;
-  }
 
-  // Prioritize active running job in the batch if present, otherwise take the last job
-  const SeJob *activeJob = nullptr;
-  for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
-    if (it->GetStatus() == JobStatus::Running || it->GetStatus() == JobStatus::Pending) {
-      activeJob = &(*it);
-      break;
+    // Prioritize active running job in the batch if present, otherwise take the last job
+    const SeJob *activeJob = nullptr;
+    for (auto it = batch.rbegin(); it != batch.rend(); ++it) {
+        if (it->GetStatus() == JobStatus::Running || it->GetStatus() == JobStatus::Pending) {
+            activeJob = &(*it);
+            break;
+        }
     }
-  }
-  const auto &lastJob = (activeJob != nullptr) ? (*activeJob) : batch.back();
-  if (lastJob.GetJobType() == JobType::CompressionLevelChange) {
-    int lvl = !lastJob.GetFileName().empty() ? (lastJob.GetFileName()[0] - u'0') : 0;
-    m_currentFileName = (lvl == 1) ? QStringLiteral("Fast (Store)")
-                      : (lvl == 2) ? QStringLiteral("Balanced")
-                      : (lvl == 3) ? QStringLiteral("Ultra")
-                      : QStringLiteral("Level %1").arg(lvl);
-  } else {
-    m_currentFileName = QString::fromStdU16String(lastJob.GetFileName());
-  }
-  if (lastJob.GetJobType() == JobType::ExtractDirectory ||
-      lastJob.GetJobType() == JobType::AddDirectory ||
-      lastJob.GetJobType() == JobType::ExtractFile ||
-      lastJob.GetJobType() == JobType::TestFile) {
-    m_extractTotalBytes = lastJob.totalBytes;
-    m_extractProcessedBytes = lastJob.processedBytes;
-    m_extractCompressedBytes = lastJob.compressedBytes;
-    m_overallProgress = static_cast<qreal>(lastJob.percentage) / 100.0;
-    m_fileProgress = (lastJob.GetStatus() == JobStatus::Finished || lastJob.percentage == 100) ? 1.0 : 0.0;
-  } else {
-    m_fileProgress = static_cast<qreal>(lastJob.percentage) / 100.0;
-    if (m_isCommitting && m_jobModel && m_jobModel->count() > 0) {
-      m_jobModel->updateJobsBatch(batch);
-      m_overallProgress = m_jobModel->overallProgress();
-      m_processedFiles = m_jobModel->finishedCount();
-      m_totalFiles = m_jobModel->count();
-    } else {
-      m_overallProgress = m_fileProgress;
-      m_extractTotalBytes = lastJob.totalBytes;
-      m_extractProcessedBytes = lastJob.processedBytes;
-      m_extractCompressedBytes = lastJob.compressedBytes;
-    }
-  }
 
-  emit progressChanged();
+    auto &lastJob = const_cast<SeJob&>((activeJob != nullptr) ? (*activeJob) : batch.back());
+
+    if (lastJob.GetJobType() != JobType::CompressionLevelChange) {
+        m_currentFileName = QString::fromStdU16String(lastJob.GetFileName());
+
+        /*int lvl = !lastJob.GetFileName().empty() ? (lastJob.GetFileName()[0] - u'0') : 0;
+        m_currentFileName = (lvl == 1) ? QStringLiteral("Fast (Store)")
+                            : (lvl == 2) ? QStringLiteral("Balanced")
+                            : (lvl == 3) ? QStringLiteral("Ultra")
+                            : QStringLiteral("Level %1").arg(lvl);*/
+    }
+
+    if (lastJob.GetJobType() == JobType::ExtractDirectory ||
+        lastJob.GetJobType() == JobType::AddDirectory ||
+        lastJob.GetJobType() == JobType::ExtractFile ||
+        lastJob.GetJobType() == JobType::TestFile)
+    {
+        m_extractTotalBytes = lastJob.totalBytes;
+        m_extractProcessedBytes = lastJob.processedBytes;
+        m_extractCompressedBytes = lastJob.compressedBytes;
+        m_overallProgress = lastJob.totalBytes > 0.0 ? static_cast<double>(lastJob.processedBytes) / lastJob.totalBytes : 0.0;
+        m_fileProgress = lastJob.percentage / 100.0;
+
+        if (m_jobModel && m_jobModel->count() > 0) {
+            m_jobModel->updateJobsBatch(batch);
+            //m_overallProgress = m_jobModel->overallProgress();
+            m_processedFiles = m_jobModel->finishedCount();
+            m_totalFiles = m_jobModel->count();
+        }
+
+    }
+    else {
+        m_fileProgress = static_cast<qreal>(lastJob.percentage) / 100.0;
+        if (m_jobModel && m_jobModel->count() > 0) {
+            m_jobModel->updateJobsBatch(batch);
+            m_overallProgress = m_jobModel->overallProgress();
+            m_processedFiles = m_jobModel->finishedCount();
+            m_totalFiles = m_jobModel->count();
+        }
+        else {
+            m_overallProgress = m_fileProgress;
+            m_extractTotalBytes = lastJob.totalBytes;
+            m_extractProcessedBytes = lastJob.processedBytes;
+            m_extractCompressedBytes = lastJob.compressedBytes;
+        }
+    }
+
+    emit progressChanged();
 }
 
 void ArchiveInterface::onSaveCompleted(bool success, const QString &errorMsg) {

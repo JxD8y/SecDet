@@ -53,11 +53,17 @@ class ArchiveInterface : public QObject {
     Q_PROPERTY(qulonglong totalProcessedBytes READ totalProcessedBytes NOTIFY progressChanged)
     Q_PROPERTY(qulonglong totalCompressedBytes READ totalCompressedBytes NOTIFY progressChanged)
     Q_PROPERTY(qulonglong totalBytes READ totalBytes NOTIFY progressChanged)
+
+    // TOBE REMOVED
     Q_PROPERTY(QVariantList entropyRegions READ entropyRegions NOTIFY entropyRegionsChanged)
     Q_PROPERTY(bool isCalculatingEntropy READ isCalculatingEntropy NOTIFY entropyCalculationChanged)
     Q_PROPERTY(qreal averageEntropy READ averageEntropy NOTIFY entropyRegionsChanged)
+    // TOBE REMOVED
+
     Q_PROPERTY(qulonglong totalArchiveSize READ totalArchiveSize NOTIFY entropyRegionsChanged)
     Q_PROPERTY(bool isPaused READ isPaused NOTIFY isPausedChanged)
+
+    // RECOVERY CONTEXT IS NOT HERE !
     Q_PROPERTY(bool isRecovering READ isRecovering NOTIFY recoveryStatusChanged)
     Q_PROPERTY(bool hasRecoveryArchive READ hasRecoveryArchive NOTIFY recoveryStatusChanged)
     Q_PROPERTY(QString recoveryFilePath READ recoveryFilePath NOTIFY recoveryStatusChanged)
@@ -80,18 +86,21 @@ public:
     [[nodiscard]] QString archiveFilePath() const { return m_archivePath; }
     [[nodiscard]] QString lastAttemptedArchivePath() const { return m_lastAttemptedArchivePath; }
     [[nodiscard]] QString archiveFileName() const;
+
     [[nodiscard]] bool isPaused() const {
         if (m_currentTask) {
             return m_currentTask->is_paused();
         }
         return false;
     }
+
     [[nodiscard]] bool isKeyRegistered() const {
         if (m_archive) {
             return m_archive->IsKeyPresent();
         }
         return m_isKeyRegistered;
     }
+
     [[nodiscard]] ArchiveTreeModel* treeModel() const { return m_treeModel; }
     [[nodiscard]] SeJobModel* jobModel() const { return m_jobModel; }
     [[nodiscard]] QVariantList archiveTree() const { return m_archiveTree; }
@@ -113,24 +122,28 @@ public:
     [[nodiscard]] QString currentFileName() const { return m_currentFileName; }
     [[nodiscard]] int processedFiles() const { return (m_jobModel && m_jobModel->count() > 0) ? m_jobModel->finishedCount() : m_processedFiles; }
     [[nodiscard]] int totalFiles() const { return (m_jobModel && m_jobModel->count() > 0) ? m_jobModel->count() : m_totalFiles; }
+
     [[nodiscard]] qulonglong totalProcessedBytes() const {
         if (m_isCommitting && m_jobModel && m_jobModel->totalProcessedBytes() > 0) return m_jobModel->totalProcessedBytes();
         if (m_extractProcessedBytes > 0) return m_extractProcessedBytes;
         if (m_jobModel && m_jobModel->totalProcessedBytes() > 0) return m_jobModel->totalProcessedBytes();
         return 0;
     }
+
     [[nodiscard]] qulonglong totalCompressedBytes() const {
         if (m_isCommitting && m_jobModel && m_jobModel->totalCompressedBytes() > 0) return m_jobModel->totalCompressedBytes();
         if (m_extractCompressedBytes > 0) return m_extractCompressedBytes;
         if (m_jobModel && m_jobModel->totalCompressedBytes() > 0) return m_jobModel->totalCompressedBytes();
         return 0;
     }
+
     [[nodiscard]] qulonglong totalBytes() const {
         if (m_isCommitting && m_jobModel && m_jobModel->totalBytes() > 0) return m_jobModel->totalBytes();
         if (m_extractTotalBytes > 0) return m_extractTotalBytes;
         if (m_jobModel && m_jobModel->totalBytes() > 0) return m_jobModel->totalBytes();
         return 0;
     }
+
     [[nodiscard]] QVariantList entropyRegions() const { return m_entropyRegions; }
     [[nodiscard]] bool isCalculatingEntropy() const { return m_isCalculatingEntropy; }
     [[nodiscard]] qreal averageEntropy() const { return m_averageEntropy; }
@@ -143,6 +156,7 @@ public:
         if (m_recoveryFilePath.isEmpty()) return QStringLiteral("No Archive");
         return QFileInfo(m_recoveryFilePath).fileName();
     }
+
     [[nodiscard]] QString recoveryMetadataHealthState() const { return m_recoveryMetadataHealthState; }
     [[nodiscard]] QString recoveryMetadataDetails() const { return m_recoveryMetadataDetails; }
     [[nodiscard]] bool isRecoveryMetadataHealthy() const { return m_isRecoveryMetadataHealthy; }
@@ -196,16 +210,17 @@ public:
     Q_INVOKABLE bool addCompressionLevelJob(int level);
     Q_INVOKABLE void setPreserveMetadata(bool preserve);
 
-    Q_INVOKABLE void refreshArchiveView();
-    Q_INVOKABLE void calculateEntropy();
-    Q_INVOKABLE QVariantMap getSunburstData(const QString &folderPath = QStringLiteral("/")) const;
+    Q_INVOKABLE void calculateEntropy(); // ENTROPY CONCEPT IS REMOVED BECAUSE AFTER ENCRYPTION AVG. ENTROPY IS ~ 7
 
+    Q_INVOKABLE void refreshArchiveView();
+    Q_INVOKABLE QVariantMap getSunburstData(const QString &folderPath = QStringLiteral("/")) const;
+    
     Q_INVOKABLE bool isItemLocked(const QString &archiveRelativePath) const;
     Q_INVOKABLE bool testKeyForPath(const QString &archiveRelativePath, const QString &password);
     Q_INVOKABLE bool testFile(const QString &archiveRelativePath);
     Q_INVOKABLE bool testArchive();
 
-    // Recovery Invocable Methods
+    // Recovery Invocable Methods - CONTEXT IS SEPERATE TOBE REMOVED
     Q_INVOKABLE bool recoverArchive(const QString &filePath, const QString &password = QString());
     Q_INVOKABLE void unloadRecoveryArchive();
     Q_INVOKABLE bool registerRecoveryKey(const QString &password);
@@ -256,7 +271,6 @@ private:
     void setStatusMessage(const QString &message);
     void buildArchiveTree();
     void updateFileMapRegions();
-    void testArchiveEntriesKey(const std::string &password);
 
     struct PendingStagedItem {
         QString localDiskPath;
@@ -292,7 +306,7 @@ private:
     bool m_isCalculatingEntropy = false;
     qreal m_averageEntropy = 0.0;
     qulonglong m_totalArchiveSize = 0;
-    std::atomic<uint64_t> m_fileMapCalcGeneration{0};
+    std::atomic<uint64_t> m_fileMapCalcGeneration{0}; // TO BE REMOVED
 
     SeMetadataObject *m_metadata = nullptr;
     ArchiveTreeModel *m_treeModel = nullptr;

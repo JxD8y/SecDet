@@ -122,6 +122,88 @@ static QString extractBaseFileName(const QString &rawPath) {
     return path;
 }
 
+void SeJobModel::indexJobFile(const QString &path, size_t index) {
+    if (path.isEmpty()) return;
+    m_fileToIndex[path] = index;
+    QString norm = path;
+    norm.replace(u'\\', u'/');
+    m_fileToIndex[norm] = index;
+    if (norm.startsWith(u'/')) {
+        m_fileToIndex[norm.mid(1)] = index;
+    } else {
+        m_fileToIndex[QStringLiteral("/") + norm] = index;
+    }
+    QString baseName = QFileInfo(norm).fileName();
+    if (!baseName.isEmpty()) {
+        m_fileToIndex[baseName] = index;
+    }
+}
+
+int SeJobModel::findJobIndex(int id, const QString &fileName) const {
+    if (id > 0) {
+        auto it = m_idToIndex.find(id);
+        if (it != m_idToIndex.end()) {
+            return static_cast<int>(it->second);
+        }
+    }
+
+    if (!fileName.isEmpty()) {
+        auto it = m_fileToIndex.find(fileName);
+        if (it != m_fileToIndex.end()) {
+            return static_cast<int>(it->second);
+        }
+
+        QString norm = fileName;
+        norm.replace(u'\\', u'/');
+        it = m_fileToIndex.find(norm);
+        if (it != m_fileToIndex.end()) {
+            return static_cast<int>(it->second);
+        }
+
+        if (norm.startsWith(u'/')) {
+            it = m_fileToIndex.find(norm.mid(1));
+            if (it != m_fileToIndex.end()) return static_cast<int>(it->second);
+        } else {
+            it = m_fileToIndex.find(QStringLiteral("/") + norm);
+            if (it != m_fileToIndex.end()) return static_cast<int>(it->second);
+        }
+
+        QString baseName = QFileInfo(norm).fileName();
+        if (!baseName.isEmpty()) {
+            it = m_fileToIndex.find(baseName);
+            if (it != m_fileToIndex.end()) {
+                return static_cast<int>(it->second);
+            }
+        }
+    }
+
+    if (id > 0) {
+        for (size_t r = 0; r < m_jobs.size(); ++r) {
+            if (m_jobs[r].id == id) {
+                return static_cast<int>(r);
+            }
+        }
+    }
+
+    if (m_jobs.size() == 1) {
+        return 0;
+    }
+
+    if (m_runningJobIndex >= 0 && m_runningJobIndex < static_cast<int>(m_jobs.size())) {
+        return m_runningJobIndex;
+    }
+
+    for (size_t r = 0; r < m_jobs.size(); ++r) {
+        if (m_jobs[r].state == QStringLiteral("running") ||
+            m_jobs[r].state == QStringLiteral("pending") ||
+            m_jobs[r].state == QStringLiteral("idle")) {
+            return static_cast<int>(r);
+        }
+    }
+
+    return -1;
+}
+
 void SeJobModel::setJobs(const std::vector<SeJob> &jobs) {
     beginResetModel();
     m_jobs.clear();
@@ -179,11 +261,9 @@ void SeJobModel::setJobs(const std::vector<SeJob> &jobs) {
         if (data.id > 0) {
             m_idToIndex[data.id] = i;
         }
-        if (!rawFileName.isEmpty()) {
-            m_fileToIndex[rawFileName] = i;
-        }
+        indexJobFile(rawFileName, i);
         if (!data.fileName.isEmpty() && data.fileName != rawFileName) {
-            m_fileToIndex[data.fileName] = i;
+            indexJobFile(data.fileName, i);
         }
     }
     endResetModel();
@@ -218,7 +298,7 @@ void SeJobModel::setTestJobs(const QStringList &filePaths) {
 
         m_jobs.push_back(data);
         m_idToIndex[data.id] = i;
-        m_fileToIndex[data.fileName] = i;
+        indexJobFile(data.fileName, i);
     }
 
     endResetModel();
@@ -252,10 +332,7 @@ void SeJobModel::setExtractJobs(const QStringList &filePaths) {
 
         m_jobs.push_back(data);
         m_idToIndex[data.id] = i;
-        m_fileToIndex[data.fileName] = i;
-        if (!fName.isEmpty()) {
-            m_fileToIndex[fName] = i;
-        }
+        indexJobFile(data.fileName, i);
     }
 
     endResetModel();
@@ -295,30 +372,9 @@ void SeJobModel::updateJobsBatch(const std::vector<SeJob> &batch) {
     std::vector<int> changedRows;
 
     for (const auto &job : batch) {
-        int targetRow = -1;
         int id = job.GetId();
-        if (id > 0) {
-            auto it = m_idToIndex.find(id);
-            if (it != m_idToIndex.end()) targetRow = static_cast<int>(it->second);
-        }
-        if (targetRow < 0) {
-            QString fileName = QString::fromStdU16String(job.GetFileName());
-            if (!fileName.isEmpty()) {
-                auto it = m_fileToIndex.find(fileName);
-                if (it != m_fileToIndex.end()) targetRow = static_cast<int>(it->second);
-            }
-        }
-        if (targetRow < 0 && id > 0) {
-            for (size_t r = 0; r < m_jobs.size(); ++r) {
-                if (m_jobs[r].id == id) {
-                    targetRow = static_cast<int>(r);
-                    break;
-                }
-            }
-        }
-        if (targetRow < 0 && m_jobs.size() == 1) {
-            targetRow = 0;
-        }
+        QString fileName = QString::fromStdU16String(job.GetFileName());
+        int targetRow = findJobIndex(id, fileName);
 
         if (targetRow < 0 || targetRow >= static_cast<int>(m_jobs.size())) {
             continue;
@@ -404,14 +460,19 @@ void SeJobModel::updateJobsBatch(const std::vector<SeJob> &batch) {
 
             auto decCount = [&](const QString &s) {
                 if (s == QStringLiteral("running")) m_runningCount = std::max(0, m_runningCount - 1);
-                else if (s == QStringLiteral("finished") || s == QStringLiteral("done")) m_finishedCount = std::max(0, m_finishedCount - 1);
+                else if (s == QStringLiteral("finished") || s == QStringLiteral("done"))
+                {
+                    m_finishedCount = std::max(0, m_finishedCount - 1);
+                }
                 else if (s == QStringLiteral("failed")) m_failedCount = std::max(0, m_failedCount - 1);
                 else if (s == QStringLiteral("paused")) m_pausedCount = std::max(0, m_pausedCount - 1);
                 else if (s == QStringLiteral("aborted")) m_abortedCount = std::max(0, m_abortedCount - 1);
             };
             auto incCount = [&](const QString &s) {
                 if (s == QStringLiteral("running")) m_runningCount++;
-                else if (s == QStringLiteral("finished") || s == QStringLiteral("done")) m_finishedCount++;
+                else if (s == QStringLiteral("finished") || s == QStringLiteral("done")) {
+                    m_finishedCount++;
+                }
                 else if (s == QStringLiteral("failed")) m_failedCount++;
                 else if (s == QStringLiteral("paused")) m_pausedCount++;
                 else if (s == QStringLiteral("aborted")) m_abortedCount++;
@@ -452,13 +513,13 @@ void SeJobModel::updateJobsBatch(const std::vector<SeJob> &batch) {
         }
     }
 
-    if (anyProgressChanged && !m_jobs.empty()) {
+    /*if (anyProgressChanged && !m_jobs.empty()) {
         qreal newOverall = m_progressSum / static_cast<qreal>(m_jobs.size());
         if (std::abs(m_overallProgress - newOverall) > 0.005 || (newOverall >= 0.999 && m_overallProgress < 0.999)) {
             m_overallProgress = newOverall;
             emit overallProgressChanged();
         }
-    }
+    }*/
 
     if (anyBytesChanged) {
         emit this->progressChanged();
@@ -486,33 +547,7 @@ void SeJobModel::updateJobsBatch(const std::vector<SeJob> &batch) {
 
 void SeJobModel::updateJobProgress(int id, const QString &fileName, JobStatus status, qreal progress, const QString &detail,
                                    qulonglong processedBytes, qulonglong compressedBytes, qulonglong totalBytes) {
-    int targetRow = -1;
-    if (id > 0) {
-        auto it = m_idToIndex.find(id);
-        if (it != m_idToIndex.end()) targetRow = static_cast<int>(it->second);
-    }
-    if (targetRow < 0 && !fileName.isEmpty()) {
-        auto it = m_fileToIndex.find(fileName);
-        if (it != m_fileToIndex.end()) targetRow = static_cast<int>(it->second);
-    }
-    if (targetRow < 0 && !fileName.isEmpty()) {
-        QString baseName = QFileInfo(fileName).fileName();
-        if (!baseName.isEmpty()) {
-            auto it = m_fileToIndex.find(baseName);
-            if (it != m_fileToIndex.end()) targetRow = static_cast<int>(it->second);
-        }
-    }
-    if (targetRow < 0 && id > 0) {
-        for (size_t r = 0; r < m_jobs.size(); ++r) {
-            if (m_jobs[r].id == id) {
-                targetRow = static_cast<int>(r);
-                break;
-            }
-        }
-    }
-    if (targetRow < 0 && m_jobs.size() == 1) {
-        targetRow = 0;
-    }
+    int targetRow = findJobIndex(id, fileName);
 
     if (targetRow < 0 || targetRow >= static_cast<int>(m_jobs.size())) {
         return;

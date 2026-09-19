@@ -1852,9 +1852,7 @@ SeArchive::doAddDirectoryJob(SeJob &job, ProgressCallback callback,stop_token st
                 adjusted.processedBytes = baseProcessed + j.processedBytes;
                 adjusted.compressedBytes = baseCompressed + j.compressedBytes;
                 adjusted.totalBytes = totalBytes;
-                adjusted.percentage = (totalBytes > 0)
-                                    ? static_cast<uint32_t>(std::min(100ULL, (adjusted.processedBytes * 100) / totalBytes))
-                                    : 100;
+                adjusted.percentage = j.totalBytes > 0 ? (static_cast<double>(j.processedBytes) / j.totalBytes) * 100 : 0;
                 adjusted.m_status = JobStatus::Running;
                 callback(adjusted);
             };
