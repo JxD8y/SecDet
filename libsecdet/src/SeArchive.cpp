@@ -180,289 +180,290 @@ expected<SeArchive, error_code> SeArchive::LoadArchiveFile(u16string path) {
 }
 
 expected<SeArchive, error_code> SeArchive::RecoverArchiveSync(u16string path, stop_token stopToken) {
-  if (!SeTableOfContent::verifyAbsPath(path))
-    return unexpected(make_error_code(errc::no_such_file_or_directory));
+    if (!SeTableOfContent::verifyAbsPath(path))
+        return unexpected(make_error_code(errc::no_such_file_or_directory));
 
-  MappedFileStream fs;
-  if (auto _fs = fs.open(path, FileMode::OpenExisting); !_fs)
-    return unexpected(_fs.error());
+    MappedFileStream fs;
+    if (auto _fs = fs.open(path, FileMode::OpenExisting); !_fs)
+        return unexpected(_fs.error());
 
-  size_t fileSize = fs.size();
-  const unsigned char *dataPtr = reinterpret_cast<const unsigned char *>(fs.data());
-  if (!dataPtr && fileSize > 0)
-    return unexpected(make_error_code(errc::io_error));
+    size_t fileSize = fs.size();
+    const unsigned char *dataPtr = reinterpret_cast<const unsigned char *>(fs.data());
+    if (!dataPtr && fileSize > 0)
+        return unexpected(make_error_code(errc::io_error));
 
-  string metaHealth;
-  string tocHealth;
+    string metaHealth;
+    string tocHealth;
 
-  SeMetadata metadata(1, 1, true, 0, {});
-  bool metadataValid = false;
+    SeMetadata metadata(1, 1, true, 0, {});
+    bool metadataValid = false;
 
-  // 1. Recover Metadata
-  if (fileSize >= SE_METADATA_SIZE) {
-    auto _meta = SeMetadata::LoadMetadataFromBytes(
-        std::span<unsigned char>(const_cast<unsigned char *>(dataPtr), SE_METADATA_SIZE));
-    if (_meta) {
-      metadata = *_meta;
-      metadataValid = true;
-      metaHealth = "Healthy (Valid Header): Magic SDA, Version " + std::to_string(metadata.m_version) +
-                   ", Compression Level " + std::to_string(metadata.m_compression_level) +
-                   ", Salt & PVV Verified";
-    }
-  }
-
-  if (!metadataValid) {
-    // If the metadata is so damaged that Salt or PVV are unreadable, refuse to open the archive
-    return unexpected(SeError::RequiredFieldMissing);
-  }
-
-  // 2. Deep search the file body for local file entry headers
-  vector<SeArchiveEntry> parsedBodyEntries;
-  size_t cur = SE_METADATA_SIZE;
-  size_t detectedTocOffset = (size_t)-1;
-  const unsigned char pad[] = {0x04, 0x03, 0x4B, 0x50};
-
-  while (cur < fileSize) {
-    if (stopToken.stop_requested())
-      return unexpected(SeError::OperationCanceled);
-
-    // Stop body scan if we reach TOC magic
-    if (cur + 4 <= fileSize && memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) {
-      detectedTocOffset = cur;
-      break;
+    // 1. Recover Metadata
+    if (fileSize >= SE_METADATA_SIZE) {
+        auto _meta = SeMetadata::LoadMetadataFromBytes(std::span<unsigned char>(const_cast<unsigned char *>(dataPtr), SE_METADATA_SIZE));
+        if (_meta) {
+            metadata = *_meta;
+            metadataValid = true;
+            metaHealth = "Version " + std::to_string(metadata.m_version) +
+                ", Compression Level " + std::to_string(metadata.m_compression_level);
+        }
     }
 
-    if (metadataValid && cur == metadata.m_toc_offset && cur + 4 <= fileSize &&
-        memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) {
-      detectedTocOffset = cur;
-      break;
+    if (!metadataValid) { // Without metadata PVV and salt are not present meaning no file can be decrypted
+        return unexpected(SeError::RequiredFieldMissing);
     }
 
-    bool foundEntry = false;
-    SeArchiveEntry candEntry;
-    size_t candHeaderSize = 0;
-    size_t entryStartOffset = cur;
-    size_t payloadStartOffset = cur;
+    vector<SeArchiveEntry> parsedBodyEntries;
+    size_t cur = SE_METADATA_SIZE;
+    size_t detectedTocOffset = (size_t)-1;
+    const unsigned char pad[] = {0x04, 0x03, 0x4B, 0x50};
 
-    // Check if SE_TOC_ENTRY_PAD precedes the entry header
-    if (cur + 4 <= fileSize && memcmp(dataPtr + cur, pad, 4) == 0) {
-      std::span<const unsigned char> rem(dataPtr + cur + 4, fileSize - (cur + 4));
-      if (validateAndParseLocalEntry(rem, cur + 4, candEntry, candHeaderSize)) {
-        foundEntry = true;
-        entryStartOffset = cur;
-        payloadStartOffset = cur + 4 + candHeaderSize;
-        candEntry.offset = cur;
-      }
-    }
-
-    // Check if entry header starts directly at cur
-    if (!foundEntry && cur + 44 <= fileSize) {
-      std::span<const unsigned char> rem(dataPtr + cur, fileSize - cur);
-      if (validateAndParseLocalEntry(rem, cur, candEntry, candHeaderSize)) {
-        foundEntry = true;
-        entryStartOffset = cur;
-        payloadStartOffset = cur + candHeaderSize;
-        candEntry.offset = cur;
-      }
-    }
-
-    if (foundEntry) {
-      size_t expectedEnd = payloadStartOffset + candEntry.compressed_size;
-      // Skip optional trailing pad if present
-      if (expectedEnd + 4 <= fileSize && memcmp(dataPtr + expectedEnd, pad, 4) == 0) {
-        expectedEnd += 4;
-      }
-
-      if (payloadStartOffset + candEntry.compressed_size > fileSize) {
-        candEntry.recoveryState = EntryRecoveryState::FoundTruncated;
-        parsedBodyEntries.push_back(std::move(candEntry));
-        break;
-      } else {
-        parsedBodyEntries.push_back(std::move(candEntry));
-        cur = expectedEnd;
-        continue;
-      }
-    }
-
-    // Fast-forward to next potential boundary
-    cur++;
-    while (cur + 4 <= fileSize) {
-      if (memcmp(dataPtr + cur, pad, 4) == 0 ||
-          memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) {
-        break;
-      }
-      if (cur + 6 <= fileSize && dataPtr[cur + 4] == 0x2F && dataPtr[cur + 5] == 0x00) {
-        break;
-      }
-      cur++;
-    }
-  }
-
-  // 3. Parse TOC (how much of it was present)
-  size_t effectiveTocOffset = (size_t)-1;
-  if (detectedTocOffset != (size_t)-1) {
-    effectiveTocOffset = detectedTocOffset;
-  } else if (metadataValid && metadata.m_toc_offset >= SE_METADATA_SIZE && metadata.m_toc_offset < fileSize) {
-    effectiveTocOffset = metadata.m_toc_offset;
-  }
-
-  vector<SeArchiveEntry> tocEntries;
-  bool tocHeaderValid = false;
-  bool tocFullyRead = false;
-  size_t tocEntriesParsed = 0;
-
-  if (effectiveTocOffset < fileSize) {
-    std::span<const unsigned char> tocSpan(dataPtr + effectiveTocOffset, fileSize - effectiveTocOffset);
-    if (tocSpan.size() >= 4 && memcmp(tocSpan.data(), SE_TOC_MAGIC, 4) == 0) {
-      tocHeaderValid = true;
-      tocSpan = tocSpan.subspan(4);
-
-      std::span<const unsigned char> padSpan(pad, 4);
-
-      while (!tocSpan.empty()) {
+    while (cur < fileSize) { // Searching for local file header
         if (stopToken.stop_requested())
-          return unexpected(SeError::OperationCanceled);
+            return unexpected(SeError::OperationCanceled);
 
-        size_t tEntry_sz = 0;
-        bool found = false;
-
-        if (tocSpan.size() >= sizeof(uint32_t)) {
-          uint32_t cCount = 0;
-          memcpy(&cCount, tocSpan.data(), sizeof(cCount));
-          size_t expectedSz = sizeof(uint32_t) + (static_cast<size_t>(cCount) * sizeof(char16_t)) + 40;
-          if (expectedSz <= tocSpan.size() - 4 && memcmp(tocSpan.data() + expectedSz, pad, 4) == 0) {
-            tEntry_sz = expectedSz;
-            found = true;
-          }
-        }
-
-        if (!found) {
-          auto m_range = ranges::search(tocSpan, padSpan);
-          if (m_range.empty()) {
+        if (cur + 4 <= fileSize && memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) { // Detected TOC magic
+            detectedTocOffset = cur;
             break;
-          }
-          tEntry_sz = static_cast<size_t>(std::distance(tocSpan.begin(), m_range.begin()));
         }
 
-        std::span<const unsigned char> tEntry_bytes = tocSpan.first(tEntry_sz);
-        auto _aEE = SeArchiveEntry::CreateFromBytes(
-            std::span<unsigned char>(const_cast<unsigned char *>(tEntry_bytes.data()), tEntry_sz));
-        if (!_aEE) {
-          break;
+        if (metadataValid && cur == metadata.m_toc_offset && cur + 4 <= fileSize && memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) { // Reached TOC
+            detectedTocOffset = cur;
+            break;
         }
 
-        tocEntries.push_back(std::move(*_aEE));
-        tocEntriesParsed++;
+        bool foundEntry = false;
+        SeArchiveEntry candEntry;
+        size_t candHeaderSize = 0;
+        size_t entryStartOffset = cur;
+        size_t payloadStartOffset = cur;
 
-        if (tEntry_sz + 4 <= tocSpan.size()) {
-          tocSpan = tocSpan.subspan(tEntry_sz + 4);
-        } else {
-          tocSpan = tocSpan.subspan(tocSpan.size());
+        // Check if SE_TOC_ENTRY_PAD precedes the entry header
+        if (cur + 4 <= fileSize && memcmp(dataPtr + cur, pad, 4) == 0) {
+            std::span<const unsigned char> rem(dataPtr + cur + 4, fileSize - (cur + 4));
+            if (validateAndParseLocalEntry(rem, cur + 4, candEntry, candHeaderSize)) {
+                foundEntry = true;
+                entryStartOffset = cur;
+                payloadStartOffset = cur + 4 + candHeaderSize;
+                candEntry.offset = cur;
+            }
         }
-      }
 
-      if (tocSpan.empty()) {
-        tocFullyRead = true;
-      }
-    }
-  }
-
-  // 4. Reconcile entries into a new virtual TOC
-  SeTableOfContent virtualToc = SeTableOfContent::CreateNewTableOfContent();
-
-  unordered_map<u16string, SeArchiveEntry> tocMap;
-  for (auto &te : tocEntries) {
-    tocMap[SeTableOfContent::CanonicalizePathKey(te.path)] = te;
-  }
-
-  unordered_set<u16string> bodyPaths;
-  size_t foundIndexedCount = 0;
-  size_t foundOkCount = 0;
-  size_t foundTruncatedCount = 0;
-  size_t notFoundCount = 0;
-
-  for (auto &be : parsedBodyEntries) {
-    u16string key = SeTableOfContent::CanonicalizePathKey(be.path);
-    bodyPaths.insert(key);
-
-    if (be.recoveryState == EntryRecoveryState::FoundTruncated) {
-      foundTruncatedCount++;
-    } else {
-      if (tocMap.find(key) != tocMap.end()) {
-        be.recoveryState = EntryRecoveryState::FoundIndexed;
-        foundIndexedCount++;
-      } else {
-        be.recoveryState = EntryRecoveryState::FoundOk;
-        foundOkCount++;
-      }
-    }
-
-    // Auto-create parent directory entries if missing
-    u16string parentDir = SeTableOfContent::GetParentDirectory(be.path);
-    while (!parentDir.empty() && parentDir != u"/") {
-      if (!virtualToc.CheckPath(parentDir)) {
-        SeArchiveEntry dirEntry = SeArchiveEntry::CreateDirectoryEntry(parentDir);
-        dirEntry.recoveryState = EntryRecoveryState::FoundIndexed;
-        (void)virtualToc.AddEntry(dirEntry);
-      }
-      u16string nextParent = SeTableOfContent::GetParentDirectory(parentDir);
-      if (nextParent == parentDir) break;
-      parentDir = nextParent;
-    }
-
-    (void)virtualToc.AddEntry(be);
-  }
-
-  // Process entries present in TOC but NOT found in parsed body entries
-  for (auto &[key, te] : tocMap) {
-    if (bodyPaths.find(key) == bodyPaths.end()) {
-      if (te.isDirectory()) {
-        if (!virtualToc.CheckPath(te.path)) {
-          te.recoveryState = EntryRecoveryState::FoundIndexed;
-          (void)virtualToc.AddEntry(te);
+        // Check if entry header starts directly at cur
+        if (!foundEntry && cur + 44 <= fileSize) {
+            std::span<const unsigned char> rem(dataPtr + cur, fileSize - cur);
+            if (validateAndParseLocalEntry(rem, cur, candEntry, candHeaderSize)) {
+                foundEntry = true;
+                entryStartOffset = cur;
+                payloadStartOffset = cur + candHeaderSize;
+                candEntry.offset = cur;
+            }
         }
-      } else {
-        te.recoveryState = EntryRecoveryState::NotFound;
-        notFoundCount++;
-        (void)virtualToc.AddEntry(te);
-      }
-    }
-  }
 
-  // 5. Generate TOC health status string
-  if (tocHeaderValid && tocFullyRead && notFoundCount == 0 && foundOkCount == 0 && foundTruncatedCount == 0) {
+        if (foundEntry) {
+            size_t expectedEnd = payloadStartOffset + candEntry.compressed_size;
+            // Skip optional trailing pad if present
+            if (expectedEnd + 4 <= fileSize && memcmp(dataPtr + expectedEnd, pad, 4) == 0) {
+                expectedEnd += 4;
+            }
+
+            if (payloadStartOffset + candEntry.compressed_size > fileSize) {
+                candEntry.recoveryState = EntryRecoveryState::FoundTruncated;
+                parsedBodyEntries.push_back(std::move(candEntry));
+                break;
+            }
+
+            else {
+                parsedBodyEntries.push_back(std::move(candEntry));
+                cur = expectedEnd;
+                continue;
+            }
+        }
+
+        // Fast-forward to next potential boundary
+        cur++;
+        while (cur + 4 <= fileSize) {
+            if (memcmp(dataPtr + cur, pad, 4) == 0 || memcmp(dataPtr + cur, SE_TOC_MAGIC, 4) == 0) { // Check for entry or TOC begin
+                break;
+            }
+            if (cur + 6 <= fileSize && dataPtr[cur + 4] == 0x2F && dataPtr[cur + 5] == 0x00) { // Looking for local entry path ( / ) 
+                // in case of pad missing ( rare )!
+                break;
+            }
+            cur++;
+        }
+    }
+
+    // parsed as much entry as we could , going toward TOC
+
+    size_t effectiveTocOffset = (size_t)-1;
+    if (detectedTocOffset != (size_t)-1) {
+        effectiveTocOffset = detectedTocOffset;
+    }
+    else if (metadataValid && metadata.m_toc_offset >= SE_METADATA_SIZE && metadata.m_toc_offset < fileSize) {
+        effectiveTocOffset = metadata.m_toc_offset;
+    }
+
+    vector<SeArchiveEntry> tocEntries;
+    bool tocHeaderValid = false;
+    bool tocFullyRead = false;
+    size_t tocEntriesParsed = 0;
+
+    if (effectiveTocOffset < fileSize) {
+        std::span<const unsigned char> tocSpan(dataPtr + effectiveTocOffset, fileSize - effectiveTocOffset);
+        if (tocSpan.size() >= 4 && memcmp(tocSpan.data(), SE_TOC_MAGIC, 4) == 0) {
+            tocHeaderValid = true;
+            tocSpan = tocSpan.subspan(4);
+
+            std::span<const unsigned char> padSpan(pad, 4);
+
+            while (!tocSpan.empty()) {
+              if (stopToken.stop_requested())
+                    return unexpected(SeError::OperationCanceled);
+
+                size_t tEntry_sz = 0;
+                bool found = false;
+
+                if (tocSpan.size() >= sizeof(uint32_t)) {
+                    uint32_t cCount = 0;
+                    memcpy(&cCount, tocSpan.data(), sizeof(cCount));
+                    size_t expectedSz = sizeof(uint32_t) + (static_cast<size_t>(cCount) * sizeof(char16_t)) + 40;
+                    if (expectedSz <= tocSpan.size() - 4 && memcmp(tocSpan.data() + expectedSz, pad, 4) == 0) {
+                    tEntry_sz = expectedSz;
+                    found = true;
+                    }
+                }
+
+                if (!found) {
+                    auto m_range = ranges::search(tocSpan, padSpan);
+                    if (m_range.empty()) {
+                    break;
+                    }
+                    tEntry_sz = static_cast<size_t>(std::distance(tocSpan.begin(), m_range.begin()));
+                }
+
+                std::span<const unsigned char> tEntry_bytes = tocSpan.first(tEntry_sz);
+                auto _aEE = SeArchiveEntry::CreateFromBytes(
+                    std::span<unsigned char>(const_cast<unsigned char *>(tEntry_bytes.data()), tEntry_sz));
+                if (!_aEE) {
+                    break;
+                }
+
+                tocEntries.push_back(std::move(*_aEE));
+                tocEntriesParsed++;
+
+                if (tEntry_sz + 4 <= tocSpan.size()) {
+                    tocSpan = tocSpan.subspan(tEntry_sz + 4);
+                } else {
+                    tocSpan = tocSpan.subspan(tocSpan.size());
+                }
+            }
+
+            if (tocSpan.empty()) {
+                tocFullyRead = true;
+            }
+        }
+    }
+
+    // 4. Reconcile entries into a new virtual TOC
+    SeTableOfContent virtualToc = SeTableOfContent::CreateNewTableOfContent();
+
+    unordered_map<u16string, SeArchiveEntry> tocMap;
+    for (auto &te : tocEntries) {
+        tocMap[SeTableOfContent::CanonicalizePathKey(te.path)] = te;
+    }
+
+    unordered_set<u16string> bodyPaths;
+    size_t foundIndexedCount = 0;
+    size_t foundOkCount = 0;
+    size_t foundTruncatedCount = 0;
+    size_t notFoundCount = 0;
+
+    for (auto &be : parsedBodyEntries) {
+        u16string key = SeTableOfContent::CanonicalizePathKey(be.path);
+        bodyPaths.insert(key);
+
+        if (be.recoveryState == EntryRecoveryState::FoundTruncated) {
+            foundTruncatedCount++;
+        }
+        else {
+            if (tocMap.find(key) != tocMap.end()) {
+                be.recoveryState = EntryRecoveryState::FoundIndexed;
+                foundIndexedCount++;
+            } 
+            else {
+                be.recoveryState = EntryRecoveryState::FoundOk;
+                foundOkCount++;
+            }
+        }
+
+        // Auto-create parent directory entries if missing
+        u16string parentDir = SeTableOfContent::GetParentDirectory(be.path);
+        while (!parentDir.empty() && parentDir != u"/") {
+            if (!virtualToc.CheckPath(parentDir)) {
+                SeArchiveEntry dirEntry = SeArchiveEntry::CreateDirectoryEntry(parentDir);
+                dirEntry.recoveryState = EntryRecoveryState::FoundIndexed;
+                (void)virtualToc.AddEntry(dirEntry);
+            }
+            u16string nextParent = SeTableOfContent::GetParentDirectory(parentDir);
+            if (nextParent == parentDir)
+                break;
+            parentDir = nextParent;
+        }
+
+        (void)virtualToc.AddEntry(be);
+    }
+
+    // Process entries present in TOC but NOT found in parsed body entries
+    for (auto &[key, te] : tocMap) {
+        if (bodyPaths.find(key) == bodyPaths.end()) {
+            if (te.isDirectory()) {
+            if (!virtualToc.CheckPath(te.path)) {
+                te.recoveryState = EntryRecoveryState::FoundIndexed;
+                (void)virtualToc.AddEntry(te);
+            }
+            } else {
+                te.recoveryState = EntryRecoveryState::NotFound;
+                notFoundCount++;
+                (void)virtualToc.AddEntry(te);
+            }
+        }
+    }
+
+    // 5. Generate TOC health status string
+    if (tocHeaderValid && tocFullyRead && notFoundCount == 0 && foundOkCount == 0 && foundTruncatedCount == 0) {
     tocHealth = "Healthy (Valid TOC): All " + std::to_string(tocEntriesParsed) + " entries fully indexed";
-  } else if (!tocHeaderValid) {
+    } else if (!tocHeaderValid) {
     if (effectiveTocOffset >= fileSize) {
-      tocHealth = "Damaged: TOC offset (0x" + toHex(effectiveTocOffset) + ") out of bounds; " +
-                  std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
+        tocHealth = "Damaged: TOC offset (0x" + toHex(effectiveTocOffset) + ") out of bounds; " +
+                    std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
     } else {
-      tocHealth = "Damaged: Invalid TOC signature at offset 0x" + toHex(effectiveTocOffset) + "; " +
-                  std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
+        tocHealth = "Damaged: Invalid TOC signature at offset 0x" + toHex(effectiveTocOffset) + "; " +
+                    std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
     }
-  } else if (!tocFullyRead || foundTruncatedCount > 0 || foundOkCount > 0 || notFoundCount > 0) {
+    } else if (!tocFullyRead || foundTruncatedCount > 0 || foundOkCount > 0 || notFoundCount > 0) {
     tocHealth = "Truncated / Damaged: EOF cut off at 0x" + toHex(fileSize) + " • " +
                 std::to_string(parsedBodyEntries.size()) + " items reconstructed (" +
                 std::to_string(foundIndexedCount) + " indexed, " +
                 std::to_string(foundOkCount) + " unindexed, " +
                 std::to_string(foundTruncatedCount) + " truncated, " +
                 std::to_string(notFoundCount) + " missing)";
-  } else {
+    } else {
     tocHealth = "Recovered: " + std::to_string(parsedBodyEntries.size()) + " items reconstructed from body";
-  }
+    }
 
-  // 6. Build and return recovered SeArchive
-  auto _cctx = AesGcmContextProvider::CreateContext();
-  if (!_cctx)
+    // 6. Build and return recovered SeArchive
+    auto _cctx = AesGcmContextProvider::CreateContext();
+    if (!_cctx)
     return unexpected(_cctx.error());
 
-  metadata.m_toc_offset = virtualToc.getNextAvailOffset();
+    metadata.m_toc_offset = virtualToc.getNextAvailOffset();
 
-  SeArchive archive(metadata, std::move(virtualToc), path, *move(_cctx));
-  archive.m_metadataHealth = std::move(metaHealth);
-  archive.m_tocHealth = std::move(tocHealth);
+    SeArchive archive(metadata, std::move(virtualToc), path, *move(_cctx));
+    archive.m_metadataHealth = std::move(metaHealth);
+    archive.m_tocHealth = std::move(tocHealth);
 
-  return archive;
+    return archive;
 }
 
 expected<SeArchive, error_code> SeArchive::RecoverArchiveFile(u16string path) {
@@ -1264,298 +1265,292 @@ SeTaskHandle<void> SeArchive::SaveChangesAsync(ProgressCallback callback) {
 
 // @Private
 
-expected<void, error_code> SeArchive::doAddFileJob(SeJob &job,
-                                                   ProgressCallback callback,
-                                                   stop_token stopToken,
-                                                   SePauseToken pauseToken) {
-  job.m_status = JobStatus::Pending;
+expected<void, error_code> SeArchive::doAddFileJob(SeJob &job, ProgressCallback callback, stop_token stopToken, SePauseToken pauseToken) {
+    job.m_status = JobStatus::Pending;
 
-  pauseToken.wait_if_paused(stopToken);
-
-  if (stopToken.stop_requested()) {
-    job.setStatus(JobStatus::Aborted);
-    if (callback)
-      callback(job);
-
-    return unexpected(SeError::OperationCanceled);
-  }
-
-  if (callback != nullptr)
-    callback(job);
-
-  MappedFileStream inFileStream;
-  if (auto _fs = inFileStream.open(job.m_filePath, FileMode::OpenExisting);
-      !_fs) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_fs.error());
-  }
-
-  if (!this->m_archiveStream.is_open()) {
-    auto _openArchive = this->m_archiveStream.open(this->m_archiveFilePath);
-    if (!_openArchive && _openArchive.error() != SeError::StreamAlreadyOpen) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_openArchive.error());
-    }
-  }
-
-  SeArchiveEntry entry = SeArchiveEntry::CreateFileEntry(job.m_fileName);
-
-  entry.uncompressed_size = inFileStream.size();
-  entry.attributes = 0;
-  if (this->m_metadata.GetPreserveMetadata()) {
-    entry.attributes = se::GetFileAttributes(job.m_filePath);
-  }
-  entry.offset = this->m_toc.getNextAvailOffset();
-  entry.fileUid = getSecureRandom();
-  entry.crc32 = CRC32C_INIT;
-
-  if (auto _sk = this->m_archiveStream.seek(entry.offset); !_sk) {
-    // either the file is not big enough or some error in the getNextAvailOffset
-    // caused this
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_sk.error());
-  }
-  auto entryPlaceHolderBytes = entry.Serialize();
-  auto _wentryError = m_archiveStream.write(entryPlaceHolderBytes);
-
-  if (!_wentryError) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-
-    return unexpected(_wentryError.error());
-  }
-
-  m_archiveStream.flush(); // assuming that the only possible error here is
-                           // closed handle which will likely occure on top!
-
-  // Setting up file compression
-
-  int cLevel = this->m_metadata.GetCompressionLevel() == 1   ? 1
-               : this->m_metadata.GetCompressionLevel() == 2 ? 15
-                                                             : 19;
-
-  ZSTD_CCtx_reset(this->m_zstdCctx.get(), ZSTD_reset_session_only);
-  size_t param_err = ZSTD_CCtx_setParameter(this->m_zstdCctx.get(),
-                                            ZSTD_c_compressionLevel, cLevel);
-
-  size_t readSz = ZSTD_CStreamInSize();
-  size_t writeSz = ZSTD_CStreamOutSize();
-
-  vector<unsigned char> inBuffer(readSz);
-  vector<unsigned char> outBuffer(writeSz);
-
-  auto _cryptoStream =
-      this->m_cryptoCtx.createSession<Mode::Encryption>(entry.fileUid);
-  if (!_cryptoStream) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-
-    return unexpected(_cryptoStream.error());
-  }
-
-  unique_ptr<AesGcmStreamSession<Mode::Encryption>> cryptoStreamSession =
-      *move(_cryptoStream);
-
-  const size_t cipherChunkSize =
-      AesGcmStreamSession<Mode::Encryption>::BUFFER_SIZE +
-      AesGcmStreamSession<Mode::Encryption>::TAG_BYTES;
-  vector<unsigned char> cryptoOutBuffer(cipherChunkSize);
-
-  bool isLastChunk = false;
-
-  job.setStatus(JobStatus::Running);
-  job.totalBytes = inFileStream.size();
-  job.processedBytes = 0;
-  job.compressedBytes = 0;
-  job.percentage = 0;
-
-  if (callback)
-    callback(job);
-
-  size_t processedBytes = 0;
-  while (!isLastChunk) {
-
-    pauseToken.wait_if_paused(stopToken, [&]() {
-      job.setStatus(JobStatus::Paused);
-      if (callback)
-        callback(job);
-    }, [&]() {
-      job.setStatus(JobStatus::Running);
-      if (callback)
-        callback(job);
-    });
+    pauseToken.wait_if_paused(stopToken);
 
     if (stopToken.stop_requested()) {
-      this->m_archiveStream.seek(entry.offset);
-      job.setStatus(JobStatus::Aborted);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::OperationCanceled);
-    }
-
-    auto _rd = inFileStream.read(inBuffer.data(), readSz);
-    if (!_rd) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_rd.error());
-    }
-
-    processedBytes += *_rd;
-    isLastChunk = (*_rd < readSz) || inFileStream.eof();
-    ZSTD_EndDirective mode = isLastChunk ? ZSTD_e_end : ZSTD_e_continue;
-
-    ZSTD_inBuffer inBuff{inBuffer.data(), *_rd, 0};
-    bool finished = false;
-
-    while (!finished) {
-      pauseToken.wait_if_paused(stopToken, [&]() {
-        job.setStatus(JobStatus::Paused);
-        if (callback)
-          callback(job);
-      }, [&]() {
-        job.setStatus(JobStatus::Running);
-        if (callback)
-          callback(job);
-      });
-
-      if (stopToken.stop_requested()) {
-        this->m_archiveStream.seek(entry.offset);
         job.setStatus(JobStatus::Aborted);
         if (callback)
-          callback(job);
+            callback(job);
+
         return unexpected(SeError::OperationCanceled);
-      }
+    }
 
-      ZSTD_outBuffer outBuff = {outBuffer.data(), writeSz, 0};
+    if (callback)
+        callback(job);
 
-      size_t remaining =
-          ZSTD_compressStream2(this->m_zstdCctx.get(), &outBuff, &inBuff, mode);
-
-      if (ZSTD_isError(remaining)) {
+    MappedFileStream inFileStream;
+    if (auto _fs = inFileStream.open(job.m_filePath, FileMode::OpenExisting); !_fs) {
         job.setStatus(JobStatus::Failed);
         if (callback)
-          callback(job);
-
-        return unexpected(SeError::ZSTDCompressionError);
-      }
-
-      if (outBuff.pos > 0) {
-        auto _cryptoResult = cryptoStreamSession->encrypt(
-            span<unsigned char>{reinterpret_cast<unsigned char *>(outBuff.dst),
-                                outBuff.pos},
-            cryptoOutBuffer);
-        if (_cryptoResult) {
-          entry.compressed_size += cipherChunkSize;
-
-          auto _wLError = m_archiveStream.write(span<unsigned char>{cryptoOutBuffer.data(), cipherChunkSize});
-
-          // Status report
-          job.processedBytes = processedBytes;
-          job.compressedBytes = entry.compressed_size;
-          job.percentage = inFileStream.size() == 0
-                               ? 100
-                               : static_cast<uint32_t>((processedBytes * 100) /
-                                                       inFileStream.size());
-
-          if (callback)
             callback(job);
+        return unexpected(_fs.error());
+    }
 
-          if (!_wLError) {
+    if (!this->m_archiveStream.is_open()) {
+        auto _openArchive = this->m_archiveStream.open(this->m_archiveFilePath);
+        if (!_openArchive && _openArchive.error() != SeError::StreamAlreadyOpen) {
             job.setStatus(JobStatus::Failed);
             if (callback)
-              callback(job);
-            return unexpected(_wLError.error());
-          }
-        }
-        if (!_cryptoResult &&
-            _cryptoResult.error() !=
-                SeError::CRYPTOStageTooSmall) { // Ignoring staged buffer warns
-          job.setStatus(JobStatus::Failed);
-          if (callback)
             callback(job);
-          return unexpected(_cryptoResult.error());
+            return unexpected(_openArchive.error());
         }
-      }
-
-      if (mode == ZSTD_e_end) {
-        finished = remaining == 0;
-      } else {
-        finished = inBuff.pos == inBuff.size;
-      }
     }
-    // doing the crc32 and compression tracking
-    uint64_t t_crc = entry.crc32;
-    entry.crc32 = crc32c_update(t_crc, inBuff.src, inBuff.size);
-  }
 
-  // Flushing the cryptoBuffer by finalizing the session
-  auto _cryptoResult = cryptoStreamSession->finalizeEncryption(cryptoOutBuffer);
-  if (!_cryptoResult) {
-    job.setStatus(JobStatus::Failed);
+    SeArchiveEntry entry = SeArchiveEntry::CreateFileEntry(job.m_fileName);
+
+    entry.uncompressed_size = inFileStream.size();
+    entry.attributes = 0;
+
+    if (this->m_metadata.GetPreserveMetadata()) {
+        entry.attributes = se::GetFileAttributes(job.m_filePath);
+    }
+
+    entry.offset = this->m_toc.getNextAvailOffset();
+    entry.fileUid = getSecureRandom();
+    entry.crc32 = CRC32C_INIT;
+
+    if (auto _sk = this->m_archiveStream.seek(entry.offset); !_sk) {
+        // either the file is not big enough or some error in the getNextAvailOffset
+        // caused this
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_sk.error());
+    }
+    auto entryPlaceHolderBytes = entry.Serialize();
+    auto _wentryError = m_archiveStream.write(entryPlaceHolderBytes);
+
+    if (!_wentryError) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+
+        return unexpected(_wentryError.error());
+    }
+
+    m_archiveStream.flush(); // assuming that the only possible error here is
+                            // closed handle which will likely occure on top!
+
+    // Setting up file compression
+
+    int cLevel = this->m_metadata.GetCompressionLevel() == 1   ? 1
+                : this->m_metadata.GetCompressionLevel() == 2 ? 15
+                                                                : 19;
+
+    ZSTD_CCtx_reset(this->m_zstdCctx.get(), ZSTD_reset_session_only);
+    size_t param_err = ZSTD_CCtx_setParameter(this->m_zstdCctx.get(),ZSTD_c_compressionLevel, cLevel);
+
+    size_t readSz = ZSTD_CStreamInSize();
+    size_t writeSz = ZSTD_CStreamOutSize();
+
+    vector<unsigned char> inBuffer(readSz);
+    vector<unsigned char> outBuffer(writeSz);
+
+    auto _cryptoStream = this->m_cryptoCtx.createSession<Mode::Encryption>(entry.fileUid);
+    if (!_cryptoStream) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+
+        return unexpected(_cryptoStream.error());
+    }
+
+    unique_ptr<AesGcmStreamSession<Mode::Encryption>> cryptoStreamSession = *move(_cryptoStream);
+
+    const size_t cipherChunkSize =
+        AesGcmStreamSession<Mode::Encryption>::BUFFER_SIZE +
+        AesGcmStreamSession<Mode::Encryption>::TAG_BYTES;
+
+    vector<unsigned char> cryptoOutBuffer(cipherChunkSize);
+
+    bool isLastChunk = false;
+
+    job.setStatus(JobStatus::Running);
+    job.totalBytes = inFileStream.size();
+    job.processedBytes = 0;
+    job.compressedBytes = 0;
+    job.percentage = 0;
+
     if (callback)
-      callback(job);
-    return unexpected(_cryptoResult.error());
-  }
-
-  size_t finalCipherBytes = *_cryptoResult;
-  if (finalCipherBytes > 0) {
-    entry.compressed_size += finalCipherBytes;
-    auto _wLError = m_archiveStream.write(span<unsigned char>{cryptoOutBuffer.data(), finalCipherBytes});
-    if (!_wLError) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
         callback(job);
-      return unexpected(_wLError.error());
+
+    size_t processedBytes = 0;
+    while (!isLastChunk) {
+
+        pauseToken.wait_if_paused(stopToken, [&]() {
+            job.setStatus(JobStatus::Paused);
+            if (callback)
+            callback(job);
+        }, [&]() {
+            job.setStatus(JobStatus::Running);
+            if (callback)
+                callback(job);
+        });
+
+        if (stopToken.stop_requested()) {
+            this->m_archiveStream.seek(entry.offset);
+            job.setStatus(JobStatus::Aborted);
+            if (callback)
+            callback(job);
+            return unexpected(SeError::OperationCanceled);
+        }
+
+        auto _rd = inFileStream.read(inBuffer.data(), readSz);
+        if (!_rd) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_rd.error());
+        }
+
+        processedBytes += *_rd;
+        isLastChunk = (*_rd < readSz) || inFileStream.eof();
+        ZSTD_EndDirective mode = isLastChunk ? ZSTD_e_end : ZSTD_e_continue;
+
+        ZSTD_inBuffer inBuff{inBuffer.data(), *_rd, 0};
+        bool finished = false;
+
+        while (!finished) {
+            pauseToken.wait_if_paused(stopToken, [&]() {
+                job.setStatus(JobStatus::Paused);
+                if (callback)
+                    callback(job);
+                }, [&]() {
+                    job.setStatus(JobStatus::Running);
+                    if (callback)
+                        callback(job);
+            });
+
+            if (stopToken.stop_requested()) {
+                this->m_archiveStream.seek(entry.offset);
+                job.setStatus(JobStatus::Aborted);
+                if (callback)
+                    callback(job);
+                return unexpected(SeError::OperationCanceled);
+            }
+
+            ZSTD_outBuffer outBuff = {outBuffer.data(), writeSz, 0};
+
+            size_t remaining =
+                ZSTD_compressStream2(this->m_zstdCctx.get(), &outBuff, &inBuff, mode);
+
+            if (ZSTD_isError(remaining)) {
+                job.setStatus(JobStatus::Failed);
+                if (callback)
+                    callback(job);
+
+                return unexpected(SeError::ZSTDCompressionError);
+            }
+
+            if (outBuff.pos > 0) {
+                auto _cryptoResult = cryptoStreamSession->encrypt(
+                    span<unsigned char>{reinterpret_cast<unsigned char *>(outBuff.dst),
+                                        outBuff.pos},
+                    cryptoOutBuffer);
+                if (_cryptoResult) {
+                    entry.compressed_size += cipherChunkSize;
+
+                    auto _wLError = m_archiveStream.write(span<unsigned char>{cryptoOutBuffer.data(), cipherChunkSize});
+
+                    // Status report
+                    job.processedBytes = processedBytes;
+                    job.compressedBytes = entry.compressed_size;
+                    job.percentage = inFileStream.size() == 0
+                                        ? 100
+                                        : static_cast<uint32_t>((processedBytes * 100) /
+                                                                inFileStream.size());
+
+                    if (callback)
+                        callback(job);
+
+                    if (!_wLError) {
+                        job.setStatus(JobStatus::Failed);
+                        if (callback)
+                            callback(job);
+                        return unexpected(_wLError.error());
+                    }
+                }
+                if (!_cryptoResult && _cryptoResult.error() != SeError::CRYPTOStageTooSmall) { // Ignoring staged buffer warns
+                        job.setStatus(JobStatus::Failed);
+                        if (callback)
+                        callback(job);
+                        return unexpected(_cryptoResult.error());
+                }
+            }
+
+            if (mode == ZSTD_e_end) {
+                finished = remaining == 0;
+            } else {
+                finished = inBuff.pos == inBuff.size;
+            }
+        }
+        // doing the crc32 and compression tracking
+        uint64_t t_crc = entry.crc32;
+        entry.crc32 = crc32c_update(t_crc, inBuff.src, inBuff.size);
     }
-  }
 
-  ZSTD_CCtx_reset(this->m_zstdCctx.get(), ZSTD_reset_session_only);
+    // Flushing the cryptoBuffer by finalizing the session
+    auto _cryptoResult = cryptoStreamSession->finalizeEncryption(cryptoOutBuffer);
+    if (!_cryptoResult) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_cryptoResult.error());
+    }
 
-  uint64_t t_crc = entry.crc32;
-  entry.crc32 = crc32c_finalize(t_crc);
+    size_t finalCipherBytes = *_cryptoResult;
+    if (finalCipherBytes > 0) {
+        entry.compressed_size += finalCipherBytes;
+        auto _wLError = m_archiveStream.write(span<unsigned char>{cryptoOutBuffer.data(), finalCipherBytes});
+        if (!_wLError) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_wLError.error());
+        }
+    }
 
-  // Replacing the entry placeholder:
-  auto entryBytes = entry.Serialize();
+    ZSTD_CCtx_reset(this->m_zstdCctx.get(), ZSTD_reset_session_only);
 
-  this->m_archiveStream.seek(entry.offset);
+    uint64_t t_crc = entry.crc32;
+    entry.crc32 = crc32c_finalize(t_crc);
 
-  if (auto _entErr = this->m_archiveStream.write(entryBytes); !_entErr) {
-    job.setStatus(JobStatus::Failed);
+    // Replacing the entry placeholder:
+    auto entryBytes = entry.Serialize();
+
+    this->m_archiveStream.seek(entry.offset);
+
+    if (auto _entErr = this->m_archiveStream.write(entryBytes); !_entErr) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_entErr.error());
+    }
+
+    this->m_archiveStream.flush();
+
+    // Modifying entry's path from file name to full path
+    entry.path = job.m_fileName;
+
+    if (auto _addErr = this->m_toc.AddEntry(entry); !_addErr) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_addErr.error());
+    }
+
+    job.setStatus(JobStatus::Finished);
+    job.processedBytes = inFileStream.size();
+    job.compressedBytes = entry.compressed_size;
+    job.percentage = 100;
+    job.crc32 = entry.crc32;
     if (callback)
-      callback(job);
-    return unexpected(_entErr.error());
-  }
+        callback(job);
 
-  this->m_archiveStream.flush();
-
-  // Modifying entry's path from file name to full path
-  entry.path = job.m_fileName;
-
-  if (auto _addErr = this->m_toc.AddEntry(entry); !_addErr) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_addErr.error());
-  }
-
-  job.setStatus(JobStatus::Finished);
-  job.processedBytes = inFileStream.size();
-  job.compressedBytes = entry.compressed_size;
-  job.percentage = 100;
-  job.crc32 = entry.crc32;
-  if (callback)
-    callback(job);
-
-  return {};
+    return {};
 }
 
 expected<void, error_code> SeArchive::doRemoveFileJob(SeJob &job,
@@ -2105,660 +2100,642 @@ SeArchive::doMoveDirectoryJob(SeJob &job, ProgressCallback callback,
   return {};
 }
 
-expected<void, error_code> SeArchive::doChangeCompressionLevel(
-    SeJob &job, ProgressCallback callback,
-    stop_token stopToken,
-    SePauseToken pauseToken) {
-  job.setStatus(JobStatus::Pending);
-  pauseToken.wait_if_paused(stopToken);
-  if (callback)
-    callback(job);
+expected<void, error_code> SeArchive::doChangeCompressionLevel(SeJob &job, ProgressCallback callback, stop_token stopToken,SePauseToken pauseToken) {
+    job.setStatus(JobStatus::Pending);
+    pauseToken.wait_if_paused(stopToken);
 
-  if (stopToken.stop_requested()) {
-    job.setStatus(JobStatus::Aborted);
     if (callback)
-      callback(job);
-    return unexpected(SeError::OperationCanceled);
-  }
-
-  uint32_t newLevel = this->m_metadata.GetCompressionLevel();
-  if (!job.m_fileName.empty() && job.m_fileName[0] >= u'1' &&
-      job.m_fileName[0] <= u'3') {
-    newLevel = job.m_fileName[0] - u'0';
-  }
-
-  if (newLevel < 1 || newLevel > 3) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(make_error_code(errc::invalid_argument));
-  }
-
-  if (this->m_archiveFilePath.empty()) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(make_error_code(errc::bad_file_descriptor));
-  }
-
-  if (!this->m_archiveStream.is_open()) {
-    auto _openArchive = this->m_archiveStream.open(this->m_archiveFilePath);
-    if (!_openArchive && _openArchive.error() != SeError::StreamAlreadyOpen) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
         callback(job);
-      return unexpected(_openArchive.error());
-    }
-  }
 
-  if (!this->IsKeyPresent()) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::KeyDoesNotExist);
-  }
-
-  auto allEntries = this->m_toc.GetEntries();
-  vector<SeArchiveEntry> filesToRecompress;
-  for (const auto &entry : allEntries) {
-    if (!entry.isDirectory()) {
-      filesToRecompress.push_back(entry);
-    }
-  }
-
-  if (filesToRecompress.empty()) {
-    this->m_metadata.SetCompressionLevel(newLevel);
-    job.setStatus(JobStatus::Finished);
-    job.percentage = 100;
-    if (callback)
-      callback(job);
-    return {};
-  }
-
-  uint64_t totalBytesAllFiles = 0;
-  for (const auto &e : filesToRecompress) {
-    totalBytesAllFiles += e.uncompressed_size;
-  }
-  uint64_t totalProcessedBytes = 0;
-
-  job.setStatus(JobStatus::Running);
-  job.totalBytes = totalBytesAllFiles;
-  job.processedBytes = 0;
-  job.compressedBytes = 0;
-  job.percentage = 0;
-  if (callback)
-    callback(job);
-
-  filesystem::path origPath(this->m_archiveFilePath);
-  filesystem::path tempPath = origPath;
-  tempPath += u".recomp.tmp";
-
-  error_code ec;
-  filesystem::remove(tempPath, ec);
-
-  MappedFileStream tempStream;
-  if (auto _openTemp =
-          tempStream.open(tempPath.u16string(), FileMode::CreateAlways);
-      !_openTemp) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_openTemp.error());
-  }
-
-  bool isSuccess = false;
-  auto cleanupOnFailure = [&]() {
-    if (!isSuccess) {
-      tempStream.close();
-      error_code remEc;
-      filesystem::remove(tempPath, remEc);
-    }
-  };
-
-  SeMetadata tempMetadata = this->m_metadata;
-  tempMetadata.SetCompressionLevel(newLevel);
-  tempMetadata.m_toc_offset = 0;
-  vector<unsigned char> metaBytes(SE_METADATA_SIZE);
-  tempMetadata.GetMetadataBytes(metaBytes);
-
-  if (auto _wrMeta =
-          tempStream.write(metaBytes.data(), metaBytes.size());
-      !_wrMeta) {
-    cleanupOnFailure();
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_wrMeta.error());
-  }
-  tempStream.flush();
-
-  int targetCLevel = (newLevel == 1) ? 1 : (newLevel == 2) ? 15 : 19;
-  const size_t cipherChunkSize =
-      AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE +
-      AesGcmStreamSession<Mode::Decryption>::TAG_BYTES;
-
-  vector<unsigned char> cipherInBuf(cipherChunkSize);
-  vector<unsigned char> cryptoPlainBuf(
-      AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE);
-  vector<unsigned char> decomOutBuf(ZSTD_DStreamOutSize());
-  vector<unsigned char> compOutBuf(ZSTD_CStreamOutSize());
-  vector<unsigned char> cryptoCipherBuf(cipherChunkSize);
-
-  SeTableOfContent newTOC = SeTableOfContent::CreateNewTableOfContent();
-  for (const auto &entry : allEntries) {
-    if (entry.isDirectory()) {
-      newTOC.AddEntry(entry);
-    }
-  }
-
-  for (const auto &fileEntry : filesToRecompress) {
     if (stopToken.stop_requested()) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Aborted);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::OperationCanceled);
-    }
-
-    // Seek to existing file entry offset in archive stream
-    if (auto _sk = this->m_archiveStream.seek(fileEntry.offset); !_sk) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_sk.error());
-    }
-
-    // Read header to validate against TOC
-    uint32_t cCount = 0;
-    if (auto _rdCount = this->m_archiveStream.read(&cCount, sizeof(cCount));
-        !_rdCount || *_rdCount != sizeof(cCount)) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_rdCount ? make_error_code(errc::io_error)
-                                 : _rdCount.error());
-    }
-
-    size_t remainingHeaderSize = (cCount * sizeof(char16_t)) +
-                                 (4 * sizeof(uint64_t)) + (2 * sizeof(uint32_t));
-    vector<unsigned char> headerBytes(sizeof(cCount) + remainingHeaderSize);
-    memcpy(headerBytes.data(), &cCount, sizeof(cCount));
-
-    if (auto _rdRemaining = this->m_archiveStream.read(
-            headerBytes.data() + sizeof(cCount), remainingHeaderSize);
-        !_rdRemaining || *_rdRemaining != remainingHeaderSize) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_rdRemaining ? make_error_code(errc::io_error)
-                                     : _rdRemaining.error());
-    }
-
-    auto _pseudoEntry = SeArchiveEntry::CreateFromBytes(headerBytes);
-    if (!_pseudoEntry) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_pseudoEntry.error());
-    }
-
-    const auto &pseudoEntry = *_pseudoEntry;
-    bool pathMatches =
-        (pseudoEntry.path == fileEntry.path ||
-         pseudoEntry.path == SeTableOfContent::GetFileName(fileEntry.path));
-    if (!pathMatches ||
-        pseudoEntry.uncompressed_size != fileEntry.uncompressed_size ||
-        pseudoEntry.compressed_size != fileEntry.compressed_size ||
-        pseudoEntry.crc32 != fileEntry.crc32 ||
-        pseudoEntry.fileUid != fileEntry.fileUid) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::ArchiveModified);
-    }
-
-    // Set up new entry in temp archive
-    uint64_t newFileOffset = tempStream.size();
-    SeArchiveEntry newEntry = fileEntry;
-    newEntry.offset = newFileOffset;
-    newEntry.compressed_size = 0;
-
-    SeArchiveEntry fileHeaderEntry =
-        SeArchiveEntry::CreateFileEntry(SeTableOfContent::GetFileName(fileEntry.path));
-    fileHeaderEntry.uncompressed_size = fileEntry.uncompressed_size;
-    fileHeaderEntry.attributes = fileEntry.attributes;
-    fileHeaderEntry.offset = newFileOffset;
-    fileHeaderEntry.fileUid = fileEntry.fileUid;
-    fileHeaderEntry.crc32 = fileEntry.crc32;
-    fileHeaderEntry.compressed_size = 0;
-
-    auto placeholderBytes = fileHeaderEntry.Serialize();
-    if (auto _wrHdr =
-            tempStream.write(placeholderBytes.data(), placeholderBytes.size());
-        !_wrHdr) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_wrHdr.error());
-    }
-    tempStream.flush();
-
-    // Create crypto sessions
-    auto _decryptSess =
-        this->m_cryptoCtx.createSession<Mode::Decryption>(fileEntry.fileUid);
-    if (!_decryptSess) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_decryptSess.error());
-    }
-    auto decryptSess = *move(_decryptSess);
-
-    auto _encryptSess =
-        this->m_cryptoCtx.createSession<Mode::Encryption>(fileEntry.fileUid);
-    if (!_encryptSess) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_encryptSess.error());
-    }
-    auto encryptSess = *move(_encryptSess);
-
-    // Reset ZSTD sessions
-    ZSTD_DCtx_reset(this->m_zstdDctx.get(), ZSTD_reset_session_only);
-    ZSTD_CCtx_reset(this->m_zstdCctx.get(), ZSTD_reset_session_only);
-    ZSTD_CCtx_setParameter(this->m_zstdCctx.get(), ZSTD_c_compressionLevel,
-                           targetCLevel);
-
-    uint32_t runningCrc = CRC32C_INIT;
-    uint64_t fileCompressedBytes = 0;
-
-    // Helper lambda: compress plaintext and encrypt ciphertext to tempStream
-    auto compressAndEncrypt =
-        [&](span<const unsigned char> plainData,
-            ZSTD_EndDirective mode) -> expected<void, error_code> {
-      ZSTD_inBuffer inBuff = {plainData.data(), plainData.size(), 0};
-      bool finished = false;
-      while (!finished) {
-        if (stopToken.stop_requested()) {
-          return unexpected(SeError::OperationCanceled);
-        }
-
-        ZSTD_outBuffer outBuff = {compOutBuf.data(), compOutBuf.size(), 0};
-        size_t remaining =
-            ZSTD_compressStream2(this->m_zstdCctx.get(), &outBuff, &inBuff, mode);
-        if (ZSTD_isError(remaining)) {
-          return unexpected(SeError::ZSTDCompressionError);
-        }
-
-        if (outBuff.pos > 0) {
-          auto _encRes = encryptSess->encrypt(
-              span<unsigned char>{
-                  reinterpret_cast<unsigned char *>(outBuff.dst), outBuff.pos},
-              cryptoCipherBuf);
-          if (_encRes) {
-            fileCompressedBytes += cipherChunkSize;
-            auto _wr = tempStream.write(cryptoCipherBuf.data(), cipherChunkSize);
-            if (!_wr)
-              return unexpected(_wr.error());
-          } else if (_encRes.error() != SeError::CRYPTOStageTooSmall) {
-            return unexpected(_encRes.error());
-          }
-        }
-
-        if (mode == ZSTD_e_end) {
-          finished = (remaining == 0);
-        } else {
-          finished = (inBuff.pos == inBuff.size);
-        }
-      }
-      return {};
-    };
-
-    // Helper lambda: decompress decrypted chunk and process
-    auto decompressAndRecompress =
-        [&](span<const unsigned char> cipherPlain) -> expected<void, error_code> {
-      ZSTD_inBuffer decomIn = {cipherPlain.data(), cipherPlain.size(), 0};
-      while (decomIn.pos < decomIn.size) {
-        if (stopToken.stop_requested()) {
-          return unexpected(SeError::OperationCanceled);
-        }
-
-        ZSTD_outBuffer decomOut = {decomOutBuf.data(), decomOutBuf.size(), 0};
-        size_t rem =
-            ZSTD_decompressStream(this->m_zstdDctx.get(), &decomOut, &decomIn);
-        if (ZSTD_isError(rem)) {
-          return unexpected(SeError::ZSTDCompressionError);
-        }
-
-        if (decomOut.pos > 0) {
-          runningCrc = crc32c_update(runningCrc, decomOut.dst, decomOut.pos);
-          totalProcessedBytes += decomOut.pos;
-
-          job.processedBytes = totalProcessedBytes;
-          job.compressedBytes = fileCompressedBytes;
-          job.percentage =
-              totalBytesAllFiles == 0
-                  ? 100
-                  : static_cast<uint32_t>((totalProcessedBytes * 100) /
-                                          totalBytesAllFiles);
-          if (callback)
-            callback(job);
-
-          auto _ceErr = compressAndEncrypt(
-              span<const unsigned char>{
-                  reinterpret_cast<const unsigned char *>(decomOut.dst),
-                  decomOut.pos},
-              ZSTD_e_continue);
-          if (!_ceErr)
-            return unexpected(_ceErr.error());
-        }
-      }
-      return {};
-    };
-
-    // Read and stream ciphertext from archiveStream
-    uint64_t remainingCipher = fileEntry.compressed_size;
-    while (remainingCipher > 0) {
-      if (stopToken.stop_requested()) {
-        cleanupOnFailure();
         job.setStatus(JobStatus::Aborted);
         if (callback)
-          callback(job);
+            callback(job);
         return unexpected(SeError::OperationCanceled);
-      }
+    }
 
-      size_t toRead =
-          std::min(static_cast<uint64_t>(cipherChunkSize), remainingCipher);
-      auto _rd = this->m_archiveStream.read(cipherInBuf.data(), toRead);
-      if (!_rd) {
-        cleanupOnFailure();
+    uint32_t newLevel = this->m_metadata.GetCompressionLevel();
+    if (!job.m_fileName.empty() && job.m_fileName[0] >= u'1' && job.m_fileName[0] <= u'3') {
+        newLevel = job.m_fileName[0] - u'0';
+    }
+
+    if (newLevel < 1 || newLevel > 3) {
         job.setStatus(JobStatus::Failed);
         if (callback)
-          callback(job);
-        return unexpected(_rd.error());
-      }
-      if (*_rd == 0)
-        break;
-
-      remainingCipher -= *_rd;
-
-      auto _decResult = decryptSess->decrypt(
-          span<unsigned char>{cipherInBuf.data(), *_rd}, cryptoPlainBuf);
-      if (_decResult) {
-        auto _procErr = decompressAndRecompress(span<const unsigned char>{
-            cryptoPlainBuf.data(),
-            AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE});
-        if (!_procErr) {
-          cleanupOnFailure();
-          job.setStatus(JobStatus::Failed);
-          if (callback)
             callback(job);
-          return unexpected(_procErr.error());
-        }
-      } else if (_decResult.error() != SeError::CRYPTOStageTooSmall) {
-        cleanupOnFailure();
+        return unexpected(make_error_code(errc::invalid_argument));
+    }
+
+    if (this->m_archiveFilePath.empty()) {
         job.setStatus(JobStatus::Failed);
         if (callback)
-          callback(job);
-        return unexpected(_decResult.error());
-      }
-    }
-
-    // Finalize decryption session
-    auto _finDec = decryptSess->finalizeDecryption(cryptoPlainBuf);
-    if (!_finDec) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_finDec.error());
-    }
-
-    size_t finalPlainBytes = *_finDec;
-    if (finalPlainBytes > 0) {
-      auto _procErr = decompressAndRecompress(
-          span<const unsigned char>{cryptoPlainBuf.data(), finalPlainBytes});
-      if (!_procErr) {
-        cleanupOnFailure();
-        job.setStatus(JobStatus::Failed);
-        if (callback)
-          callback(job);
-        return unexpected(_procErr.error());
-      }
-    }
-
-    // Flush any residual decompressed bytes from ZSTD decompressor
-    while (true) {
-      ZSTD_inBuffer emptyIn = {nullptr, 0, 0};
-      ZSTD_outBuffer decomOut = {decomOutBuf.data(), decomOutBuf.size(), 0};
-      size_t rem =
-          ZSTD_decompressStream(this->m_zstdDctx.get(), &decomOut, &emptyIn);
-      if (ZSTD_isError(rem)) {
-        break;
-      }
-      if (decomOut.pos > 0) {
-        runningCrc = crc32c_update(runningCrc, decomOut.dst, decomOut.pos);
-        totalProcessedBytes += decomOut.pos;
-
-        job.processedBytes = totalProcessedBytes;
-        job.compressedBytes = fileCompressedBytes;
-        job.percentage =
-            totalBytesAllFiles == 0
-                ? 100
-                : static_cast<uint32_t>((totalProcessedBytes * 100) /
-                                        totalBytesAllFiles);
-        if (callback)
-          callback(job);
-
-        auto _ceErr = compressAndEncrypt(
-            span<const unsigned char>{
-                reinterpret_cast<const unsigned char *>(decomOut.dst),
-                decomOut.pos},
-            ZSTD_e_continue);
-        if (!_ceErr) {
-          cleanupOnFailure();
-          job.setStatus(JobStatus::Failed);
-          if (callback)
             callback(job);
-          return unexpected(_ceErr.error());
+        return unexpected(make_error_code(errc::bad_file_descriptor));
+    }
+
+    if (!this->m_archiveStream.is_open()) {
+        auto _openArchive = this->m_archiveStream.open(this->m_archiveFilePath);
+        if (!_openArchive && _openArchive.error() != SeError::StreamAlreadyOpen) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+                callback(job);
+            return unexpected(_openArchive.error());
         }
-      }
-      if (decomOut.pos < decomOutBuf.size() || rem == 0) {
-        break;
-      }
     }
 
-    // Finish compression
-    auto _endComp = compressAndEncrypt({}, ZSTD_e_end);
-    if (!_endComp) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
+    if (!this->IsKeyPresent()) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::KeyDoesNotExist);
+    }
+
+    auto allEntries = this->m_toc.GetEntries();
+    vector<SeArchiveEntry> filesToRecompress;
+
+    for (const auto &entry : allEntries) {
+        if (!entry.isDirectory()) {
+            filesToRecompress.push_back(entry);
+        }
+    }
+
+    if (filesToRecompress.empty()) {
+        this->m_metadata.SetCompressionLevel(newLevel);
+        job.setStatus(JobStatus::Finished);
+        job.percentage = 100;
+        if (callback)
+            callback(job);
+        return {};
+    }
+
+    uint64_t totalBytesAllFiles = 0;
+    for (const auto &e : filesToRecompress) {
+        totalBytesAllFiles += e.uncompressed_size;
+    }
+
+    uint64_t totalProcessedBytes = 0;
+
+    job.setStatus(JobStatus::Running);
+    job.totalBytes = totalBytesAllFiles;
+    job.processedBytes = 0;
+    job.compressedBytes = 0;
+    job.percentage = 0;
+
+    if (callback)
         callback(job);
-      return unexpected(_endComp.error());
+
+    filesystem::path origPath(this->m_archiveFilePath);
+    filesystem::path tempPath = origPath;
+    tempPath += u".recomp.tmp";
+
+    error_code ec;
+    filesystem::remove(tempPath, ec);
+
+    MappedFileStream tempStream;
+    if (auto _openTemp = tempStream.open(tempPath.u16string(), FileMode::CreateAlways); !_openTemp) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_openTemp.error());
     }
 
-    // Finalize encryption
-    auto _finEnc = encryptSess->finalizeEncryption(cryptoCipherBuf);
-    if (!_finEnc) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_finEnc.error());
-    }
+    bool isSuccess = false;
+    auto cleanupOnFailure = [&]() {
+        if (!isSuccess) {
+            tempStream.close();
+            error_code remEc;
+            filesystem::remove(tempPath, remEc);
+        }
+    };
 
-    size_t finalCipherBytes = *_finEnc;
-    if (finalCipherBytes > 0) {
-      fileCompressedBytes += finalCipherBytes;
-      auto _wr = tempStream.write(cryptoCipherBuf.data(), finalCipherBytes);
-      if (!_wr) {
+    SeMetadata tempMetadata = this->m_metadata;
+    tempMetadata.SetCompressionLevel(newLevel);
+    tempMetadata.m_toc_offset = 0;
+    vector<unsigned char> metaBytes(SE_METADATA_SIZE);
+    tempMetadata.GetMetadataBytes(metaBytes);
+
+    if (auto _wrMeta = tempStream.write(metaBytes.data(), metaBytes.size()); !_wrMeta) { // writing metadata
         cleanupOnFailure();
         job.setStatus(JobStatus::Failed);
         if (callback)
-          callback(job);
-        return unexpected(_wr.error());
-      }
-    }
-
-    // Verify CRC32
-    uint32_t finalCrc = crc32c_finalize(runningCrc);
-    if (finalCrc != fileEntry.crc32) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::CrcChecksumFailed);
-    }
-
-    // Overwrite header placeholder in temp archive
-    fileHeaderEntry.compressed_size = fileCompressedBytes;
-    fileHeaderEntry.crc32 = finalCrc;
-    auto realHeaderBytes = fileHeaderEntry.Serialize();
-
-    if (auto _skHdr = tempStream.seek(newFileOffset); !_skHdr) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_skHdr.error());
-    }
-
-    if (auto _wrHdr =
-            tempStream.write(realHeaderBytes.data(), realHeaderBytes.size());
-        !_wrHdr) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_wrHdr.error());
-    }
-
-    // Restore tempStream write position to end of file
-    if (auto _skEnd = tempStream.seek(tempStream.size()); !_skEnd) {
-      cleanupOnFailure();
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_skEnd.error());
+            callback(job);
+        return unexpected(_wrMeta.error());
     }
     tempStream.flush();
 
-    newEntry.compressed_size = fileCompressedBytes;
-    newEntry.crc32 = finalCrc;
-    newTOC.AddEntry(newEntry);
-  }
+    int targetCLevel = (newLevel == 1) ? 1 : (newLevel == 2) ? 15 : 19;
+    const size_t cipherChunkSize =
+        AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE +
+        AesGcmStreamSession<Mode::Decryption>::TAG_BYTES;
 
-  // Write TOC and Metadata to tempStream
-  size_t newTocOffset = tempStream.size();
-  auto _ser = newTOC.Serialize();
-  if (!_ser) {
-    cleanupOnFailure();
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_ser.error());
-  }
+    vector<unsigned char> cipherInBuf(cipherChunkSize);
+    vector<unsigned char> cryptoPlainBuf(AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE);
+    vector<unsigned char> decomOutBuf(ZSTD_DStreamOutSize());
+    vector<unsigned char> compOutBuf(ZSTD_CStreamOutSize());
+    vector<unsigned char> cryptoCipherBuf(cipherChunkSize);
 
-  auto tocBytes = newTOC.GetTOCBytes();
-  if (auto _wrToc = tempStream.write(tocBytes.data(), tocBytes.size()); !_wrToc) {
-    cleanupOnFailure();
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_wrToc.error());
-  }
-
-  tempMetadata.m_toc_offset = newTocOffset;
-  tempMetadata.GetMetadataBytes(metaBytes);
-
-  if (auto _skMeta = tempStream.seek(0); !_skMeta) {
-    cleanupOnFailure();
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_skMeta.error());
-  }
-
-  if (auto _wrMeta = tempStream.write(metaBytes.data(), metaBytes.size());
-      !_wrMeta) {
-    cleanupOnFailure();
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_wrMeta.error());
-  }
-
-  tempStream.flush();
-
-  // Close both streams and perform atomic swap
-  tempStream.close();
-  this->m_archiveStream.close();
-
-  filesystem::path backupPath = origPath;
-  backupPath += u".bak";
-  error_code renEc;
-  filesystem::remove(backupPath, renEc);
-
-  filesystem::rename(origPath, backupPath, renEc);
-  if (renEc) {
-    filesystem::copy_file(tempPath, origPath,
-                          filesystem::copy_options::overwrite_existing, renEc);
-    if (renEc) {
-      cleanupOnFailure();
-      this->m_archiveStream.open(this->m_archiveFilePath);
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(renEc);
+    SeTableOfContent newTOC = SeTableOfContent::CreateNewTableOfContent();
+    for (const auto &entry : allEntries) {
+        if (entry.isDirectory()) {
+            newTOC.AddEntry(entry);
+        }
     }
-  } else {
-    filesystem::rename(tempPath, origPath, renEc);
-    if (renEc) {
-      error_code revEc;
-      filesystem::rename(backupPath, origPath, revEc);
-      cleanupOnFailure();
-      (void)this->m_archiveStream.open(this->m_archiveFilePath);
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(renEc);
+
+    for (const auto &fileEntry : filesToRecompress) {
+        pauseToken.wait_if_paused(stopToken);
+
+        if (stopToken.stop_requested()) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Aborted);
+            if (callback)
+            callback(job);
+            return unexpected(SeError::OperationCanceled);
+        }
+
+        // Seek to existing file entry offset in archive stream
+        if (auto _sk = this->m_archiveStream.seek(fileEntry.offset); !_sk) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+                callback(job);
+            return unexpected(_sk.error());
+        }
+
+        // Read header to validate against TOC
+        uint32_t cCount = 0;
+        if (auto _rdCount = this->m_archiveStream.read(&cCount, sizeof(cCount)); !_rdCount || *_rdCount != sizeof(cCount)) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+                callback(job);
+            return unexpected(_rdCount ? make_error_code(errc::io_error): _rdCount.error());
+        }
+
+        size_t remainingHeaderSize = (cCount * sizeof(char16_t)) + (4 * sizeof(uint64_t)) + (2 * sizeof(uint32_t));
+        vector<unsigned char> headerBytes(sizeof(cCount) + remainingHeaderSize);
+
+        memcpy(headerBytes.data(), &cCount, sizeof(cCount));
+
+        if (auto _rdRemaining = this->m_archiveStream.read(headerBytes.data() + sizeof(cCount), remainingHeaderSize); !_rdRemaining || *_rdRemaining != remainingHeaderSize) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_rdRemaining ? make_error_code(errc::io_error) : _rdRemaining.error());
+        }
+
+        auto _pseudoEntry = SeArchiveEntry::CreateFromBytes(headerBytes);
+        if (!_pseudoEntry) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_pseudoEntry.error());
+        }
+
+        const auto &pseudoEntry = *_pseudoEntry;
+        bool pathMatches = (pseudoEntry.path == fileEntry.path || pseudoEntry.path == SeTableOfContent::GetFileName(fileEntry.path));
+        if (!pathMatches ||
+            pseudoEntry.uncompressed_size != fileEntry.uncompressed_size ||
+            pseudoEntry.compressed_size != fileEntry.compressed_size ||
+            pseudoEntry.crc32 != fileEntry.crc32 ||
+            pseudoEntry.fileUid != fileEntry.fileUid) {
+
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+                callback(job);
+            return unexpected(SeError::ArchiveModified);
+        }
+
+        // Set up new entry in temp archive
+        uint64_t newFileOffset = tempStream.size();
+        SeArchiveEntry newEntry = fileEntry;
+        newEntry.offset = newFileOffset;
+        newEntry.compressed_size = 0;
+
+        SeArchiveEntry fileHeaderEntry = SeArchiveEntry::CreateFileEntry(pseudoEntry.path);
+        fileHeaderEntry.uncompressed_size = fileEntry.uncompressed_size;
+        fileHeaderEntry.attributes = fileEntry.attributes;
+        fileHeaderEntry.offset = newFileOffset;
+        fileHeaderEntry.fileUid = fileEntry.fileUid;
+        fileHeaderEntry.crc32 = fileEntry.crc32;
+        fileHeaderEntry.compressed_size = 0;
+
+        auto placeholderBytes = fileHeaderEntry.Serialize();
+        if (auto _wrHdr = tempStream.write(placeholderBytes.data(), placeholderBytes.size()); !_wrHdr) { // BUG:
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_wrHdr.error());
+        }
+        tempStream.flush();
+
+        // Create crypto sessions
+        auto _decryptSess = this->m_cryptoCtx.createSession<Mode::Decryption>(fileEntry.fileUid);
+        if (!_decryptSess) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_decryptSess.error());
+        }
+        auto decryptSess = *move(_decryptSess);
+
+        auto _encryptSess = this->m_cryptoCtx.createSession<Mode::Encryption>(fileEntry.fileUid);
+        if (!_encryptSess) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_encryptSess.error());
+        }
+        auto encryptSess = *move(_encryptSess);
+
+        ZSTD_DCtx_reset(this->m_zstdDctx.get(), ZSTD_reset_session_only);
+        ZSTD_CCtx_reset(this->m_zstdCctx.get(), ZSTD_reset_session_only);
+        ZSTD_CCtx_setParameter(this->m_zstdCctx.get(), ZSTD_c_compressionLevel, targetCLevel);
+
+        uint32_t runningCrc = CRC32C_INIT;
+        uint64_t fileCompressedBytes = 0;
+
+       
+        auto compressAndEncrypt = [&](span<const unsigned char> plainData, ZSTD_EndDirective mode) -> expected<void, error_code> {
+
+            ZSTD_inBuffer inBuff = {plainData.data(), plainData.size(), 0};
+            bool finished = false;
+            while (!finished) {
+                pauseToken.wait_if_paused(stopToken);
+
+                if (stopToken.stop_requested()) {
+                    return unexpected(SeError::OperationCanceled);
+                }
+
+                ZSTD_outBuffer outBuff = {compOutBuf.data(), compOutBuf.size(), 0};
+                size_t remaining =
+                    ZSTD_compressStream2(this->m_zstdCctx.get(), &outBuff, &inBuff, mode);
+                if (ZSTD_isError(remaining)) {
+                    return unexpected(SeError::ZSTDCompressionError);
+                }
+
+                if (outBuff.pos > 0) {
+                    auto _encRes = encryptSess->encrypt(
+                        span<unsigned char>{
+                            reinterpret_cast<unsigned char *>(outBuff.dst), outBuff.pos},
+                        cryptoCipherBuf);
+                    if (_encRes) {
+                    fileCompressedBytes += cipherChunkSize;
+                    auto _wr = tempStream.write(cryptoCipherBuf.data(), cipherChunkSize);
+                    if (!_wr)
+                        return unexpected(_wr.error());
+                    } else if (_encRes.error() != SeError::CRYPTOStageTooSmall) {
+                    return unexpected(_encRes.error());
+                    }
+                }
+
+                if (mode == ZSTD_e_end) {
+                    finished = (remaining == 0);
+                } else {
+                    finished = (inBuff.pos == inBuff.size);
+                }
+            }
+            return {};
+        };
+
+        auto decompressAndRecompress = [&](span<const unsigned char> cipherPlain) -> expected<void, error_code> {
+            pauseToken.wait_if_paused(stopToken);
+
+            ZSTD_inBuffer decomIn = {cipherPlain.data(), cipherPlain.size(), 0};
+            while (decomIn.pos < decomIn.size) {
+                if (stopToken.stop_requested()) {
+                    return unexpected(SeError::OperationCanceled);
+                }
+
+                ZSTD_outBuffer decomOut = {decomOutBuf.data(), decomOutBuf.size(), 0};
+                size_t rem = ZSTD_decompressStream(this->m_zstdDctx.get(), &decomOut, &decomIn);
+                if (ZSTD_isError(rem)) {
+                    return unexpected(SeError::ZSTDCompressionError);
+                }
+
+                if (decomOut.pos > 0) {
+                    runningCrc = crc32c_update(runningCrc, decomOut.dst, decomOut.pos);
+                    totalProcessedBytes += decomOut.pos;
+
+                    job.processedBytes = totalProcessedBytes;
+                    job.compressedBytes = fileCompressedBytes;
+                    job.percentage =
+                        totalBytesAllFiles == 0
+                            ? 100
+                            : static_cast<uint32_t>((totalProcessedBytes * 100) /
+                                                    totalBytesAllFiles);
+                    if (callback)
+                        callback(job);
+
+                    auto _ceErr = compressAndEncrypt(
+                        span<const unsigned char>{
+                            reinterpret_cast<const unsigned char *>(decomOut.dst),
+                            decomOut.pos},
+                        ZSTD_e_continue);
+                    if (!_ceErr)
+                    return unexpected(_ceErr.error());
+                }
+            }
+            return {};
+        };
+
+        // Read and stream ciphertext from archiveStream
+        uint64_t remainingCipher = fileEntry.compressed_size;
+
+        while (remainingCipher > 0) {
+            pauseToken.wait_if_paused(stopToken);
+
+            if (stopToken.stop_requested()) {
+                cleanupOnFailure();
+                job.setStatus(JobStatus::Aborted);
+                if (callback)
+                    callback(job);
+                return unexpected(SeError::OperationCanceled);
+            }
+
+            size_t toRead = std::min(static_cast<uint64_t>(cipherChunkSize), remainingCipher);
+            auto _rd = this->m_archiveStream.read(cipherInBuf.data(), toRead);
+            if (!_rd) {
+                cleanupOnFailure();
+                job.setStatus(JobStatus::Failed);
+                if (callback)
+                    callback(job);
+                return unexpected(_rd.error());
+            }
+            if (*_rd == 0)
+                break;
+
+            remainingCipher -= *_rd;
+
+            auto _decResult = decryptSess->decrypt(
+                span<unsigned char>{cipherInBuf.data(), *_rd}, cryptoPlainBuf);
+            if (_decResult) {
+                auto _procErr = decompressAndRecompress(span<const unsigned char>{cryptoPlainBuf.data(),
+                    AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE});
+
+                if (!_procErr) {
+                    cleanupOnFailure();
+                    job.setStatus(JobStatus::Failed);
+                    if (callback)
+                    callback(job);
+                    return unexpected(_procErr.error());
+                }
+            }
+            else if (_decResult.error() != SeError::CRYPTOStageTooSmall) {
+                cleanupOnFailure();
+                job.setStatus(JobStatus::Failed);
+                if (callback)
+                    callback(job);
+                return unexpected(_decResult.error());
+            }
+        }
+
+        auto _finDec = decryptSess->finalizeDecryption(cryptoPlainBuf);
+        if (!_finDec) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_finDec.error());
+        }
+
+        size_t finalPlainBytes = *_finDec;
+        if (finalPlainBytes > 0) {
+            auto _procErr = decompressAndRecompress(
+                span<const unsigned char>{cryptoPlainBuf.data(), finalPlainBytes});
+            if (!_procErr) {
+                cleanupOnFailure();
+                job.setStatus(JobStatus::Failed);
+                if (callback)
+                    callback(job);
+                return unexpected(_procErr.error());
+            }
+        }
+
+        // Flush any residual decompressed bytes from ZSTD decompressor
+        while (true) {
+            ZSTD_inBuffer emptyIn = {nullptr, 0, 0};
+            ZSTD_outBuffer decomOut = {decomOutBuf.data(), decomOutBuf.size(), 0};
+            size_t rem = ZSTD_decompressStream(this->m_zstdDctx.get(), &decomOut, &emptyIn);
+            if (ZSTD_isError(rem)) {
+                break;
+            }
+            if (decomOut.pos > 0) {
+                runningCrc = crc32c_update(runningCrc, decomOut.dst, decomOut.pos);
+                totalProcessedBytes += decomOut.pos;
+
+                job.processedBytes = totalProcessedBytes;
+                job.compressedBytes = fileCompressedBytes;
+                job.percentage =
+                    totalBytesAllFiles == 0
+                        ? 100
+                        : static_cast<uint32_t>((totalProcessedBytes * 100) /
+                                                totalBytesAllFiles);
+                if (callback)
+                    callback(job);
+
+                auto _ceErr = compressAndEncrypt(
+                    span<const unsigned char>{
+                        reinterpret_cast<const unsigned char *>(decomOut.dst),
+                        decomOut.pos},
+                    ZSTD_e_continue);
+                if (!_ceErr) {
+                    cleanupOnFailure();
+                    job.setStatus(JobStatus::Failed);
+                    if (callback)
+                    callback(job);
+                    return unexpected(_ceErr.error());
+                }
+            }
+            if (decomOut.pos < decomOutBuf.size() || rem == 0) {
+                break;
+            }
+        }
+
+        // Finish compression
+        auto _endComp = compressAndEncrypt({}, ZSTD_e_end);
+        if (!_endComp) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_endComp.error());
+        }
+
+        // Finalize encryption
+        auto _finEnc = encryptSess->finalizeEncryption(cryptoCipherBuf);
+        if (!_finEnc) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_finEnc.error());
+        }
+
+        size_t finalCipherBytes = *_finEnc;
+        if (finalCipherBytes > 0) {
+            fileCompressedBytes += finalCipherBytes;
+            auto _wr = tempStream.write(cryptoCipherBuf.data(), finalCipherBytes);
+            if (!_wr) {
+                cleanupOnFailure();
+                job.setStatus(JobStatus::Failed);
+                if (callback)
+                    callback(job);
+                return unexpected(_wr.error());
+            }
+        }
+
+        // Verify CRC32
+        uint32_t finalCrc = crc32c_finalize(runningCrc);
+        if (finalCrc != fileEntry.crc32) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(SeError::CrcChecksumFailed);
+        }
+
+        // Overwrite header placeholder in temp archive
+        fileHeaderEntry.compressed_size = fileCompressedBytes;
+        fileHeaderEntry.crc32 = finalCrc;
+        auto realHeaderBytes = fileHeaderEntry.Serialize();
+
+        if (auto _skHdr = tempStream.seek(newFileOffset); !_skHdr) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_skHdr.error());
+        }
+
+        if (auto _wrHdr = tempStream.write(realHeaderBytes.data(), realHeaderBytes.size()); !_wrHdr) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_wrHdr.error());
+        }
+
+        // Restore tempStream write position to end of file
+        if (auto _skEnd = tempStream.seek(tempStream.size()); !_skEnd) {
+            cleanupOnFailure();
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(_skEnd.error());
+        }
+        tempStream.flush();
+
+        newEntry.compressed_size = fileCompressedBytes;
+        newEntry.crc32 = finalCrc;
+        newTOC.AddEntry(newEntry);
     }
+
+    // Write TOC and Metadata to tempStream
+    size_t newTocOffset = tempStream.size();
+    auto _ser = newTOC.Serialize();
+    if (!_ser) {
+        cleanupOnFailure();
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_ser.error());
+    }
+
+    auto tocBytes = newTOC.GetTOCBytes();
+    if (auto _wrToc = tempStream.write(tocBytes.data(), tocBytes.size()); !_wrToc) {
+        cleanupOnFailure();
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_wrToc.error());
+    }
+
+    tempMetadata.m_toc_offset = newTocOffset;
+    tempMetadata.GetMetadataBytes(metaBytes);
+
+    if (auto _skMeta = tempStream.seek(0); !_skMeta) {
+        cleanupOnFailure();
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_skMeta.error());
+    }
+
+    if (auto _wrMeta = tempStream.write(metaBytes.data(), metaBytes.size());!_wrMeta) {
+        cleanupOnFailure();
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_wrMeta.error());
+    }
+
+    tempStream.flush();
+
+    // Close both streams and perform atomic swap
+    tempStream.close();
+    this->m_archiveStream.close();
+
+    filesystem::path backupPath = origPath;
+    backupPath += u".bak";
+    error_code renEc;
     filesystem::remove(backupPath, renEc);
-  }
 
-  filesystem::remove(tempPath, renEc);
-  isSuccess = true;
+    filesystem::rename(origPath, backupPath, renEc);
+    if (renEc) {
+        filesystem::copy_file(tempPath, origPath, filesystem::copy_options::overwrite_existing, renEc);
+        if (renEc) {
+            cleanupOnFailure();
+            this->m_archiveStream.open(this->m_archiveFilePath);
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(renEc);
+        }
+    }
+    else {
+        filesystem::rename(tempPath, origPath, renEc);
+        if (renEc) {
+            error_code revEc;
+            filesystem::rename(backupPath, origPath, revEc);
+            cleanupOnFailure();
+            (void)this->m_archiveStream.open(this->m_archiveFilePath);
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(renEc);
+        }
+        filesystem::remove(backupPath, renEc);
+    }
 
-  auto _reopen = this->m_archiveStream.open(this->m_archiveFilePath);
-  if (!_reopen) {
-    job.setStatus(JobStatus::Failed);
+    filesystem::remove(tempPath, renEc);
+    isSuccess = true;
+
+    auto _reopen = this->m_archiveStream.open(this->m_archiveFilePath);
+    if (!_reopen) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_reopen.error());
+    }
+
+    this->m_metadata = tempMetadata;
+    this->m_toc = newTOC;
+    this->m_isReady = true;
+
+    job.setStatus(JobStatus::Finished);
+    job.processedBytes = totalBytesAllFiles;
+    job.compressedBytes = totalBytesAllFiles;
+    job.percentage = 100;
     if (callback)
-      callback(job);
-    return unexpected(_reopen.error());
-  }
+        callback(job);
 
-  this->m_metadata = tempMetadata;
-  this->m_toc = newTOC;
-  this->m_isReady = true;
-
-  job.setStatus(JobStatus::Finished);
-  job.processedBytes = totalBytesAllFiles;
-  job.compressedBytes = totalBytesAllFiles;
-  job.percentage = 100;
-  if (callback)
-    callback(job);
-
-  return {};
+    return {};
 }
 
 expected<void, error_code> SeArchive::doTestFile(SeJob &job,
