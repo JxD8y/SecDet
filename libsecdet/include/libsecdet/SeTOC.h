@@ -15,7 +15,6 @@ using namespace std;
 #define SE_TOC_MAGIC "\x7F\x54\x4F\x43"     // 7F TOC
 #define SE_TOC_ENTRY_PAD "\x04\x03\x4B\x50" // ZIP similar delimiter
 
-// Cross-platform file attribute bit flags (stored in SeArchiveEntry::attributes)
 #define SE_ATTR_DIR      0x01u  // Entry is a directory
 #define SE_ATTR_READONLY 0x02u  // File is read-only / not writable
 #define SE_ATTR_HIDDEN   0x04u  // File is hidden

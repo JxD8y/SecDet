@@ -432,24 +432,26 @@ expected<SeArchive, error_code> SeArchive::RecoverArchiveSync(u16string path, st
 
     // 5. Generate TOC health status string
     if (tocHeaderValid && tocFullyRead && notFoundCount == 0 && foundOkCount == 0 && foundTruncatedCount == 0) {
-    tocHealth = "Healthy (Valid TOC): All " + std::to_string(tocEntriesParsed) + " entries fully indexed";
-    } else if (!tocHeaderValid) {
-    if (effectiveTocOffset >= fileSize) {
-        tocHealth = "Damaged: TOC offset (0x" + toHex(effectiveTocOffset) + ") out of bounds; " +
-                    std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
-    } else {
-        tocHealth = "Damaged: Invalid TOC signature at offset 0x" + toHex(effectiveTocOffset) + "; " +
-                    std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
+        tocHealth = "OK: All " + std::to_string(tocEntriesParsed) + " entries fully indexed";
     }
+    else if (!tocHeaderValid) {
+        if (effectiveTocOffset >= fileSize) {
+            tocHealth = "Damaged: TOC offset (0x" + toHex(effectiveTocOffset) + ") out of bounds; " +
+                        std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
+        } else {
+            tocHealth = "Damaged: Invalid TOC signature at offset 0x" + toHex(effectiveTocOffset) + "; " +
+                        std::to_string(parsedBodyEntries.size()) + " items reconstructed from archive body";
+        }
     } else if (!tocFullyRead || foundTruncatedCount > 0 || foundOkCount > 0 || notFoundCount > 0) {
-    tocHealth = "Truncated / Damaged: EOF cut off at 0x" + toHex(fileSize) + " • " +
+        tocHealth = "Damaged: EOF cut off at 0x" + toHex(fileSize) + " • " +
                 std::to_string(parsedBodyEntries.size()) + " items reconstructed (" +
                 std::to_string(foundIndexedCount) + " indexed, " +
                 std::to_string(foundOkCount) + " unindexed, " +
                 std::to_string(foundTruncatedCount) + " truncated, " +
                 std::to_string(notFoundCount) + " missing)";
-    } else {
-    tocHealth = "Recovered: " + std::to_string(parsedBodyEntries.size()) + " items reconstructed from body";
+    }
+    else {
+        tocHealth = "Recovered: " + std::to_string(parsedBodyEntries.size()) + " items reconstructed from body";
     }
 
     // 6. Build and return recovered SeArchive
@@ -1847,7 +1849,9 @@ SeArchive::doAddDirectoryJob(SeJob &job, ProgressCallback callback,stop_token st
                 adjusted.processedBytes = baseProcessed + j.processedBytes;
                 adjusted.compressedBytes = baseCompressed + j.compressedBytes;
                 adjusted.totalBytes = totalBytes;
-                adjusted.percentage = j.totalBytes > 0 ? (static_cast<double>(j.processedBytes) / j.totalBytes) * 100 : 0;
+                adjusted.percentage = totalBytes > 0
+                    ? std::min<uint32_t>(100, static_cast<uint32_t>((static_cast<double>(adjusted.processedBytes) / static_cast<double>(totalBytes)) * 100.0))
+                    : 100;
                 adjusted.m_status = JobStatus::Running;
                 callback(adjusted);
             };
@@ -3054,220 +3058,214 @@ SeArchive::TestFileAsync(u16string fileName, ProgressCallback callback) {
   return SeTaskHandle<bool>(std::move(worker), std::move(future), std::move(pauseState));
 }
 
-expected<size_t, error_code>
-SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
-                           ProgressCallback callback, stop_token stopToken,
-                           SePauseToken pauseToken) {
+expected<size_t, error_code> SeArchive::ExtractFileSync(u16string fileName, 
+                                                        u16string outputPath, ProgressCallback callback, stop_token stopToken,
+                                                        SePauseToken pauseToken) {
   // Only directory output path are allowed
   // Job handling is internal to this function no registration required
-  SeJob job(JobType::ExtractFile, fileName, outputPath);
-  job.setStatus(JobStatus::Pending);
-  if (callback)
-    callback(job);
-  if (!SeTableOfContent::verifyAbsPath(outputPath) ||
-      !SeTableOfContent::isAbsPathDir(outputPath)) {
-    job.setStatus(JobStatus::Failed);
+    SeJob job(JobType::ExtractFile, fileName, outputPath);
+    job.setStatus(JobStatus::Pending);
     if (callback)
-      callback(job);
-    return unexpected(SeError::ExpectedDirectory);
-  }
-
-  if (pauseToken.wait_if_paused(stopToken,
-          [&]() {
-            job.setStatus(JobStatus::Paused);
-            if (callback) callback(job);
-          },
-          [&]() {
-            job.setStatus(JobStatus::Running);
-            if (callback) callback(job);
-          })) {
-    job.setStatus(JobStatus::Aborted);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::OperationCanceled);
-  }
-
-  if (stopToken.stop_requested()) {
-    job.setStatus(JobStatus::Aborted);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::OperationCanceled);
-  }
-
-  auto _entry = this->m_toc.GetEntry(fileName);
-  if (!_entry) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_entry.error());
-  }
-  auto entry = *_entry;
-  auto path = SeTableOfContent::mergePath(
-      outputPath, SeTableOfContent::GetFileName(fileName));
-
-  MappedFileStream outFs;
-  if (auto _openErr = outFs.open(path, FileMode::CreateAlways); !_openErr) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_openErr.error());
-  }
-
-  // Initiating the crypto session
-  auto _cryptoSess =
-      this->m_cryptoCtx.createSession<Mode::Decryption>(entry.fileUid);
-  if (!_cryptoSess) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_cryptoSess.error());
-  }
-
-  auto cryptoSess = *move(_cryptoSess);
-
-  const size_t outBufSize = ZSTD_DStreamOutSize();
-  vector<unsigned char> decomOutBuff(outBufSize);
-
-  // Ensure archive stream is open
-  if (!this->m_archiveStream.is_open()) {
-    auto _openArchive = this->m_archiveStream.open(this->m_archiveFilePath);
-    if (!_openArchive && _openArchive.error() != SeError::StreamAlreadyOpen) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
         callback(job);
-      return unexpected(_openArchive.error());
-    }
-  }
-
-  // Seek to the TOC entry file offset
-  if (auto _sk = this->m_archiveStream.seek(entry.offset); !_sk) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_sk.error());
-  }
-
-  // Read entry header from archive stream and construct a pseudo entry to
-  // validate against TOC
-  uint32_t cCount = 0;
-  if (auto _rdCount = this->m_archiveStream.read(&cCount, sizeof(cCount));
-      !_rdCount || *_rdCount != sizeof(cCount)) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_rdCount ? make_error_code(errc::io_error)
-                               : _rdCount.error());
-  }
-
-  size_t remainingHeaderSize = (cCount * sizeof(char16_t)) +
-                               (4 * sizeof(uint64_t)) + (2 * sizeof(uint32_t));
-  vector<unsigned char> headerBytes(sizeof(cCount) + remainingHeaderSize);
-  memcpy(headerBytes.data(), &cCount, sizeof(cCount));
-
-  if (auto _rdRemaining = this->m_archiveStream.read(
-          headerBytes.data() + sizeof(cCount), remainingHeaderSize);
-      !_rdRemaining || *_rdRemaining != remainingHeaderSize) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_rdRemaining ? make_error_code(errc::io_error)
-                                   : _rdRemaining.error());
-  }
-
-  auto _pseudoEntry = SeArchiveEntry::CreateFromBytes(headerBytes);
-  if (!_pseudoEntry) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(_pseudoEntry.error());
-  }
-
-  const auto &pseudoEntry = *_pseudoEntry;
-
-  // Check pseudo entry against TOC entry (every field except offset)
-  bool pathMatches =
-      (pseudoEntry.path == entry.path ||
-       pseudoEntry.path == SeTableOfContent::GetFileName(entry.path));
-  if (!pathMatches ||
-      pseudoEntry.uncompressed_size != entry.uncompressed_size ||
-      pseudoEntry.compressed_size != entry.compressed_size ||
-      pseudoEntry.attributes != entry.attributes ||
-      pseudoEntry.crc32 != entry.crc32 ||
-      pseudoEntry.fileUid != entry.fileUid) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::ArchiveModified);
-  }
-
-  // Stream is now positioned right at the beginning of the encrypted file
-  // payload
-  const size_t cipherChunkSize =
-      AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE +
-      AesGcmStreamSession<Mode::Decryption>::TAG_BYTES;
-  vector<unsigned char> cipherBuffer(cipherChunkSize);
-  vector<unsigned char> cryptoOutBuffer(
-      AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE);
-
-  ZSTD_DCtx_reset(this->m_zstdDctx.get(), ZSTD_reset_session_only);
-
-  job.setStatus(JobStatus::Running);
-  job.totalBytes = entry.uncompressed_size;
-  job.processedBytes = 0;
-  job.compressedBytes = 0;
-  job.percentage = 0;
-  if (callback)
-    callback(job);
-
-  uint64_t totalExtractedBytes = 0;
-  uint64_t totalReadCipherBytes = 0;
-  uint32_t currentCrc = CRC32C_INIT;
-
-  auto decompressAndWrite =
-      [&](span<const unsigned char> plain) -> expected<void, error_code> {
-    ZSTD_inBuffer inBuff = {plain.data(), plain.size(), 0};
-    while (inBuff.pos < inBuff.size) {
-      if (pauseToken.wait_if_paused(stopToken,
-              [&]() {
-                job.setStatus(JobStatus::Paused);
-                if (callback) callback(job);
-              },
-              [&]() {
-                job.setStatus(JobStatus::Running);
-                if (callback) callback(job);
-              })) {
-        outFs.abort();
-        job.setStatus(JobStatus::Aborted);
-        if (callback)
-          callback(job);
-        return unexpected(SeError::OperationCanceled);
-      }
-
-      if (stopToken.stop_requested()) {
-        outFs.abort();
-        job.setStatus(JobStatus::Aborted);
-        if (callback)
-          callback(job);
-        return unexpected(SeError::OperationCanceled);
-      }
-
-      ZSTD_outBuffer outBuff = {decomOutBuff.data(), decomOutBuff.size(), 0};
-      size_t remaining =
-          ZSTD_decompressStream(this->m_zstdDctx.get(), &outBuff, &inBuff);
-      if (ZSTD_isError(remaining)) {
+    if (!SeTableOfContent::verifyAbsPath(outputPath) || !SeTableOfContent::isAbsPathDir(outputPath)) {
         job.setStatus(JobStatus::Failed);
         if (callback)
-          callback(job);
-        return unexpected(SeError::ZSTDCompressionError);
-      }
+            callback(job);
+        return unexpected(SeError::ExpectedDirectory);
+    }
 
-      if (outBuff.pos > 0) {
+    if (pauseToken.wait_if_paused(stopToken,
+            [&]() {
+                job.setStatus(JobStatus::Paused);
+                if (callback) callback(job);
+            },
+            [&]() {
+                job.setStatus(JobStatus::Running);
+                if (callback) callback(job);
+            })) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    auto _entry = this->m_toc.GetEntry(fileName);
+    if (!_entry) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_entry.error());
+    }
+    auto entry = *_entry;
+    auto path = SeTableOfContent::mergePath(outputPath, SeTableOfContent::GetFileName(fileName));
+
+    MappedFileStream outFs;
+    if (auto _openErr = outFs.open(path, FileMode::CreateAlways); !_openErr) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_openErr.error());
+    }
+
+    // Initiating the crypto session
+    auto _cryptoSess = this->m_cryptoCtx.createSession<Mode::Decryption>(entry.fileUid);
+    if (!_cryptoSess) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_cryptoSess.error());
+    }
+
+    auto cryptoSess = *move(_cryptoSess);
+
+    const size_t outBufSize = ZSTD_DStreamOutSize();
+    vector<unsigned char> decomOutBuff(outBufSize);
+
+    // Ensure archive stream is open
+    if (!this->m_archiveStream.is_open()) {
+        auto _openArchive = this->m_archiveStream.open(this->m_archiveFilePath);
+        if (!_openArchive && _openArchive.error() != SeError::StreamAlreadyOpen) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+                callback(job);
+            return unexpected(_openArchive.error());
+        }
+    }
+
+    // Seek to the TOC entry file offset
+    if (auto _sk = this->m_archiveStream.seek(entry.offset); !_sk) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_sk.error());
+    }
+
+    // Read entry header from archive stream and construct a pseudo entry to
+    // validate against TOC
+    uint32_t cCount = 0;
+    if (auto _rdCount = this->m_archiveStream.read(&cCount, sizeof(cCount)); !_rdCount || *_rdCount != sizeof(cCount)) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_rdCount ? make_error_code(errc::io_error)
+                                    : _rdCount.error());
+    }
+
+    size_t remainingHeaderSize = (cCount * sizeof(char16_t)) + (4 * sizeof(uint64_t)) + (2 * sizeof(uint32_t));
+    vector<unsigned char> headerBytes(sizeof(cCount) + remainingHeaderSize);
+    memcpy(headerBytes.data(), &cCount, sizeof(cCount));
+
+    if (auto _rdRemaining = this->m_archiveStream.read(headerBytes.data() + sizeof(cCount), remainingHeaderSize);
+                                                        !_rdRemaining || *_rdRemaining != remainingHeaderSize) 
+    {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_rdRemaining ? make_error_code(errc::io_error)
+                                        : _rdRemaining.error());
+    }
+
+    auto _pseudoEntry = SeArchiveEntry::CreateFromBytes(headerBytes);
+    if (!_pseudoEntry) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(_pseudoEntry.error());
+    }
+
+    const auto &pseudoEntry = *_pseudoEntry;
+
+    // Check pseudo entry against TOC entry (every field except offset)
+    bool pathMatches =
+        (pseudoEntry.path == entry.path ||
+        pseudoEntry.path == SeTableOfContent::GetFileName(entry.path));
+    if (!pathMatches ||
+        pseudoEntry.uncompressed_size != entry.uncompressed_size ||
+        pseudoEntry.compressed_size != entry.compressed_size ||
+        pseudoEntry.attributes != entry.attributes ||
+        pseudoEntry.crc32 != entry.crc32 ||
+        pseudoEntry.fileUid != entry.fileUid) {
+    job.setStatus(JobStatus::Failed);
+    if (callback)
+        callback(job);
+    return unexpected(SeError::ArchiveModified);
+    }
+
+    // Stream is now positioned right at the beginning of the encrypted file
+    // payload
+    const size_t cipherChunkSize =
+        AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE +
+        AesGcmStreamSession<Mode::Decryption>::TAG_BYTES;
+    vector<unsigned char> cipherBuffer(cipherChunkSize);
+    vector<unsigned char> cryptoOutBuffer(
+        AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE);
+
+    ZSTD_DCtx_reset(this->m_zstdDctx.get(), ZSTD_reset_session_only);
+
+    job.setStatus(JobStatus::Running);
+    job.totalBytes = entry.uncompressed_size;
+    job.processedBytes = 0;
+    job.compressedBytes = 0;
+    job.percentage = 0;
+    if (callback)
+    callback(job);
+
+    uint64_t totalExtractedBytes = 0;
+    uint64_t totalReadCipherBytes = 0;
+    uint32_t currentCrc = CRC32C_INIT;
+
+    auto decompressAndWrite =
+        [&](span<const unsigned char> plain) -> expected<void, error_code> {
+    ZSTD_inBuffer inBuff = {plain.data(), plain.size(), 0};
+    while (inBuff.pos < inBuff.size) {
+        if (pauseToken.wait_if_paused(stopToken,
+                [&]() {
+                job.setStatus(JobStatus::Paused);
+                if (callback) callback(job);
+                },
+                [&]() {
+                job.setStatus(JobStatus::Running);
+                if (callback) callback(job);
+                })) {
+        outFs.abort();
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+        }
+
+        if (stopToken.stop_requested()) {
+        outFs.abort();
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+        }
+
+        ZSTD_outBuffer outBuff = {decomOutBuff.data(), decomOutBuff.size(), 0};
+        size_t remaining =
+            ZSTD_decompressStream(this->m_zstdDctx.get(), &outBuff, &inBuff);
+        if (ZSTD_isError(remaining)) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::ZSTDCompressionError);
+        }
+
+        if (outBuff.pos > 0) {
         auto _wr = outFs.write(outBuff.dst, outBuff.pos);
         if (!_wr) {
-          job.setStatus(JobStatus::Failed);
-          if (callback)
+            job.setStatus(JobStatus::Failed);
+            if (callback)
             callback(job);
-          return unexpected(_wr.error());
+            return unexpected(_wr.error());
         }
 
         totalExtractedBytes += outBuff.pos;
@@ -3281,50 +3279,50 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
                 : static_cast<uint32_t>((totalExtractedBytes * 100) /
                                         entry.uncompressed_size);
         if (callback)
-          callback(job);
-      }
+            callback(job);
+        }
     }
     return {};
-  };
+    };
 
-  uint64_t remainingCipher = entry.compressed_size;
-  while (remainingCipher > 0) {
+    uint64_t remainingCipher = entry.compressed_size;
+    while (remainingCipher > 0) {
     if (pauseToken.wait_if_paused(stopToken,
             [&]() {
-              job.setStatus(JobStatus::Paused);
-              if (callback) callback(job);
+                job.setStatus(JobStatus::Paused);
+                if (callback) callback(job);
             },
             [&]() {
-              job.setStatus(JobStatus::Running);
-              if (callback) callback(job);
+                job.setStatus(JobStatus::Running);
+                if (callback) callback(job);
             })) {
-      outFs.abort();
-      job.setStatus(JobStatus::Aborted);
-      if (callback)
+        outFs.abort();
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
         callback(job);
-      return unexpected(SeError::OperationCanceled);
+        return unexpected(SeError::OperationCanceled);
     }
 
     if (stopToken.stop_requested()) {
-      outFs.abort();
-      job.setStatus(JobStatus::Aborted);
-      if (callback)
+        outFs.abort();
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
         callback(job);
-      return unexpected(SeError::OperationCanceled);
+        return unexpected(SeError::OperationCanceled);
     }
 
     size_t toRead =
         std::min(static_cast<uint64_t>(cipherChunkSize), remainingCipher);
     auto _rd = this->m_archiveStream.read(cipherBuffer.data(), toRead);
     if (!_rd) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
+        job.setStatus(JobStatus::Failed);
+        if (callback)
         callback(job);
-      return unexpected(_rd.error());
+        return unexpected(_rd.error());
     }
 
     if (*_rd == 0) {
-      break;
+        break;
     }
 
     totalReadCipherBytes += *_rd;
@@ -3334,449 +3332,433 @@ SeArchive::ExtractFileSync(u16string fileName, u16string outputPath,
         span<unsigned char>{cipherBuffer.data(), *_rd}, cryptoOutBuffer);
 
     if (_cryptoResult) {
-      auto _decErr = decompressAndWrite(span<const unsigned char>{
-          cryptoOutBuffer.data(),
-          AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE});
-      if (!_decErr) {
+        auto _decErr = decompressAndWrite(span<const unsigned char>{
+            cryptoOutBuffer.data(),
+            AesGcmStreamSession<Mode::Decryption>::BUFFER_SIZE});
+        if (!_decErr) {
         return unexpected(_decErr.error());
-      }
+        }
     } else if (_cryptoResult.error() != SeError::CRYPTOStageTooSmall) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
+        job.setStatus(JobStatus::Failed);
+        if (callback)
         callback(job);
-      return unexpected(_cryptoResult.error());
+        return unexpected(_cryptoResult.error());
     }
-  }
+    }
 
-  // Finalize crypto session to flush any remaining staged plaintext
-  auto _finalCrypto = cryptoSess->finalizeDecryption(cryptoOutBuffer);
-  if (!_finalCrypto) {
+    // Finalize crypto session to flush any remaining staged plaintext
+    auto _finalCrypto = cryptoSess->finalizeDecryption(cryptoOutBuffer);
+    if (!_finalCrypto) {
     job.setStatus(JobStatus::Failed);
     if (callback)
-      callback(job);
+        callback(job);
     return unexpected(_finalCrypto.error());
-  }
+    }
 
-  size_t finalPlainBytes = *_finalCrypto;
-  if (finalPlainBytes > 0) {
+    size_t finalPlainBytes = *_finalCrypto;
+    if (finalPlainBytes > 0) {
     auto _decErr = decompressAndWrite(
         span<const unsigned char>{cryptoOutBuffer.data(), finalPlainBytes});
     if (!_decErr) {
-      return unexpected(_decErr.error());
+        return unexpected(_decErr.error());
     }
-  }
+    }
 
-  // Flush any residual decompressed bytes from the ZSTD stream
-  while (true) {
+    // Flush any residual decompressed bytes from the ZSTD stream
+    while (true) {
     ZSTD_inBuffer emptyIn = {nullptr, 0, 0};
     ZSTD_outBuffer outBuff = {decomOutBuff.data(), decomOutBuff.size(), 0};
     size_t remaining =
         ZSTD_decompressStream(this->m_zstdDctx.get(), &outBuff, &emptyIn);
     if (ZSTD_isError(remaining)) {
-      break;
+        break;
     }
     if (outBuff.pos > 0) {
-      auto _wr = outFs.write(outBuff.dst, outBuff.pos);
-      if (!_wr) {
+        auto _wr = outFs.write(outBuff.dst, outBuff.pos);
+        if (!_wr) {
         job.setStatus(JobStatus::Failed);
         if (callback)
-          callback(job);
+            callback(job);
         return unexpected(_wr.error());
-      }
-      totalExtractedBytes += outBuff.pos;
-      currentCrc = crc32c_update(currentCrc, outBuff.dst, outBuff.pos);
+        }
+        totalExtractedBytes += outBuff.pos;
+        currentCrc = crc32c_update(currentCrc, outBuff.dst, outBuff.pos);
     }
     if (outBuff.pos < decomOutBuff.size() || remaining == 0) {
-      break;
+        break;
     }
-  }
-
-  // Finalize compression and output stream
-  ZSTD_DCtx_reset(this->m_zstdDctx.get(), ZSTD_reset_session_only);
-  (void)outFs.flush();
-
-  currentCrc = crc32c_finalize(currentCrc);
-
-  job.setStatus(JobStatus::Finished);
-  job.processedBytes = totalExtractedBytes;
-  job.compressedBytes = entry.compressed_size;
-  job.percentage = 100;
-  if (callback)
-    callback(job);
-
-  return totalExtractedBytes;
-}
-
-SeTaskHandle<size_t>
-SeArchive::ExtractFileAsync(u16string fileName, u16string outputPath,
-                            ProgressCallback callback) {
-  auto pauseState = std::make_shared<SePauseState>();
-  SePauseToken pauseToken(pauseState);
-  auto promise = std::make_shared<std::promise<expected<size_t, error_code>>>();
-  auto future = promise->get_future().share();
-
-  std::jthread worker([this, fileName = std::move(fileName),
-                       outputPath = std::move(outputPath),
-                       callback = std::move(callback),
-                       pauseToken,
-                       promise](std::stop_token stopToken) {
-    try {
-      auto res =
-          this->ExtractFileSync(fileName, outputPath, callback, stopToken, pauseToken);
-      promise->set_value(res);
-    } catch (...) {
-      promise->set_exception(std::current_exception());
-    }
-  });
-
-  return SeTaskHandle<size_t>(std::move(worker), std::move(future), std::move(pauseState));
-}
-
-expected<size_t, error_code>
-SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath,
-                                ProgressCallback callback,
-                                stop_token stopToken,
-                                SePauseToken pauseToken) {
-  u16string normDir = SeTableOfContent::NormalizeDirectoryPath(fileName);
-  SeJob job(JobType::ExtractDirectory, normDir, outputPath);
-  job.setStatus(JobStatus::Pending);
-  if (callback)
-    callback(job);
-
-  if (!SeTableOfContent::verifyAbsPath(outputPath) ||
-      !SeTableOfContent::isAbsPathDir(outputPath)) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::ExpectedDirectory);
-  }
-
-  if (pauseToken.wait_if_paused(stopToken,
-          [&]() {
-            job.setStatus(JobStatus::Paused);
-            if (callback) callback(job);
-          },
-          [&]() {
-            job.setStatus(JobStatus::Running);
-            if (callback) callback(job);
-          })) {
-    job.setStatus(JobStatus::Aborted);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::OperationCanceled);
-  }
-
-  if (stopToken.stop_requested()) {
-    job.setStatus(JobStatus::Aborted);
-    if (callback)
-      callback(job);
-    return unexpected(SeError::OperationCanceled);
-  }
-
-  // Verify directory exists in TOC if a specific subdirectory was requested
-  if (normDir != u"/") {
-    if (!this->m_toc.CheckPath(normDir) || !this->m_toc.IsDirectory(normDir)) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::TocPathIsInvalid);
-    }
-  }
-
-  // Determine the base extraction directory on disk
-  filesystem::path baseExtractDir(outputPath);
-  if (normDir != u"/") {
-    u16string dirName = SeTableOfContent::GetFileName(normDir);
-    filesystem::path outLeaf = baseExtractDir.filename();
-    if (outLeaf.empty()) {
-      outLeaf = baseExtractDir.parent_path().filename();
-    }
-    if (outLeaf.u16string() != dirName) {
-      baseExtractDir /= filesystem::path(dirName);
-    }
-  }
-
-  error_code ec;
-  filesystem::create_directories(baseExtractDir, ec);
-  if (ec) {
-    job.setStatus(JobStatus::Failed);
-    if (callback)
-      callback(job);
-    return unexpected(ec);
-  }
-
-  // Separate directory entries and file entries belonging to this folder
-  vector<SeArchiveEntry> dirsToExtract;
-  vector<SeArchiveEntry> filesToExtract;
-  size_t prefixLen = (normDir == u"/") ? 1 : normDir.size();
-
-  if (normDir == u"/") {
-    for (const auto &entry : this->m_toc.GetEntries()) {
-      if (entry.path == u"/")
-        continue;
-      if (entry.isDirectory()) {
-        dirsToExtract.push_back(entry);
-      } else {
-        filesToExtract.push_back(entry);
-      }
-    }
-  } else {
-    auto _dirEnt = this->m_toc.GetEntry(normDir);
-    if (!_dirEnt) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(_dirEnt.error());
-    }
-    auto allSubs =
-        this->m_toc.GetDirectoryFileEntries(*_dirEnt, true /* recursive */);
-    for (const auto &entry : allSubs) {
-      if (entry.isDirectory()) {
-        dirsToExtract.push_back(entry);
-      } else {
-        filesToExtract.push_back(entry);
-      }
-    }
-  }
-
-  job.setStatus(JobStatus::Running);
-  job.totalBytes = filesToExtract.size();
-  job.processedBytes = 0;
-  job.percentage = filesToExtract.empty() ? 100 : 0;
-  if (callback)
-    callback(job);
-
-  // Create subdirectories on disk
-  for (const auto &dirEntry : dirsToExtract) {
-    if (pauseToken.wait_if_paused(stopToken,
-            [&]() {
-              job.setStatus(JobStatus::Paused);
-              if (callback) callback(job);
-            },
-            [&]() {
-              job.setStatus(JobStatus::Running);
-              if (callback) callback(job);
-            })) {
-      job.setStatus(JobStatus::Aborted);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::OperationCanceled);
     }
 
-    if (stopToken.stop_requested()) {
-      job.setStatus(JobStatus::Aborted);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::OperationCanceled);
-    }
+    // Finalize compression and output stream
+    ZSTD_DCtx_reset(this->m_zstdDctx.get(), ZSTD_reset_session_only);
+    (void)outFs.flush();
 
-    u16string sub = dirEntry.path.substr(prefixLen);
-    filesystem::path dirOnDisk = baseExtractDir / filesystem::path(sub);
+    currentCrc = crc32c_finalize(currentCrc);
 
-    filesystem::create_directories(dirOnDisk, ec);
-    if (ec) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(ec);
-    }
-  }
-
-  // Extract all files
-  size_t extractedFilesCount = 0;
-
-  for (const auto &fileEntry : filesToExtract) {
-
-    job.SetFileName(fileEntry.path);
-    if (callback)
-        callback(job);
-
-    if (pauseToken.wait_if_paused(stopToken,
-            [&]() {
-              job.setStatus(JobStatus::Paused);
-              if (callback) callback(job);
-            },
-            [&]() {
-              job.setStatus(JobStatus::Running);
-              if (callback) callback(job);
-            })) {
-      job.setStatus(JobStatus::Aborted);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::OperationCanceled);
-    }
-
-    if (stopToken.stop_requested()) {
-      job.setStatus(JobStatus::Aborted);
-      if (callback)
-        callback(job);
-      return unexpected(SeError::OperationCanceled);
-    }
-
-    u16string sub = fileEntry.path.substr(prefixLen);
-    filesystem::path fileSubPath(sub);
-    filesystem::path fileParentDir = baseExtractDir / fileSubPath.parent_path();
-
-    filesystem::create_directories(fileParentDir, ec);
-    if (ec) {
-      job.setStatus(JobStatus::Failed);
-      if (callback)
-        callback(job);
-      return unexpected(ec);
-    }
-
-    u16string targetDirStr = fileParentDir.u16string();
-    if (targetDirStr.empty() ||
-        (targetDirStr.back() != u'/' && targetDirStr.back() != u'\\')) {
-      targetDirStr += u'/';
-    }
-
-    // Emit active running status for the current file before extraction begins
-    job.SetFileName(fileEntry.path);
-    job.processedBytes = extractedFilesCount;
-    job.percentage = filesToExtract.empty()
-                         ? 0
-                         : static_cast<uint32_t>((extractedFilesCount * 100) /
-                                                 filesToExtract.size());
-    job.setStatus(JobStatus::Running);
-    if (callback)
-      callback(job);
-
-    auto fileProgressCb = [&](const SeJob &fileSubJob) {
-      if (fileSubJob.GetStatus() == JobStatus::Paused) {
-        job.setStatus(JobStatus::Paused);
-        if (callback) callback(job);
-      } else if (fileSubJob.GetStatus() == JobStatus::Running && job.GetStatus() == JobStatus::Paused) {
-        job.setStatus(JobStatus::Running);
-        if (callback) callback(job);
-      } else {
-        SeJob fJob = fileSubJob;
-        fJob.SetFileName(fileEntry.path);
-        if (callback) callback(fJob);
-      }
-    };
-
-    auto _extractRes =
-        this->ExtractFileSync(fileEntry.path, targetDirStr, callback ? ProgressCallback(fileProgressCb) : nullptr, stopToken, pauseToken);
-    if (!_extractRes) {
-      if (_extractRes.error() == SeError::OperationCanceled) {
-        job.setStatus(JobStatus::Aborted);
-      } else {
-        job.setStatus(JobStatus::Failed);
-      }
-      if (callback)
-        callback(job);
-      return unexpected(_extractRes.error());
-    }
-
-    extractedFilesCount++;
-    job.SetFileName(fileEntry.path);
-    job.processedBytes = extractedFilesCount;
-    job.percentage = filesToExtract.empty()
-                         ? 100
-                         : static_cast<uint32_t>((extractedFilesCount * 100) /
-                                                 filesToExtract.size());
     job.setStatus(JobStatus::Finished);
+    job.processedBytes = totalExtractedBytes;
+    job.compressedBytes = entry.compressed_size;
+    job.percentage = 100;
     if (callback)
-      callback(job);
-  }
-
-  job.SetFileName(normDir);
-  job.setStatus(JobStatus::Finished);
-  job.processedBytes = extractedFilesCount;
-  job.percentage = 100;
-  if (callback)
     callback(job);
 
-  return extractedFilesCount;
+    return totalExtractedBytes;
+    }
+
+    SeTaskHandle<size_t>
+    SeArchive::ExtractFileAsync(u16string fileName, u16string outputPath,
+                            ProgressCallback callback) {
+    auto pauseState = std::make_shared<SePauseState>();
+    SePauseToken pauseToken(pauseState);
+    auto promise = std::make_shared<std::promise<expected<size_t, error_code>>>();
+    auto future = promise->get_future().share();
+
+    std::jthread worker([this, fileName = std::move(fileName),
+                        outputPath = std::move(outputPath),
+                        callback = std::move(callback),
+                        pauseToken,
+                        promise](std::stop_token stopToken) {
+    try {
+        auto res =
+            this->ExtractFileSync(fileName, outputPath, callback, stopToken, pauseToken);
+        promise->set_value(res);
+    } catch (...) {
+        promise->set_exception(std::current_exception());
+    }
+    });
+
+    return SeTaskHandle<size_t>(std::move(worker), std::move(future), std::move(pauseState));
 }
 
-SeTaskHandle<size_t>
-SeArchive::ExtractDirectoryAsync(u16string fileName, u16string outputPath,
-                                 ProgressCallback callback) {
-  auto pauseState = std::make_shared<SePauseState>();
-  SePauseToken pauseToken(pauseState);
-  auto promise = std::make_shared<std::promise<expected<size_t, error_code>>>();
-  auto future = promise->get_future().share();
+expected<size_t, error_code> SeArchive::ExtractDirectorySync(u16string fileName, u16string outputPath, ProgressCallback callback, stop_token stopToken, SePauseToken pauseToken) {
+    
+    u16string normDir = SeTableOfContent::NormalizeDirectoryPath(fileName);
+    SeJob job(JobType::ExtractDirectory, normDir, outputPath);
+    job.setStatus(JobStatus::Pending);
 
-  std::jthread worker([this, fileName = std::move(fileName),
-                       outputPath = std::move(outputPath),
-                       callback = std::move(callback),
-                       pauseToken,
-                       promise](std::stop_token stopToken) {
-    try {
-      auto res =
-          this->ExtractDirectorySync(fileName, outputPath, callback, stopToken, pauseToken);
-      promise->set_value(res);
-    } catch (...) {
-      promise->set_exception(std::current_exception());
+    if (callback)
+        callback(job);
+
+    if (!SeTableOfContent::verifyAbsPath(outputPath) || !SeTableOfContent::isAbsPathDir(outputPath)) {
+        job.setStatus(JobStatus::Failed);
+
+        if (callback)
+            callback(job);
+        return unexpected(SeError::ExpectedDirectory);
     }
-  });
 
-  return SeTaskHandle<size_t>(std::move(worker), std::move(future), std::move(pauseState));
+    if (pauseToken.wait_if_paused(stopToken, [&]() {
+                job.setStatus(JobStatus::Paused);
+                if (callback) callback(job);
+            },
+            [&]() {
+                job.setStatus(JobStatus::Running);
+                if (callback) callback(job);
+            }))
+    {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    if (stopToken.stop_requested()) {
+        job.setStatus(JobStatus::Aborted);
+        if (callback)
+            callback(job);
+        return unexpected(SeError::OperationCanceled);
+    }
+
+    if (normDir != u"/") {
+        if (!this->m_toc.CheckPath(normDir) || !this->m_toc.IsDirectory(normDir)) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(SeError::TocPathIsInvalid);
+        }
+    }
+
+    filesystem::path baseExtractDir(outputPath);
+    if (normDir != u"/") {
+        u16string dirName = SeTableOfContent::GetFileName(normDir);
+        filesystem::path outLeaf = baseExtractDir.filename();
+        if (outLeaf.empty()) {
+            outLeaf = baseExtractDir.parent_path().filename();
+        }
+        if (outLeaf.u16string() != dirName) {
+            baseExtractDir /= filesystem::path(dirName);
+        }
+    }
+
+    error_code ec;
+    filesystem::create_directories(baseExtractDir, ec);
+    if (ec) {
+        job.setStatus(JobStatus::Failed);
+        if (callback)
+            callback(job);
+        return unexpected(ec);
+    }
+
+    // Separate directory entries and file entries belonging to this folder
+    vector<SeArchiveEntry> dirsToExtract;
+    vector<SeArchiveEntry> filesToExtract;
+    size_t prefixLen = (normDir == u"/") ? 1 : normDir.size();
+
+    if (normDir == u"/") {
+        for (const auto &entry : this->m_toc.GetEntries()) { // Full archive extraction
+            if (entry.path == u"/")
+                continue;
+            if (entry.isDirectory()) {
+                dirsToExtract.push_back(entry);
+            } else {
+                filesToExtract.push_back(entry);
+            }
+        }
+    } 
+    else {
+        auto _dirEnt = this->m_toc.GetEntry(normDir);
+        if (!_dirEnt) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+                callback(job);
+            return unexpected(_dirEnt.error());
+        }
+        auto allSubs = this->m_toc.GetDirectoryFileEntries(*_dirEnt, true);
+
+        for (const auto &entry : allSubs) {
+            if (entry.isDirectory()) {
+                dirsToExtract.push_back(entry);
+            } else {
+                filesToExtract.push_back(entry);
+            }
+        }
+    }
+
+    uint64_t totalBytes = 0;
+    for (const auto &fileEntry : filesToExtract) {
+        totalBytes += fileEntry.uncompressed_size;
+    }
+
+    job.setStatus(JobStatus::Running);
+    job.totalBytes = totalBytes;
+    job.processedBytes = 0;
+    job.percentage = filesToExtract.empty() ? 100 : 0;
+    if (callback)
+        callback(job);
+
+    for (const auto &dirEntry : dirsToExtract) {
+        if (pauseToken.wait_if_paused(stopToken,
+                [&]() {
+                    job.setStatus(JobStatus::Paused);
+                    if (callback) callback(job);
+                },
+                [&]() {
+                    job.setStatus(JobStatus::Running);
+                    if (callback) callback(job);
+                })) {
+            job.setStatus(JobStatus::Aborted);
+            if (callback)
+            callback(job);
+            return unexpected(SeError::OperationCanceled);
+        }
+
+        if (stopToken.stop_requested()) {
+            job.setStatus(JobStatus::Aborted);
+            if (callback)
+            callback(job);
+            return unexpected(SeError::OperationCanceled);
+        }
+
+        u16string sub = dirEntry.path.substr(prefixLen);
+        filesystem::path dirOnDisk = baseExtractDir / filesystem::path(sub);
+
+        filesystem::create_directories(dirOnDisk, ec);
+        if (ec) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(ec);
+        }
+    }
+
+    // Extract all files
+    size_t extractedFilesCount = 0;
+    uint64_t cumulativeProcessedBytes = 0;
+    uint64_t cumulativeCompressedBytes = 0;
+
+    for (const auto &fileEntry : filesToExtract) {
+        if (pauseToken.wait_if_paused(stopToken,
+                [&]() {
+                    job.setStatus(JobStatus::Paused);
+                    if (callback) callback(job);
+                },
+                [&]() {
+                    job.setStatus(JobStatus::Running);
+                    if (callback) callback(job);
+                })) {
+            job.setStatus(JobStatus::Aborted);
+            if (callback)
+            callback(job);
+            return unexpected(SeError::OperationCanceled);
+        }
+
+        if (stopToken.stop_requested()) {
+            job.setStatus(JobStatus::Aborted);
+            if (callback)
+            callback(job);
+            return unexpected(SeError::OperationCanceled);
+        }
+
+        u16string sub = fileEntry.path.substr(prefixLen);
+        filesystem::path fileSubPath(sub);
+        filesystem::path fileParentDir = baseExtractDir / fileSubPath.parent_path();
+
+        filesystem::create_directories(fileParentDir, ec);
+        if (ec) {
+            job.setStatus(JobStatus::Failed);
+            if (callback)
+            callback(job);
+            return unexpected(ec);
+        }
+
+        u16string targetDirStr = fileParentDir.u16string();
+        if (targetDirStr.empty() ||
+            (targetDirStr.back() != u'/' && targetDirStr.back() != u'\\')) {
+            targetDirStr += u'/';
+        }
+
+        uint64_t baseProcessed = cumulativeProcessedBytes;
+        uint64_t baseCompressed = cumulativeCompressedBytes;
+
+        auto fileProgressCb = [&](const SeJob &fileSubJob) {
+            if (fileSubJob.GetStatus() == JobStatus::Paused) {
+                job.setStatus(JobStatus::Paused);
+            if (callback) callback(job);
+            } 
+            else if (fileSubJob.GetStatus() == JobStatus::Running && job.GetStatus() == JobStatus::Paused) {
+                job.setStatus(JobStatus::Running);
+                if (callback) callback(job);
+            } 
+            else {
+                SeJob fJob = fileSubJob;
+                fJob.SetFileName(fileEntry.path);
+                fJob.processedBytes = baseProcessed + fileSubJob.processedBytes;
+                fJob.compressedBytes = baseCompressed + fileSubJob.compressedBytes;
+                fJob.totalBytes = totalBytes;
+                fJob.percentage = totalBytes > 0
+                    ? std::min<uint32_t>(100, static_cast<uint32_t>((static_cast<double>(fJob.processedBytes) / static_cast<double>(totalBytes)) * 100.0))
+                    : 100;
+                fJob.setStatus(JobStatus::Running);
+                if (callback) callback(fJob);
+            }
+        };
+
+        auto _extractRes = this->ExtractFileSync(fileEntry.path, targetDirStr, callback ? ProgressCallback(fileProgressCb) : nullptr, stopToken, pauseToken);
+        if (!_extractRes) {
+            if (_extractRes.error() == SeError::OperationCanceled) {
+            job.setStatus(JobStatus::Aborted);
+            } else {
+            job.setStatus(JobStatus::Failed);
+            }
+            if (callback)
+            callback(job);
+            return unexpected(_extractRes.error());
+        }
+
+        extractedFilesCount++;
+        cumulativeProcessedBytes += fileEntry.uncompressed_size;
+        cumulativeCompressedBytes += fileEntry.compressed_size;
+    }
+
+    job.SetFileName(normDir);
+    job.setStatus(JobStatus::Finished);
+    job.processedBytes = totalBytes;
+    job.compressedBytes = cumulativeCompressedBytes;
+    job.percentage = 100;
+    if (callback)
+        callback(job);
+
+    return extractedFilesCount;
+}
+
+SeTaskHandle<size_t> SeArchive::ExtractDirectoryAsync(u16string fileName, u16string outputPath, ProgressCallback callback) {
+    auto pauseState = std::make_shared<SePauseState>();
+    SePauseToken pauseToken(pauseState);
+    auto promise = std::make_shared<std::promise<expected<size_t, error_code>>>();
+    auto future = promise->get_future().share();
+
+    std::jthread worker([this, fileName = std::move(fileName),
+                        outputPath = std::move(outputPath),
+                        callback = std::move(callback),
+                        pauseToken,promise](std::stop_token stopToken)
+    {
+        try {
+            auto res = this->ExtractDirectorySync(fileName, outputPath, callback, stopToken, pauseToken);
+            promise->set_value(res);
+        } catch (...) {
+            promise->set_exception(std::current_exception());
+        }
+    });
+    return SeTaskHandle<size_t>(std::move(worker), std::move(future), std::move(pauseState));
 }
 
 bool SeArchive::verifyJobs() {
-  // Extraction jobs are strictly synchronous and cannot be queued or processed
-  // as archive modification jobs
-  for (const auto &job : this->m_jobs) {
-    if (job.m_type == JobType::ExtractFile ||
-        job.m_type == JobType::ExtractDirectory ||
-        job.m_type == JobType::None) {
-      return false;
+
+    for (const auto &job : this->m_jobs) {
+        if (job.m_type == JobType::ExtractFile ||
+            job.m_type == JobType::ExtractDirectory ||
+            job.m_type == JobType::None) {
+            return false;
+        }
+        if (job.m_status != JobStatus::Idle) {
+            return false;
+        }
     }
-    if (job.m_status != JobStatus::Idle) {
-      return false;
-    }
-  }
-  return true;
+    return true;
 }
 
 bool SeArchive::addJob(SeJob &job) {
-  // Extraction jobs are synchronous operations and cannot be queued as archive
-  // modification jobs
-  if (job.m_type == JobType::ExtractFile ||
-      job.m_type == JobType::ExtractDirectory || job.m_type == JobType::None) {
-    return false;
-  }
+    if (job.m_type == JobType::ExtractFile ||
+        job.m_type == JobType::ExtractDirectory || job.m_type == JobType::None) {
+        return false;
+    } // Extraction is instant no commiting required
 
-  job.m_id = this->m_jobCtr++;
+    job.m_id = this->m_jobCtr++;
 
-  if (job.m_type == JobType::CreateArchiveDirectory ||
-      job.m_type == JobType::AddDirectory) {
-    this->m_queuedDirs.insert(SeTableOfContent::NormalizeDirectoryPath(job.m_fileName));
-  } else if (job.m_type == JobType::AddFile) {
-    this->m_queuedFiles.insert(SeTableOfContent::NormalizeFilePath(job.m_fileName));
-  }
+    if (job.m_type == JobType::CreateArchiveDirectory || job.m_type == JobType::AddDirectory) {
+        this->m_queuedDirs.insert(SeTableOfContent::NormalizeDirectoryPath(job.m_fileName));
+    } else if (job.m_type == JobType::AddFile) {
+        this->m_queuedFiles.insert(SeTableOfContent::NormalizeFilePath(job.m_fileName));
+    }
 
-  m_jobs.push_back(job);
-  return true;
+    m_jobs.push_back(job);
+    return true;
 }
 
 void SeArchive::rebuildQueuedPathSets() {
-  this->m_queuedDirs.clear();
-  this->m_queuedFiles.clear();
-  for (const auto &j : this->m_jobs) {
-    if (j.m_type == JobType::CreateArchiveDirectory ||
-        j.m_type == JobType::AddDirectory) {
-      this->m_queuedDirs.insert(SeTableOfContent::NormalizeDirectoryPath(j.m_fileName));
-    } else if (j.m_type == JobType::AddFile) {
-      this->m_queuedFiles.insert(SeTableOfContent::NormalizeFilePath(j.m_fileName));
+    this->m_queuedDirs.clear();
+    this->m_queuedFiles.clear();
+    for (const auto &j : this->m_jobs) {
+
+        if (j.m_type == JobType::CreateArchiveDirectory || j.m_type == JobType::AddDirectory) {
+            this->m_queuedDirs.insert(SeTableOfContent::NormalizeDirectoryPath(j.m_fileName));
+        } else if (j.m_type == JobType::AddFile) {
+            this->m_queuedFiles.insert(SeTableOfContent::NormalizeFilePath(j.m_fileName));
+        }
     }
-  }
 }
 
 bool SeArchive::checkParentPath(const u16string &path) const {
-  u16string parent = SeTableOfContent::GetParentDirectory(path);
-  if (parent == u"/")
-    return true;
-  if (this->m_queuedDirs.find(parent) != this->m_queuedDirs.end())
-    return true;
-  for (const auto &d : this->m_queuedDirs) {
-    if (parent.starts_with(d))
-      return true;
-  }
-  return this->m_toc.CheckPath(parent);
+    u16string parent = SeTableOfContent::GetParentDirectory(path);
+    if (parent == u"/")
+        return true;
+    if (this->m_queuedDirs.find(parent) != this->m_queuedDirs.end())
+        return true;
+    for (const auto &d : this->m_queuedDirs) {
+        if (parent.starts_with(d))
+            return true;
+    }
+    return this->m_toc.CheckPath(parent);
 }
 
 bool SeArchive::checkPathExists(const u16string &path) const {
@@ -3801,385 +3783,381 @@ bool SeArchive::checkPathExists(const u16string &path) const {
 }
 
 vector<int> SeArchive::optimizeJobs() {
-  if (this->m_jobs.empty()) {
-    return {};
-  }
+    if (this->m_jobs.empty()) {
+        return {};
+    }
 
-  vector<int> originalJobIds;
-  originalJobIds.reserve(this->m_jobs.size());
-  for (const auto &j : this->m_jobs) {
+    vector<int> originalJobIds;
+    originalJobIds.reserve(this->m_jobs.size());
+    for (const auto &j : this->m_jobs) {
     originalJobIds.push_back(j.GetId());
-  }
-
-  // --- Pass 1: Deduplicate CompressionLevelChange jobs ---
-  // If multiple compression changes are queued in a single transaction, keep
-  // only the latest one and place it at the beginning of the transaction queue.
-  int lastCompressionIdx = -1;
-  for (int i = 0; i < static_cast<int>(this->m_jobs.size()); ++i) {
-    if (this->m_jobs[i].m_type == JobType::CompressionLevelChange) {
-      lastCompressionIdx = i;
     }
-  }
-  if (lastCompressionIdx != -1) {
-    vector<SeJob> filtered;
-    filtered.reserve(this->m_jobs.size());
-    filtered.push_back(move(this->m_jobs[lastCompressionIdx]));
+
+    // Kill duplicate change compression level jobs
+    int lastCompressionIdx = -1;
     for (int i = 0; i < static_cast<int>(this->m_jobs.size()); ++i) {
-      if (this->m_jobs[i].m_type != JobType::CompressionLevelChange &&
-          this->m_jobs[i].m_type != JobType::None) {
-        filtered.push_back(move(this->m_jobs[i]));
-      }
+        if (this->m_jobs[i].m_type == JobType::CompressionLevelChange) {
+            lastCompressionIdx = i;
+        }
     }
-    this->m_jobs = move(filtered);
-  }
-
-  const size_t numJobs = this->m_jobs.size();
-
-  // --- Pass 2: Upfront Path Canonicalization (O(N * L)) ---
-  // Pre-normalize all paths once to avoid dynamic allocations during matching.
-  struct JobPaths {
-    u16string target;    // Primary normalized archive path
-    u16string secondary; // Destination directory for moves, or source disk path for AddFile
-  };
-
-  vector<JobPaths> paths(numJobs);
-
-  for (size_t i = 0; i < numJobs; ++i) {
-    auto &job = this->m_jobs[i];
-    if (job.m_type == JobType::None)
-      continue;
-
-    switch (job.m_type) {
-    case JobType::AddFile:
-      paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
-      paths[i].secondary = job.m_filePath;
-      job.m_fileName = paths[i].target;
-      break;
-    case JobType::RemoveFile:
-      paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
-      job.m_fileName = paths[i].target;
-      break;
-    case JobType::CreateArchiveDirectory:
-    case JobType::AddDirectory:
-      paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
-      job.m_fileName = paths[i].target;
-      break;
-    case JobType::DeleteDirectory:
-      paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
-      job.m_fileName = paths[i].target;
-      break;
-    case JobType::MoveArchiveFile:
-      paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
-      paths[i].secondary = SeTableOfContent::NormalizeDirectoryPath(job.m_filePath);
-      job.m_fileName = paths[i].target;
-      job.m_filePath = paths[i].secondary;
-      break;
-    case JobType::MoveDirectory:
-      paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
-      paths[i].secondary = SeTableOfContent::NormalizeDirectoryPath(job.m_filePath);
-      job.m_fileName = paths[i].target;
-      job.m_filePath = paths[i].secondary;
-      break;
-    default:
-      break;
-    }
-  }
-
-  // --- Pass 3: Chronological State Machine Simulation (O(N * L)) ---
-  unordered_map<u16string, int> activeFileJobs;
-  unordered_map<u16string, int> activeDirJobs;
-  unordered_map<u16string, int> pendingFileDeletes;
-  unordered_map<u16string, int> pendingDirDeletes;
-  unordered_set<u16string> deletedDirectories;
-
-  activeFileJobs.reserve(numJobs);
-  activeDirJobs.reserve(numJobs / 4);
-
-  for (size_t i = 0; i < numJobs; ++i) {
-    auto &job = this->m_jobs[i];
-    if (job.m_type == JobType::None)
-      continue;
-
-    // --- File Operations ---
-    if (job.m_type == JobType::AddFile) {
-      const auto &p = paths[i].target;
-      auto it = activeFileJobs.find(p);
-      if (it != activeFileJobs.end()) {
-        int priorIdx = it->second;
-        // Case 1A: Double AddFile on same archive destination -> drop prior add
-        this->m_jobs[priorIdx].m_type = JobType::None;
-        it->second = static_cast<int>(i);
-      } else {
-        activeFileJobs[p] = static_cast<int>(i);
-      }
-      pendingFileDeletes.erase(p);
-    } else if (job.m_type == JobType::RemoveFile) {
-      const auto &p = paths[i].target;
-      auto it = activeFileJobs.find(p);
-      if (it != activeFileJobs.end()) {
-        int priorIdx = it->second;
-        auto &priorJob = this->m_jobs[priorIdx];
-
-        if (priorJob.m_type == JobType::AddFile) {
-          // Case 1B: AddFile followed by RemoveFile
-          if (!this->m_toc.CheckPath(p)) {
-            // Transient file -> both cancel out
-            priorJob.m_type = JobType::None;
-            job.m_type = JobType::None;
-          } else {
-            // Pre-existed in TOC -> drop AddFile overwrite, keep RemoveFile
-            priorJob.m_type = JobType::None;
-            pendingFileDeletes[p] = static_cast<int>(i);
-          }
-          activeFileJobs.erase(it);
-        } else if (priorJob.m_type == JobType::MoveArchiveFile) {
-          // Case 3B: MoveArchiveFile followed by RemoveFile on destination
-          priorJob.m_type = JobType::RemoveFile;
-          priorJob.m_filePath.clear();
-          job.m_type = JobType::None;
-          activeFileJobs.erase(it);
-          pendingFileDeletes[priorJob.m_fileName] = priorIdx;
+    if (lastCompressionIdx != -1) {
+        vector<SeJob> filtered;
+        filtered.reserve(this->m_jobs.size());
+        filtered.push_back(move(this->m_jobs[lastCompressionIdx]));
+        for (int i = 0; i < static_cast<int>(this->m_jobs.size()); ++i) {
+            if (this->m_jobs[i].m_type != JobType::CompressionLevelChange &&
+                this->m_jobs[i].m_type != JobType::None) {
+            filtered.push_back(move(this->m_jobs[i]));
+            }
         }
-      } else {
-        auto delIt = pendingFileDeletes.find(p);
-        if (delIt != pendingFileDeletes.end()) {
-          // Case 1D: Duplicate RemoveFile
-          job.m_type = JobType::None;
-        } else {
-          pendingFileDeletes[p] = static_cast<int>(i);
-        }
-      }
-    } else if (job.m_type == JobType::MoveArchiveFile) {
-      const auto &src = paths[i].target;
-      const auto &dstDir = paths[i].secondary;
-      u16string fileName = SeTableOfContent::GetFileName(src);
-      u16string dstFile = SeTableOfContent::NormalizeFilePath(
-          SeTableOfContent::CreateFilePath(dstDir, fileName));
-
-      auto it = activeFileJobs.find(src);
-      if (it != activeFileJobs.end()) {
-        int priorIdx = it->second;
-        auto &priorJob = this->m_jobs[priorIdx];
-
-        if (priorJob.m_type == JobType::AddFile) {
-          // Case 1C: AddFile followed by MoveArchiveFile
-          priorJob.m_fileName = dstFile;
-          paths[priorIdx].target = dstFile;
-          job.m_type = JobType::None;
-
-          activeFileJobs.erase(it);
-          activeFileJobs[dstFile] = priorIdx;
-        } else if (priorJob.m_type == JobType::MoveArchiveFile) {
-          // Case 3A: Chained move (A -> B -> C)
-          u16string origDir = SeTableOfContent::GetParentDirectory(priorJob.m_fileName);
-          if (origDir == dstDir) {
-            // Round-trip move cancelled out
-            priorJob.m_type = JobType::None;
-            job.m_type = JobType::None;
-            activeFileJobs.erase(it);
-          } else {
-            priorJob.m_filePath = dstDir;
-            paths[priorIdx].secondary = dstDir;
-            job.m_type = JobType::None;
-
-            activeFileJobs.erase(it);
-            activeFileJobs[dstFile] = priorIdx;
-          }
-        }
-      } else {
-        activeFileJobs[dstFile] = static_cast<int>(i);
-      }
+        this->m_jobs = move(filtered);
     }
 
-    // --- Directory Operations ---
-    else if (job.m_type == JobType::CreateArchiveDirectory ||
-             job.m_type == JobType::AddDirectory) {
-      const auto &d = paths[i].target;
-      auto it = activeDirJobs.find(d);
-      if (it != activeDirJobs.end()) {
-        // Case 2A: Double AddDirectory
-        job.m_type = JobType::None;
-      } else {
-        activeDirJobs[d] = static_cast<int>(i);
-      }
-      pendingDirDeletes.erase(d);
-    } else if (job.m_type == JobType::DeleteDirectory) {
-      const auto &d = paths[i].target;
-      deletedDirectories.insert(d);
+    const size_t numJobs = this->m_jobs.size();
 
-      auto it = activeDirJobs.find(d);
-      if (it != activeDirJobs.end()) {
-        int priorIdx = it->second;
-        auto &priorJob = this->m_jobs[priorIdx];
+    
+    struct JobPaths {
+        u16string target;   
+        u16string secondary;
+    };
 
-        if (priorJob.m_type == JobType::CreateArchiveDirectory ||
-            priorJob.m_type == JobType::AddDirectory) {
-          // Case 2B: AddDirectory followed by DeleteDirectory
-          if (!this->m_toc.CheckPath(d)) {
-            // Transient directory -> both cancel out
-            priorJob.m_type = JobType::None;
-            job.m_type = JobType::None;
-          } else {
-            priorJob.m_type = JobType::None;
-            pendingDirDeletes[d] = static_cast<int>(i);
-          }
-          activeDirJobs.erase(it);
-        } else if (priorJob.m_type == JobType::MoveDirectory) {
-          // Case 4B: MoveDirectory followed by DeleteDirectory
-          priorJob.m_type = JobType::DeleteDirectory;
-          priorJob.m_filePath.clear();
-          job.m_type = JobType::None;
-          activeDirJobs.erase(it);
-          deletedDirectories.insert(priorJob.m_fileName);
-          pendingDirDeletes[priorJob.m_fileName] = priorIdx;
-        }
-      } else {
-        auto delIt = pendingDirDeletes.find(d);
-        if (delIt != pendingDirDeletes.end()) {
-          // Case 2D: Duplicate DeleteDirectory
-          job.m_type = JobType::None;
-        } else {
-          pendingDirDeletes[d] = static_cast<int>(i);
-        }
-      }
-    } else if (job.m_type == JobType::MoveDirectory) {
-      const auto &src = paths[i].target;
-      const auto &dstDir = paths[i].secondary;
-      u16string dirName = SeTableOfContent::GetFileName(src);
-      u16string dstPath = SeTableOfContent::NormalizeDirectoryPath(
-          SeTableOfContent::CreateDirPath(dstDir, dirName));
+    vector<JobPaths> paths(numJobs);
 
-      auto it = activeDirJobs.find(src);
-      if (it != activeDirJobs.end()) {
-        int priorIdx = it->second;
-        auto &priorJob = this->m_jobs[priorIdx];
-
-        if (priorJob.m_type == JobType::CreateArchiveDirectory ||
-            priorJob.m_type == JobType::AddDirectory) {
-          // Case 2C: AddDirectory followed by MoveDirectory
-          priorJob.m_fileName = dstPath;
-          paths[priorIdx].target = dstPath;
-          job.m_type = JobType::None;
-
-          activeDirJobs.erase(it);
-          activeDirJobs[dstPath] = priorIdx;
-        } else if (priorJob.m_type == JobType::MoveDirectory) {
-          // Case 4A: Chained directory moves
-          u16string origParentDir = SeTableOfContent::GetParentDirectory(priorJob.m_fileName);
-          if (origParentDir == dstDir) {
-            priorJob.m_type = JobType::None;
-            job.m_type = JobType::None;
-            activeDirJobs.erase(it);
-          } else {
-            priorJob.m_filePath = dstDir;
-            paths[priorIdx].secondary = dstDir;
-            job.m_type = JobType::None;
-
-            activeDirJobs.erase(it);
-            activeDirJobs[dstPath] = priorIdx;
-          }
-        }
-      } else {
-        activeDirJobs[dstPath] = static_cast<int>(i);
-      }
-    }
-  }
-
-  // --- Pass 4: Directory Deletion Subsumption (O(N * L)) ---
-  // Invert check: verify if any ancestor directory of a transient job is in deletedDirectories.
-  if (!deletedDirectories.empty()) {
     for (size_t i = 0; i < numJobs; ++i) {
-      auto &job = this->m_jobs[i];
-      if (job.m_type != JobType::AddFile &&
-          job.m_type != JobType::CreateArchiveDirectory &&
-          job.m_type != JobType::AddDirectory) {
-        continue;
-      }
+        auto &job = this->m_jobs[i];
+        if (job.m_type == JobType::None)
+            continue;
 
-      const auto &itemPath = paths[i].target;
-      if (this->m_toc.CheckPath(itemPath)) {
-        continue; // Pre-existed in TOC
-      }
-
-      u16string currParent = SeTableOfContent::GetParentDirectory(itemPath);
-      while (!currParent.empty()) {
-        if (deletedDirectories.count(currParent)) {
-          job.m_type = JobType::None;
-          break;
+        switch (job.m_type) {
+            case JobType::AddFile:
+                paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
+                paths[i].secondary = job.m_filePath;
+                job.m_fileName = paths[i].target;
+                break;
+            case JobType::RemoveFile:
+                paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
+                job.m_fileName = paths[i].target;
+                break;
+            case JobType::CreateArchiveDirectory:
+            case JobType::AddDirectory:
+                paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
+                job.m_fileName = paths[i].target;
+                break;
+            case JobType::DeleteDirectory:
+                paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
+                job.m_fileName = paths[i].target;
+                break;
+            case JobType::MoveArchiveFile:
+                paths[i].target = SeTableOfContent::NormalizeFilePath(job.m_fileName);
+                paths[i].secondary = SeTableOfContent::NormalizeDirectoryPath(job.m_filePath);
+                job.m_fileName = paths[i].target;
+                job.m_filePath = paths[i].secondary;
+                break;
+            case JobType::MoveDirectory:
+                paths[i].target = SeTableOfContent::NormalizeDirectoryPath(job.m_fileName);
+                paths[i].secondary = SeTableOfContent::NormalizeDirectoryPath(job.m_filePath);
+                job.m_fileName = paths[i].target;
+                job.m_filePath = paths[i].secondary;
+                break;
+            default:
+                break;
         }
-        if (currParent == u"/") {
-          break;
+    }
+
+    // --- Pass 3: Chronological State Machine Simulation (O(N * L)) ---
+    unordered_map<u16string, int> activeFileJobs;
+    unordered_map<u16string, int> activeDirJobs;
+    unordered_map<u16string, int> pendingFileDeletes;
+    unordered_map<u16string, int> pendingDirDeletes;
+    unordered_set<u16string> deletedDirectories;
+
+    activeFileJobs.reserve(numJobs);
+    activeDirJobs.reserve(numJobs / 4);
+
+    for (size_t i = 0; i < numJobs; ++i) {
+        auto &job = this->m_jobs[i];
+        if (job.m_type == JobType::None)
+            continue;
+
+        // --- File Operations ---
+        if (job.m_type == JobType::AddFile) {
+            const auto &p = paths[i].target;
+            auto it = activeFileJobs.find(p);
+            if (it != activeFileJobs.end()) {
+                int priorIdx = it->second;
+                // Double AddFile on same archive destination -> drop prior add
+                this->m_jobs[priorIdx].m_type = JobType::None;
+                it->second = static_cast<int>(i);
+            } else {
+                activeFileJobs[p] = static_cast<int>(i);
+            }
+            pendingFileDeletes.erase(p);
         }
-        currParent = SeTableOfContent::GetParentDirectory(currParent);
-      }
+        else if (job.m_type == JobType::RemoveFile) {
+            const auto &p = paths[i].target;
+            auto it = activeFileJobs.find(p);
+            if (it != activeFileJobs.end()) {
+                int priorIdx = it->second;
+                auto &priorJob = this->m_jobs[priorIdx];
+
+                if (priorJob.m_type == JobType::AddFile) {
+                    // Case 1B: AddFile followed by RemoveFile
+                    if (!this->m_toc.CheckPath(p)) {
+                    // Transient file -> both cancel out
+                        priorJob.m_type = JobType::None;
+                        job.m_type = JobType::None;
+                    } else {
+                    // Pre-existed in TOC -> drop AddFile overwrite, keep RemoveFile
+                        priorJob.m_type = JobType::None;
+                        pendingFileDeletes[p] = static_cast<int>(i);
+                    }
+                    activeFileJobs.erase(it);
+                } 
+                else if (priorJob.m_type == JobType::MoveArchiveFile) {
+                    // Case 3B: MoveArchiveFile followed by RemoveFile on destination
+                    priorJob.m_type = JobType::RemoveFile;
+                    priorJob.m_filePath.clear();
+                    job.m_type = JobType::None;
+                    activeFileJobs.erase(it);
+                    pendingFileDeletes[priorJob.m_fileName] = priorIdx;
+                }
+            }
+            else {
+                auto delIt = pendingFileDeletes.find(p);
+                if (delIt != pendingFileDeletes.end()) {
+                    // Case 1D: Duplicate RemoveFile
+                    job.m_type = JobType::None;
+                } else {
+                    pendingFileDeletes[p] = static_cast<int>(i);
+                }
+            }
+        }
+        else if (job.m_type == JobType::MoveArchiveFile) {
+            const auto &src = paths[i].target;
+            const auto &dstDir = paths[i].secondary;
+            u16string fileName = SeTableOfContent::GetFileName(src);
+            u16string dstFile = SeTableOfContent::NormalizeFilePath(
+                SeTableOfContent::CreateFilePath(dstDir, fileName));
+
+            auto it = activeFileJobs.find(src);
+            if (it != activeFileJobs.end()) {
+            int priorIdx = it->second;
+            auto &priorJob = this->m_jobs[priorIdx];
+
+            if (priorJob.m_type == JobType::AddFile) {
+                // Case 1C: AddFile followed by MoveArchiveFile
+                priorJob.m_fileName = dstFile;
+                paths[priorIdx].target = dstFile;
+                job.m_type = JobType::None;
+
+                activeFileJobs.erase(it);
+                activeFileJobs[dstFile] = priorIdx;
+            } else if (priorJob.m_type == JobType::MoveArchiveFile) {
+                // Case 3A: Chained move (A -> B -> C)
+                u16string origDir = SeTableOfContent::GetParentDirectory(priorJob.m_fileName);
+                if (origDir == dstDir) {
+                // Round-trip move cancelled out
+                priorJob.m_type = JobType::None;
+                job.m_type = JobType::None;
+                activeFileJobs.erase(it);
+                } else {
+                priorJob.m_filePath = dstDir;
+                paths[priorIdx].secondary = dstDir;
+                job.m_type = JobType::None;
+
+                activeFileJobs.erase(it);
+                activeFileJobs[dstFile] = priorIdx;
+                }
+            }
+            } else {
+            activeFileJobs[dstFile] = static_cast<int>(i);
+            }
+        }
+        else if (job.m_type == JobType::CreateArchiveDirectory || job.m_type == JobType::AddDirectory) {
+            const auto &d = paths[i].target;
+            auto it = activeDirJobs.find(d);
+            if (it != activeDirJobs.end()) {
+            // Case 2A: Double AddDirectory
+            job.m_type = JobType::None;
+            } else {
+            activeDirJobs[d] = static_cast<int>(i);
+            }
+            pendingDirDeletes.erase(d);
+        }
+        else if (job.m_type == JobType::DeleteDirectory) {
+            const auto &d = paths[i].target;
+            deletedDirectories.insert(d);
+
+            auto it = activeDirJobs.find(d);
+            if (it != activeDirJobs.end()) {
+            int priorIdx = it->second;
+            auto &priorJob = this->m_jobs[priorIdx];
+
+            if (priorJob.m_type == JobType::CreateArchiveDirectory ||
+                priorJob.m_type == JobType::AddDirectory) {
+                // Case 2B: AddDirectory followed by DeleteDirectory
+                if (!this->m_toc.CheckPath(d)) {
+                // Transient directory -> both cancel out
+                priorJob.m_type = JobType::None;
+                job.m_type = JobType::None;
+                } else {
+                priorJob.m_type = JobType::None;
+                pendingDirDeletes[d] = static_cast<int>(i);
+                }
+                activeDirJobs.erase(it);
+            } else if (priorJob.m_type == JobType::MoveDirectory) {
+                // Case 4B: MoveDirectory followed by DeleteDirectory
+                priorJob.m_type = JobType::DeleteDirectory;
+                priorJob.m_filePath.clear();
+                job.m_type = JobType::None;
+                activeDirJobs.erase(it);
+                deletedDirectories.insert(priorJob.m_fileName);
+                pendingDirDeletes[priorJob.m_fileName] = priorIdx;
+            }
+            } else {
+            auto delIt = pendingDirDeletes.find(d);
+            if (delIt != pendingDirDeletes.end()) {
+                // Case 2D: Duplicate DeleteDirectory
+                job.m_type = JobType::None;
+            } else {
+                pendingDirDeletes[d] = static_cast<int>(i);
+            }
+            }
+        }
+        else if (job.m_type == JobType::MoveDirectory) {
+            const auto &src = paths[i].target;
+            const auto &dstDir = paths[i].secondary;
+            u16string dirName = SeTableOfContent::GetFileName(src);
+            u16string dstPath = SeTableOfContent::NormalizeDirectoryPath(
+                SeTableOfContent::CreateDirPath(dstDir, dirName));
+
+            auto it = activeDirJobs.find(src);
+            if (it != activeDirJobs.end()) {
+            int priorIdx = it->second;
+            auto &priorJob = this->m_jobs[priorIdx];
+
+            if (priorJob.m_type == JobType::CreateArchiveDirectory ||
+                priorJob.m_type == JobType::AddDirectory) {
+                // Case 2C: AddDirectory followed by MoveDirectory
+                priorJob.m_fileName = dstPath;
+                paths[priorIdx].target = dstPath;
+                job.m_type = JobType::None;
+
+                activeDirJobs.erase(it);
+                activeDirJobs[dstPath] = priorIdx;
+            } else if (priorJob.m_type == JobType::MoveDirectory) {
+                // Case 4A: Chained directory moves
+                u16string origParentDir = SeTableOfContent::GetParentDirectory(priorJob.m_fileName);
+                if (origParentDir == dstDir) {
+                priorJob.m_type = JobType::None;
+                job.m_type = JobType::None;
+                activeDirJobs.erase(it);
+                } else {
+                priorJob.m_filePath = dstDir;
+                paths[priorIdx].secondary = dstDir;
+                job.m_type = JobType::None;
+
+                activeDirJobs.erase(it);
+                activeDirJobs[dstPath] = priorIdx;
+                }
+            }
+            } else {
+            activeDirJobs[dstPath] = static_cast<int>(i);
+            }
+        }
     }
-  }
+    if (!deletedDirectories.empty()) {
+        for (size_t i = 0; i < numJobs; ++i) {
+            auto &job = this->m_jobs[i];
+            if (job.m_type != JobType::AddFile &&
+                job.m_type != JobType::CreateArchiveDirectory &&
+                job.m_type != JobType::AddDirectory) {
+            continue;
+            }
 
-  // --- Pass 5: Topological Depth-Ordered Orphan Pruning (O(N * L)) ---
-  unordered_set<u16string> validDirectories;
-  validDirectories.insert(u"/");
+            const auto &itemPath = paths[i].target;
+            if (this->m_toc.CheckPath(itemPath)) {
+            continue; // Pre-existed in TOC
+            }
 
-  vector<pair<int, u16string>> activeDirs;
-  activeDirs.reserve(activeDirJobs.size());
-  for (size_t i = 0; i < numJobs; ++i) {
-    if (this->m_jobs[i].m_type == JobType::CreateArchiveDirectory ||
-        this->m_jobs[i].m_type == JobType::AddDirectory) {
-      activeDirs.emplace_back(static_cast<int>(i), paths[i].target);
+            u16string currParent = SeTableOfContent::GetParentDirectory(itemPath);
+            while (!currParent.empty()) {
+            if (deletedDirectories.count(currParent)) {
+                job.m_type = JobType::None;
+                break;
+            }
+            if (currParent == u"/") {
+                break;
+            }
+            currParent = SeTableOfContent::GetParentDirectory(currParent);
+            }
+        }
     }
-  }
 
-  std::sort(activeDirs.begin(), activeDirs.end(),
+    // Topological Depth-Ordered Orphan Pruning
+    unordered_set<u16string> validDirectories;
+    validDirectories.insert(u"/");
+
+    vector<pair<int, u16string>> activeDirs;
+    activeDirs.reserve(activeDirJobs.size());
+    for (size_t i = 0; i < numJobs; ++i) {
+        if (this->m_jobs[i].m_type == JobType::CreateArchiveDirectory ||
+            this->m_jobs[i].m_type == JobType::AddDirectory) {
+            activeDirs.emplace_back(static_cast<int>(i), paths[i].target);
+        }
+    }
+
+    std::sort(activeDirs.begin(), activeDirs.end(),
             [](const auto &a, const auto &b) {
-              size_t depthA = std::count(a.second.begin(), a.second.end(), u'/');
-              size_t depthB = std::count(b.second.begin(), b.second.end(), u'/');
-              return depthA < depthB;
+                size_t depthA = std::count(a.second.begin(), a.second.end(), u'/');
+                size_t depthB = std::count(b.second.begin(), b.second.end(), u'/');
+                return depthA < depthB;
             });
 
-  for (const auto &dirItem : activeDirs) {
-    u16string parent = SeTableOfContent::GetParentDirectory(dirItem.second);
-    bool parentValid = (parent == u"/" ||
-                        validDirectories.count(parent) ||
-                        this->m_toc.CheckPath(parent));
-    if (parentValid) {
-      validDirectories.insert(dirItem.second);
-    } else {
-      this->m_jobs[dirItem.first].m_type = JobType::None;
+    for (const auto &dirItem : activeDirs) {
+        u16string parent = SeTableOfContent::GetParentDirectory(dirItem.second);
+        bool parentValid = (parent == u"/" ||
+                            validDirectories.count(parent) ||
+                            this->m_toc.CheckPath(parent));
+        if (parentValid) {
+            validDirectories.insert(dirItem.second);
+        } else {
+            this->m_jobs[dirItem.first].m_type = JobType::None;
+        }
     }
-  }
 
-  // Prune orphan AddFile jobs
-  for (size_t i = 0; i < numJobs; ++i) {
-    if (this->m_jobs[i].m_type == JobType::AddFile) {
-      u16string parent = SeTableOfContent::GetParentDirectory(paths[i].target);
-      bool parentValid = (parent == u"/" ||
-                          validDirectories.count(parent) ||
-                          this->m_toc.CheckPath(parent));
-      if (!parentValid) {
-        this->m_jobs[i].m_type = JobType::None;
-      }
+    // Prune orphan AddFile jobs
+    for (size_t i = 0; i < numJobs; ++i) {
+        if (this->m_jobs[i].m_type == JobType::AddFile) {
+            u16string parent = SeTableOfContent::GetParentDirectory(paths[i].target);
+            bool parentValid = (parent == u"/" ||
+                                validDirectories.count(parent) ||
+                                this->m_toc.CheckPath(parent));
+            if (!parentValid) {
+            this->m_jobs[i].m_type = JobType::None;
+            }
+        }
     }
-  }
 
-  // --- Final Pass: In-Place Erase and ID Tracking (O(N)) ---
-  erase_if(this->m_jobs, [](const SeJob &job) {
-    return job.m_type == JobType::None;
-  });
+    erase_if(this->m_jobs, [](const SeJob &job) {
+        return job.m_type == JobType::None;
+    });
 
-  this->rebuildQueuedPathSets();
+    this->rebuildQueuedPathSets();
 
-  unordered_set<int> remainingIds;
-  remainingIds.reserve(this->m_jobs.size());
-  for (const auto &j : this->m_jobs) {
-    remainingIds.insert(j.GetId());
-  }
-
-  vector<int> deletedIds;
-  deletedIds.reserve(originalJobIds.size() - this->m_jobs.size());
-  for (int id : originalJobIds) {
-    if (remainingIds.find(id) == remainingIds.end()) {
-      deletedIds.push_back(id);
+    unordered_set<int> remainingIds;
+    remainingIds.reserve(this->m_jobs.size());
+    for (const auto &j : this->m_jobs) {
+        remainingIds.insert(j.GetId());
     }
-  }
 
-  return deletedIds;
+    vector<int> deletedIds;
+    deletedIds.reserve(originalJobIds.size() - this->m_jobs.size());
+    for (int id : originalJobIds) {
+        if (remainingIds.find(id) == remainingIds.end()) {
+            deletedIds.push_back(id);
+        }
+    }
+
+    return deletedIds;
 }
