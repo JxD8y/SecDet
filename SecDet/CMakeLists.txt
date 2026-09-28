@@ -4,7 +4,18 @@ set(CMAKE_AUTOMOC ON)
 
 add_subdirectory("UI")
 
-qt_add_executable(SecDet)
+
+qt_add_executable(SecDet) # Changed the subsystem
+
+set(PLATFORM_SOURCES)
+if(WIN32)
+    message(STATUS "CONFIGURED FOR WIN32")
+    list(APPEND PLATFORM_SOURCES res/app.rc)
+    
+    set_target_properties(SecDet PROPERTIES WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>)
+
+endif()
+
 
 target_sources(SecDet PRIVATE 
     src/main.cpp
@@ -22,9 +33,9 @@ target_sources(SecDet PRIVATE
     src/ArchiveTreeModel.cpp
     src/ArchiveRecoveryInterface.h
     src/ArchiveRecoveryInterface.cpp
+    ${PLATFORM_SOURCES}
 )
 
-set_target_properties(SecDet PROPERTIES WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>)
 target_link_libraries(SecDet PRIVATE
 					Qt6::Core
 					Qt6::Gui
