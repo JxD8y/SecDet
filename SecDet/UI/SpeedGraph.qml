@@ -20,9 +20,9 @@ Rectangle {
     property real tipY: 0
 
     // Colors: Vibrant Sea Green / Emerald Theme
-    readonly property color themeColor: Colors.isDarkMode ? "#2e8b57" : "#228b50"       // Sea Green
-    readonly property color themeColorLight: Colors.isDarkMode ? "#3cb371" : "#2e8b57"  // Medium Sea Green
-    readonly property color themeColorAccent: Colors.isDarkMode ? "#4ade80" : "#22c55e" // Vibrant Emerald Accent
+    readonly property color themeColor: Colors.graphThemeColor
+    readonly property color themeColorLight: Colors.graphThemeColorLight
+    readonly property color themeColorAccent: Colors.graphThemeColorAccent
 
     // Animation progress for smooth transitions
     property real animProgress: 1.0

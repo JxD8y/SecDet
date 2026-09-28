@@ -6,13 +6,13 @@ import UI
 Item {
     id: root
 
-    property color colorIdle:     Colors.isDarkMode ? "#475569" : "#838b99"
-    property color colorPending:  Colors.isDarkMode ? "#5c6b84" : "#64748b"
-    property color colorRunning:  Colors.isDarkMode ? "#2e8b57" : "#228b50"
-    property color colorPaused:   Colors.isDarkMode ? Colors.goldPrimary : Colors.goldHover
-    property color colorAborted:  Colors.isDarkMode ? "#c86541" : "#b05232"
-    property color colorFailed:   Colors.isDarkMode ? "#cd5c5c" : "#b23a3a"
-    property color colorFinished: Colors.isDarkMode ? "#236d43" : "#1a6b3e"
+    property color colorIdle:     Colors.statusIdle
+    property color colorPending:  Colors.statusPending
+    property color colorRunning:  Colors.statusRunning
+    property color colorPaused:   Colors.statusPaused
+    property color colorAborted:  Colors.statusAborted
+    property color colorFailed:   Colors.statusFailed
+    property color colorFinished: Colors.statusFinished
 
     // Sleeker, standard 36px height for Fluent status bar aesthetic
     implicitHeight: 36

@@ -457,8 +457,8 @@ Window {
         }
     }
 
-    readonly property color seaGreenPrimary: Colors.isDarkMode ? "#2e8b57" : "#228b50"
-    readonly property color seaGreenLight: Colors.isDarkMode ? "#3cb371" : "#2e8b57"
+    readonly property color seaGreenPrimary: Colors.seaGreenPrimary
+    readonly property color seaGreenLight: Colors.seaGreenLight
 
     component TallProgressBar : Item {
         id: pBar

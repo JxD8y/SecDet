@@ -77,17 +77,17 @@ Page {
             }
         }
     }
-    readonly property color colorSeaGreen: "#10B981"
-    readonly property color colorSeaGreenBg: Colors.isDarkMode ? Qt.rgba(16 / 255, 185 / 255, 129 / 255, 0.20) : Qt.rgba(16 / 255, 185 / 255, 129 / 255, 0.14)
-    readonly property color colorSeaGreenBorder: Colors.isDarkMode ? Qt.rgba(16 / 255, 185 / 255, 129 / 255, 0.45) : Qt.rgba(16 / 255, 185 / 255, 129 / 255, 0.35)
+    readonly property color colorSeaGreen: Colors.recoverySeaGreen
+    readonly property color colorSeaGreenBg: Colors.recoverySeaGreenBg
+    readonly property color colorSeaGreenBorder: Colors.recoverySeaGreenBorder
 
-    readonly property color colorTruncatedHatch: Colors.isDarkMode ? Qt.rgba(0.55, 0.58, 0.68, 0.30) : Qt.rgba(0.40, 0.45, 0.55, 0.24)
-    readonly property color colorTruncatedBg: Colors.isDarkMode ? Qt.rgba(0.35, 0.38, 0.45, 0.14) : Qt.rgba(0.50, 0.55, 0.65, 0.10)
-    readonly property color colorTruncatedBorder: Colors.isDarkMode ? Qt.rgba(0.55, 0.58, 0.68, 0.40) : Qt.rgba(0.40, 0.45, 0.55, 0.30)
+    readonly property color colorTruncatedHatch: Colors.recoveryTruncatedHatch
+    readonly property color colorTruncatedBg: Colors.recoveryTruncatedBg
+    readonly property color colorTruncatedBorder: Colors.recoveryTruncatedBorder
 
-    readonly property color colorNotFoundHatch: Colors.isDarkMode ? Qt.rgba(0.95, 0.30, 0.30, 0.35) : Qt.rgba(0.85, 0.20, 0.20, 0.28)
-    readonly property color colorNotFoundBg: Colors.isDarkMode ? Qt.rgba(0.90, 0.20, 0.20, 0.16) : Qt.rgba(0.90, 0.15, 0.15, 0.08)
-    readonly property color colorNotFoundBorder: Colors.isDarkMode ? Qt.rgba(0.95, 0.30, 0.30, 0.45) : Qt.rgba(0.85, 0.20, 0.20, 0.35)
+    readonly property color colorNotFoundHatch: Colors.recoveryNotFoundHatch
+    readonly property color colorNotFoundBg: Colors.recoveryNotFoundBg
+    readonly property color colorNotFoundBorder: Colors.recoveryNotFoundBorder
 
    
     TextInput {
@@ -923,19 +923,18 @@ Page {
                                 horizontalAlignment: Text.AlignRight
                             }
 
-                            // Reserved space slot for circular find button
                             Item {
                                 Layout.preferredWidth: 26
                                 Layout.fillHeight: true
                             }
                         }
 
-                        // Circular Find Button (Morphs into width-expanding text input)
                         Rectangle {
                             id: stickyRecoveryHeaderFindBar
                             anchors.right: parent.right
                             anchors.rightMargin: 2
                             anchors.verticalCenter: parent.verticalCenter
+                            visible: false // Temp fix until the high file count search gets fixed!
                             z: 20
 
                             property bool isOpen: false

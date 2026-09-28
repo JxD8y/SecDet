@@ -1187,7 +1187,7 @@ Dialog {
                         }
 
                         Text {
-                            text: passInput.text.length > 0 ? "AES-256-GCM" : "Optional"
+                            text: passInput.text.length > 0 ? "AES-256-GCM" : "Required"
                             font.family: Colors.fontFamily
                             font.pixelSize: 10
                             color: passInput.text.length > 0 ? Colors.goldHover : Colors.textMuted

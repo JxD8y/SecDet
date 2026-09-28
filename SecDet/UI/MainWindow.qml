@@ -41,7 +41,7 @@ Window {
         property color activeBgColor: "transparent"
         property color activeBorderColor: "transparent"
         property bool showIndicatorDot: false
-        property color indicatorColor: "#10B981"
+        property color indicatorColor: Colors.indicatorGreen
         signal clicked
 
         implicitWidth: 62
@@ -2365,6 +2365,7 @@ Window {
                                 anchors.right: parent.right
                                 anchors.rightMargin: 2
                                 anchors.verticalCenter: parent.verticalCenter
+                                visible: false // temp fix to high file count lag problem
                                 z: 30
 
                                 property bool isOpen: false
