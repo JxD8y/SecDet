@@ -55,28 +55,27 @@ class ArchiveInterface : public QObject {
     Q_PROPERTY(qulonglong totalBytes READ totalBytes NOTIFY progressChanged)
 
     // TOBE REMOVED
-    Q_PROPERTY(QVariantList entropyRegions READ entropyRegions NOTIFY entropyRegionsChanged)
-    Q_PROPERTY(bool isCalculatingEntropy READ isCalculatingEntropy NOTIFY entropyCalculationChanged)
-    Q_PROPERTY(qreal averageEntropy READ averageEntropy NOTIFY entropyRegionsChanged)
-    // TOBE REMOVED
+    //Q_PROPERTY(QVariantList entropyRegions READ entropyRegions NOTIFY entropyRegionsChanged)
+    //Q_PROPERTY(bool isCalculatingEntropy READ isCalculatingEntropy NOTIFY entropyCalculationChanged)
+    //Q_PROPERTY(qreal averageEntropy READ averageEntropy NOTIFY entropyRegionsChanged)
+    //// TOBE REMOVED
 
-    Q_PROPERTY(qulonglong totalArchiveSize READ totalArchiveSize NOTIFY entropyRegionsChanged)
     Q_PROPERTY(bool isPaused READ isPaused NOTIFY isPausedChanged)
 
     // RECOVERY CONTEXT IS NOT HERE !
-    Q_PROPERTY(bool isRecovering READ isRecovering NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(bool hasRecoveryArchive READ hasRecoveryArchive NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(QString recoveryFilePath READ recoveryFilePath NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(QString recoveryFileName READ recoveryFileName NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(QString recoveryMetadataHealthState READ recoveryMetadataHealthState NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(QString recoveryMetadataDetails READ recoveryMetadataDetails NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(bool isRecoveryMetadataHealthy READ isRecoveryMetadataHealthy NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(QString recoveryTocHealthState READ recoveryTocHealthState NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(QString recoveryTocDetails READ recoveryTocDetails NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(bool isRecoveryTocHealthy READ isRecoveryTocHealthy NOTIFY recoveryStatusChanged)
-    Q_PROPERTY(QVariantList recoveryItems READ recoveryItems NOTIFY recoveryItemsChanged)
-    Q_PROPERTY(bool isRecoveryKeyRegistered READ isRecoveryKeyRegistered NOTIFY recoveryKeyStatusChanged)
-    Q_PROPERTY(QString lastAttemptedArchivePath READ lastAttemptedArchivePath NOTIFY lastAttemptedArchivePathChanged)
+    //Q_PROPERTY(bool isRecovering READ isRecovering NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(bool hasRecoveryArchive READ hasRecoveryArchive NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(QString recoveryFilePath READ recoveryFilePath NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(QString recoveryFileName READ recoveryFileName NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(QString recoveryMetadataHealthState READ recoveryMetadataHealthState NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(QString recoveryMetadataDetails READ recoveryMetadataDetails NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(bool isRecoveryMetadataHealthy READ isRecoveryMetadataHealthy NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(QString recoveryTocHealthState READ recoveryTocHealthState NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(QString recoveryTocDetails READ recoveryTocDetails NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(bool isRecoveryTocHealthy READ isRecoveryTocHealthy NOTIFY recoveryStatusChanged)
+    //Q_PROPERTY(QVariantList recoveryItems READ recoveryItems NOTIFY recoveryItemsChanged)
+    //Q_PROPERTY(bool isRecoveryKeyRegistered READ isRecoveryKeyRegistered NOTIFY recoveryKeyStatusChanged)
+    //Q_PROPERTY(QString lastAttemptedArchivePath READ lastAttemptedArchivePath NOTIFY lastAttemptedArchivePathChanged)
 
 public:
     explicit ArchiveInterface(QObject *parent = nullptr);
@@ -84,7 +83,7 @@ public:
 
     [[nodiscard]] bool hasArchive() const { return m_archive != nullptr; }
     [[nodiscard]] QString archiveFilePath() const { return m_archivePath; }
-    [[nodiscard]] QString lastAttemptedArchivePath() const { return m_lastAttemptedArchivePath; }
+    //[[nodiscard]] QString lastAttemptedArchivePath() const { return m_lastAttemptedArchivePath; }
     [[nodiscard]] QString archiveFileName() const;
 
     [[nodiscard]] bool isPaused() const {
@@ -144,32 +143,27 @@ public:
         return 0;
     }
 
-    [[nodiscard]] QVariantList entropyRegions() const { return m_entropyRegions; }
-    [[nodiscard]] bool isCalculatingEntropy() const { return m_isCalculatingEntropy; }
-    [[nodiscard]] qreal averageEntropy() const { return m_averageEntropy; }
-    [[nodiscard]] qulonglong totalArchiveSize() const { return m_totalArchiveSize; }
+    //[[nodiscard]] bool isRecovering() const { return m_isRecovering; }
+    //[[nodiscard]] bool hasRecoveryArchive() const { return m_recoveryArchive != nullptr; }
+    //[[nodiscard]] QString recoveryFilePath() const { return m_recoveryFilePath; }
+    //[[nodiscard]] QString recoveryFileName() const {
+    //    if (m_recoveryFilePath.isEmpty()) return QStringLiteral("No Archive");
+    //    return QFileInfo(m_recoveryFilePath).fileName();
+    //}
 
-    [[nodiscard]] bool isRecovering() const { return m_isRecovering; }
-    [[nodiscard]] bool hasRecoveryArchive() const { return m_recoveryArchive != nullptr; }
-    [[nodiscard]] QString recoveryFilePath() const { return m_recoveryFilePath; }
-    [[nodiscard]] QString recoveryFileName() const {
-        if (m_recoveryFilePath.isEmpty()) return QStringLiteral("No Archive");
-        return QFileInfo(m_recoveryFilePath).fileName();
-    }
-
-    [[nodiscard]] QString recoveryMetadataHealthState() const { return m_recoveryMetadataHealthState; }
-    [[nodiscard]] QString recoveryMetadataDetails() const { return m_recoveryMetadataDetails; }
-    [[nodiscard]] bool isRecoveryMetadataHealthy() const { return m_isRecoveryMetadataHealthy; }
-    [[nodiscard]] QString recoveryTocHealthState() const { return m_recoveryTocHealthState; }
-    [[nodiscard]] QString recoveryTocDetails() const { return m_recoveryTocDetails; }
-    [[nodiscard]] bool isRecoveryTocHealthy() const { return m_isRecoveryTocHealthy; }
-    [[nodiscard]] QVariantList recoveryItems() const { return m_recoveryItems; }
-    [[nodiscard]] bool isRecoveryKeyRegistered() const {
-        if (m_recoveryArchive) {
-            return m_recoveryArchive->IsKeyPresent();
-        }
-        return m_isRecoveryKeyRegistered;
-    }
+    //[[nodiscard]] QString recoveryMetadataHealthState() const { return m_recoveryMetadataHealthState; }
+    //[[nodiscard]] QString recoveryMetadataDetails() const { return m_recoveryMetadataDetails; }
+    //[[nodiscard]] bool isRecoveryMetadataHealthy() const { return m_isRecoveryMetadataHealthy; }
+    //[[nodiscard]] QString recoveryTocHealthState() const { return m_recoveryTocHealthState; }
+    //[[nodiscard]] QString recoveryTocDetails() const { return m_recoveryTocDetails; }
+    //[[nodiscard]] bool isRecoveryTocHealthy() const { return m_isRecoveryTocHealthy; }
+    //[[nodiscard]] QVariantList recoveryItems() const { return m_recoveryItems; }
+    //[[nodiscard]] bool isRecoveryKeyRegistered() const {
+    //    if (m_recoveryArchive) {
+    //        return m_recoveryArchive->IsKeyPresent();
+    //    }
+    //    return m_isRecoveryKeyRegistered;
+    //}
 
     // QML Invocable Methods
     Q_INVOKABLE bool createEmptyFile(const QString &filePath);
@@ -195,7 +189,9 @@ public:
 
     Q_INVOKABLE bool extractItem(const QString &archiveRelativePath, const QString &outputDir);
     Q_INVOKABLE bool extractAll(const QString &outputDir);
-    Q_INVOKABLE bool startNativeDrag(const QVariant &pathsOrPath, const QString &displayName = QString(), bool isFolder = false);
+
+    // Native OS file drag
+    Q_INVOKABLE void startNativeFileDrag(const QString &archiveRelativePath, const QString &displayName = QString(), bool isFolder = false);
 
     Q_INVOKABLE bool removeJob(int jobId, int modelIndex = -1);
     Q_INVOKABLE bool retryJob(int jobId, int modelIndex = -1);
@@ -210,24 +206,24 @@ public:
     Q_INVOKABLE bool addCompressionLevelJob(int level);
     Q_INVOKABLE void setPreserveMetadata(bool preserve);
 
-    Q_INVOKABLE void calculateEntropy(); // ENTROPY CONCEPT IS REMOVED BECAUSE AFTER ENCRYPTION AVG. ENTROPY IS ~ 7
+    //Q_INVOKABLE void calculateEntropy(); // ENTROPY CONCEPT IS REMOVED BECAUSE AFTER ENCRYPTION AVG. ENTROPY IS ~ 7
 
     Q_INVOKABLE void refreshArchiveView();
     Q_INVOKABLE QVariantMap getSunburstData(const QString &folderPath = QStringLiteral("/")) const;
     
     Q_INVOKABLE bool isItemLocked(const QString &archiveRelativePath) const;
-    Q_INVOKABLE bool testKeyForPath(const QString &archiveRelativePath, const QString &password);
+    //Q_INVOKABLE bool testKeyForPath(const QString &archiveRelativePath, const QString &password);
     Q_INVOKABLE bool testFile(const QString &archiveRelativePath);
     Q_INVOKABLE bool testArchive();
 
     // Recovery Invocable Methods - CONTEXT IS SEPERATE TOBE REMOVED
-    Q_INVOKABLE bool recoverArchive(const QString &filePath, const QString &password = QString());
-    Q_INVOKABLE void unloadRecoveryArchive();
-    Q_INVOKABLE bool registerRecoveryKey(const QString &password);
-    Q_INVOKABLE bool extractRecoveryItem(const QString &archiveRelativePath, const QString &outputDir);
-    Q_INVOKABLE bool extractRecoveryBatch(const QStringList &archiveRelativePaths, const QString &outputDir);
-    Q_INVOKABLE QVariantMap testRecoveryItem(const QString &archiveRelativePath);
-    Q_INVOKABLE QVariantMap testRecoveryBatch(const QStringList &archiveRelativePaths);
+    //Q_INVOKABLE bool recoverArchive(const QString &filePath, const QString &password = QString());
+    //Q_INVOKABLE void unloadRecoveryArchive();
+    //Q_INVOKABLE bool registerRecoveryKey(const QString &password);
+    //Q_INVOKABLE bool extractRecoveryItem(const QString &archiveRelativePath, const QString &outputDir);
+    //Q_INVOKABLE bool extractRecoveryBatch(const QStringList &archiveRelativePaths, const QString &outputDir);
+    //Q_INVOKABLE QVariantMap testRecoveryItem(const QString &archiveRelativePath);
+    //Q_INVOKABLE QVariantMap testRecoveryBatch(const QStringList &archiveRelativePaths);
 
 signals:
     void archiveLoadedChanged(bool loaded);
@@ -245,18 +241,20 @@ signals:
     void passwordRequired(const QString &archivePath);
     void operationCompleted(const QString &operationName, bool success, const QString &message);
     void errorOccurred(const QString &title, const QString &message);
-    void entropyRegionsChanged();
-    void entropyCalculationChanged();
+    //void entropyRegionsChanged();
+    //void entropyCalculationChanged();
     void extractionCryptoMismatch(const QString &failedPath, const QString &destDir);
     void optimizationCompleted(const QVariantList &deletedJobIds);
     void isPausedChanged(bool isPaused);
-    void dragStagingStarted(const QString &itemName);
-    void dragStagingCompleted();
-    void recoveryStatusChanged();
-    void recoveryItemsChanged();
-    void recoveryKeyStatusChanged(bool registered);
-    void lastAttemptedArchivePathChanged();
-    void recoveryCompleted(bool success, const QString &message);
+
+    // Native OS drag dropped outside application window
+    void nativeDragDropped(const QString &archiveRelativePath, const QString &dropTargetDir);
+
+    //void recoveryStatusChanged();
+    //void recoveryItemsChanged();
+    //void recoveryKeyStatusChanged(bool registered);
+    //void lastAttemptedArchivePathChanged();
+    //void recoveryCompleted(bool success, const QString &message);
 
 private slots:
     void onJobProgressUpdated(const SeJob &job);
@@ -264,13 +262,12 @@ private slots:
     void onSaveCompleted(bool success, const QString &errorMsg);
     void onExtractCompleted(bool success, const QString &errorMsg, bool isCryptoFail = false, const QString &failedPath = QString());
 
-private:
-    friend class DelayedExtractMimeData;
 
+private:
     void setBusy(bool busy);
     void setStatusMessage(const QString &message);
     void buildArchiveTree();
-    void updateFileMapRegions();
+    //void updateFileMapRegions();
 
     struct PendingStagedItem {
         QString localDiskPath;
@@ -288,6 +285,7 @@ private:
     bool m_isOptimizing = false;
     bool m_isCommitting = false;
     bool m_isAddingFiles = false;
+    bool m_isTestingArchive = false;
     int m_indexedFolders = 0;
     int m_indexedFiles = 0;
     QString m_statusMessage = QStringLiteral("Ready");
@@ -302,12 +300,13 @@ private:
     qulonglong m_extractProcessedBytes = 0;
     qulonglong m_extractCompressedBytes = 0;
 
-    QVariantList m_entropyRegions;
+    /*QVariantList m_entropyRegions;
     bool m_isCalculatingEntropy = false;
     qreal m_averageEntropy = 0.0;
-    qulonglong m_totalArchiveSize = 0;
-    std::atomic<uint64_t> m_fileMapCalcGeneration{0}; // TO BE REMOVED
+    std::atomic<uint64_t> m_fileMapCalcGeneration{0}; */// TO BE REMOVED
 
+    //qulonglong m_totalArchiveSize = 0;
+    
     SeMetadataObject *m_metadata = nullptr;
     ArchiveTreeModel *m_treeModel = nullptr;
     SeJobModel *m_jobModel = nullptr;
@@ -320,19 +319,21 @@ private:
     std::stop_source m_stopSource;
     std::shared_ptr<SeTaskHandleBase> m_currentTask;
 
-    // Recovery subsystem state
-    std::unique_ptr<SeArchive> m_recoveryArchive;
-    QString m_recoveryFilePath;
-    QString m_recoveryMetadataHealthState = QStringLiteral("Unknown");
-    QString m_recoveryMetadataDetails;
-    bool m_isRecoveryMetadataHealthy = false;
-    QString m_recoveryTocHealthState = QStringLiteral("Unknown");
-    QString m_recoveryTocDetails;
-    bool m_isRecoveryTocHealthy = false;
-    QVariantList m_recoveryItems;
-    bool m_isRecovering = false;
-    bool m_isRecoveryKeyRegistered = false;
-    QString m_lastAttemptedArchivePath;
 
-    void populateRecoveryItemsFromArchive();
+
+    // Recovery subsystem state
+    //std::unique_ptr<SeArchive> m_recoveryArchive;
+    //QString m_recoveryFilePath;
+    //QString m_recoveryMetadataHealthState = QStringLiteral("Unknown");
+    //QString m_recoveryMetadataDetails;
+    //bool m_isRecoveryMetadataHealthy = false;
+    //QString m_recoveryTocHealthState = QStringLiteral("Unknown");
+    //QString m_recoveryTocDetails;
+    //bool m_isRecoveryTocHealthy = false;
+    //QVariantList m_recoveryItems;
+    //bool m_isRecovering = false;
+    //bool m_isRecoveryKeyRegistered = false;
+    //QString m_lastAttemptedArchivePath;
+
+    //void populateRecoveryItemsFromArchive();
 };

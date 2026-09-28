@@ -1,20 +1,39 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shlobj.h>
+#include <exdisp.h>
+#include <shlwapi.h>
+#pragma comment(lib, "Shlwapi.lib")
+#endif
+
 #include "ArchiveInterface.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QDrag>
 #include <QFileInfo>
+#include <QFontDatabase>
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QJSEngine>
 #include <QMimeData>
 #include <QMetaObject>
+#include <QDateTime>
+#include <QFile>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QStandardPaths>
 #include <QStorageInfo>
 #include <QTemporaryDir>
 #include <QUrl>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 #include <algorithm>
 #include <array>
@@ -31,7 +50,6 @@
 
 #include <libsecdet/SeCRC32.h>
 #include <libsecdet/SeMetadata.h>
-#include "DelayedExtractMimeData.h"
 
 ArchiveInterface::ArchiveInterface(QObject *parent): QObject(parent),m_metadata(new SeMetadataObject(this)),
                                                                     m_treeModel(new ArchiveTreeModel(this)),
@@ -41,8 +59,10 @@ ArchiveInterface::ArchiveInterface(QObject *parent): QObject(parent),m_metadata(
     connect(m_jobModel, &SeJobModel::progressChanged, this, &ArchiveInterface::progressChanged);
 
     connect(m_jobModel, &SeJobModel::overallProgressChanged, this, [this]() {
-        m_overallProgress = m_jobModel->overallProgress();
-        emit progressChanged();
+        if (!m_isTestingArchive) {
+            m_overallProgress = m_jobModel->overallProgress();
+            emit progressChanged();
+        }
     });
 }
 
@@ -204,8 +224,8 @@ bool ArchiveInterface::loadArchive(const QString &filePath,const QString &passwo
         return false;
     }
 
-    m_lastAttemptedArchivePath = cleanPath;
-    emit lastAttemptedArchivePathChanged();
+    //m_lastAttemptedArchivePath = cleanPath;
+    //emit lastAttemptedArchivePathChanged();
 
     setBusy(true);
     m_isLoadingArchive = true;
@@ -294,7 +314,7 @@ bool ArchiveInterface::loadArchive(const QString &filePath,const QString &passwo
 }
 
 void ArchiveInterface::closeArchive() {
-    m_fileMapCalcGeneration.fetch_add(1);
+    //m_fileMapCalcGeneration.fetch_add(1);
     m_stopSource.request_stop();
     m_stopSource = std::stop_source();
 
@@ -919,18 +939,15 @@ bool ArchiveInterface::saveChanges() {
 
     auto batchState = std::make_shared<BatchState>();
 
-    auto flushBatch = [this, batchState](bool force) {
+    auto flushBatch = [this, batchState](bool /*force*/) {
         std::vector<SeJob> toSend;
         {
             std::lock_guard<std::mutex> lock(batchState->mtx);
-            auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch())
-                            .count();
-            if (force || (now - batchState->lastDispatchMs >= 33)) {
-                if (!batchState->pending.empty()) {
-                    toSend.swap(batchState->pending);
-                    batchState->lastDispatchMs = now;
-                }
+            if (!batchState->pending.empty()) {
+                toSend.swap(batchState->pending);
+                batchState->lastDispatchMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
             }
         }
         if (!toSend.empty()) {
@@ -1037,7 +1054,16 @@ bool ArchiveInterface::extractItem(const QString &archiveRelativePath,const QStr
 
     QString normPath = archiveRelativePath;
     if (!normPath.startsWith(u'/'))
-    normPath.prepend(u'/');
+        normPath.prepend(u'/');
+
+    bool isDir = normPath.endsWith(u'/');
+    if (!isDir && m_archive) {
+        auto u16p = normPath.toStdU16String();
+        if (m_archive->GetTOC().IsDirectory(u16p) || m_archive->GetTOC().IsDirectory(u16p + u'/')) {
+            isDir = true;
+            normPath.append(u'/');
+        }
+    }
 
     m_stopSource = std::stop_source();
     m_lastExtractOutputDir = cleanOut;
@@ -1049,52 +1075,37 @@ bool ArchiveInterface::extractItem(const QString &archiveRelativePath,const QStr
     m_overallProgress = 0.0;
     m_fileProgress = 0.0;
     m_processedFiles = 0;
-    m_totalFiles = 0;
+    m_totalFiles = 1;
     m_extractTotalBytes = 0;
     m_extractProcessedBytes = 0;
     m_extractCompressedBytes = 0;
 
     if (m_archive) {
-    qulonglong extBytes = 0;
-    int extFileCount = 0;
-    QStringList extractJobPaths;
-    const auto &entries = m_archive->GetTOC().GetEntries();
+        qulonglong extBytes = 0;
+        int extFileCount = 0;
+        const auto &entries = m_archive->GetTOC().GetEntries();
 
-    for (const auto &e : entries) {
-        if (e.path == u"/") continue;
+        for (const auto &e : entries) {
+            if (e.path == u"/") continue;
             if (!e.isDirectory()) {
                 QString ep = QString::fromStdU16String(e.path);
                 if (normPath == u"/" || ep.startsWith(normPath)) {
                     extBytes += e.uncompressed_size;
                     extFileCount++;
-                    extractJobPaths.append(ep);
                 }
             }
         }
-        m_totalFiles = extFileCount;
         m_extractTotalBytes = extBytes;
         if (m_jobModel) {
-            m_jobModel->setExtractJobs(extractJobPaths);
+            m_jobModel->setExtractJobs({ normPath }, extBytes);
         }
     }
     emit progressChanged();
 
-    bool isDir = normPath.endsWith(u'/');
-
-    auto lastDispatch = std::make_shared<std::atomic<int64_t>>(0);
-
-    auto callback = [this, lastDispatch](const SeJob &job) {
-        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        bool isStateChange = (job.GetStatus() != JobStatus::Running && job.GetStatus() != JobStatus::Pending) || job.percentage == 0 || job.percentage == 100;\
-
-        int64_t last = lastDispatch->load(std::memory_order_relaxed);
-        if (isStateChange || (now - last >= 33)) {
-            lastDispatch->store(now, std::memory_order_relaxed);
-
+    auto callback = [this](const SeJob &job) {
         QMetaObject::invokeMethod(
             this, [this, job]() { this->onJobProgressUpdated(job); },
             Qt::QueuedConnection);
-        }
     };
 
     std::shared_ptr<SeTaskHandle<size_t>> taskHandle;
@@ -1129,89 +1140,175 @@ bool ArchiveInterface::extractAll(const QString &outputDir) {
   return extractItem(QStringLiteral("/"), outputDir);
 }
 
-bool ArchiveInterface::startNativeDrag(const QVariant &pathsOrPath, const QString &displayName, bool isFolder) {
-    if (!m_archive) {
-        return false;
+#ifdef Q_OS_WIN
+static QString getExplorerOrDesktopPathAtPoint(POINT pt) {
+    HWND hwnd = WindowFromPoint(pt);
+    if (!hwnd) return QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+
+    HWND rootHwnd = GetAncestor(hwnd, GA_ROOT);
+    HWND targetHwnd = rootHwnd ? rootHwnd : hwnd;
+
+    // If released over SecDet's own window, don't trigger external drop
+    DWORD pid = 0;
+    GetWindowThreadProcessId(targetHwnd, &pid);
+    if (pid == GetCurrentProcessId()) {
+        return QString();
     }
+
+    WCHAR className[256] = {0};
+    GetClassNameW(targetHwnd, className, 255);
+
+    // Desktop check
+    if (wcscmp(className, L"Progman") == 0 || wcscmp(className, L"WorkerW") == 0) {
+        return QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    }
+
+    // Explorer window check
+    HWND cur = hwnd;
+    HWND explorerHwnd = nullptr;
+    while (cur) {
+        GetClassNameW(cur, className, 255);
+        if (wcscmp(className, L"CabinetWClass") == 0 || wcscmp(className, L"ExploreWClass") == 0) {
+            explorerHwnd = cur;
+            break;
+        }
+        cur = GetParent(cur);
+    }
+    if (!explorerHwnd && rootHwnd) {
+        GetClassNameW(rootHwnd, className, 255);
+        if (wcscmp(className, L"CabinetWClass") == 0 || wcscmp(className, L"ExploreWClass") == 0) {
+            explorerHwnd = rootHwnd;
+        }
+    }
+
+    if (explorerHwnd) {
+        IShellWindows* pShellWindows = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_ShellWindows, NULL, CLSCTX_ALL, IID_IShellWindows, (void**)&pShellWindows)) && pShellWindows) {
+            long count = 0;
+            pShellWindows->get_Count(&count);
+            for (long i = 0; i < count; ++i) {
+                VARIANT v;
+                VariantInit(&v);
+                v.vt = VT_I4;
+                v.lVal = i;
+                IDispatch* pDisp = nullptr;
+                if (SUCCEEDED(pShellWindows->Item(v, &pDisp)) && pDisp) {
+                    IWebBrowserApp* pBrowser = nullptr;
+                    if (SUCCEEDED(pDisp->QueryInterface(IID_IWebBrowserApp, (void**)&pBrowser)) && pBrowser) {
+                        HWND bHwnd = nullptr;
+                        pBrowser->get_HWND((SHANDLE_PTR*)&bHwnd);
+                        if (bHwnd == explorerHwnd) {
+                            BSTR url = nullptr;
+                            pBrowser->get_LocationURL(&url);
+                            if (url) {
+                                QString qurl = QString::fromWCharArray(url);
+                                SysFreeString(url);
+                                pBrowser->Release();
+                                pDisp->Release();
+                                pShellWindows->Release();
+                                if (qurl.startsWith(QStringLiteral("file:///"))) {
+                                    return QUrl(qurl).toLocalFile();
+                                }
+                            }
+                        }
+                        pBrowser->Release();
+                    }
+                    pDisp->Release();
+                }
+            }
+            pShellWindows->Release();
+        }
+    }
+
+    return QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+}
+#endif
+
+// ─── Native OS File Drag ─────────────────────────────────────────────────────
+
+void ArchiveInterface::startNativeFileDrag(const QString &archiveRelativePath,
+                                           const QString &displayName,
+                                           bool isFolder) {
+    if (!m_archive) return;
 
     if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
         emit passwordRequired(m_archivePath);
-        return false;
+        return;
     }
 
-    QStringList paths;
-    if (pathsOrPath.canConvert<QStringList>()) {
-        paths = pathsOrPath.toStringList();
-    }
-    else if (pathsOrPath.userType() == QMetaType::QVariantList) {
-        const auto list = pathsOrPath.toList();
-        for (const auto &v : list) {
-            paths.append(v.toString());
-        }
-    } 
-    else {
-        QString p = pathsOrPath.toString();
-        if (!p.isEmpty()) {
-            paths.append(p);
-        }
-    }
+    QString normPath = archiveRelativePath;
+    if (!normPath.startsWith(u'/')) normPath.prepend(u'/');
+    if (isFolder && !normPath.endsWith(u'/')) normPath.append(u'/');
 
-    if (paths.isEmpty()) {
-        return false;
+    QString primaryName = displayName;
+    if (primaryName.isEmpty()) {
+        QString stripped = normPath;
+        if (stripped.endsWith(u'/') && stripped.length() > 1) stripped.chop(1);
+        primaryName = stripped.section(u'/', -1);
     }
+    if (primaryName.isEmpty()) primaryName = QStringLiteral("Item");
 
-    QString primaryItemName;
-    bool primaryIsDir = false;
+    // Clean, normal drag overlay badge
+    QFont font(QStringLiteral("Segoe UI"));
+    font.setPixelSize(12);
+    font.setWeight(QFont::Medium);
+    QFontMetrics fm(font);
+    int textWidth = fm.horizontalAdvance(primaryName);
+    int pixmapWidth = 32 + textWidth + 20;
+    int pixmapHeight = 34;
 
-    QString firstPath = paths.first();
-    if (!firstPath.startsWith(u'/')) {
-        firstPath.prepend(u'/');
-    }
+    QPixmap dragPixmap(pixmapWidth, pixmapHeight);
+    dragPixmap.fill(Qt::transparent);
+    {
+        QPainter painter(&dragPixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
 
-    auto entryOpt = m_archive->GetTOC().GetEntry(firstPath.toStdU16String());
-    primaryIsDir = isFolder || firstPath.endsWith(u'/') || (entryOpt && entryOpt->isDirectory());
+        QPainterPath path;
+        path.addRoundedRect(QRectF(1, 1, pixmapWidth - 2, pixmapHeight - 2), 6, 6);
 
-    if (paths.size() == 1 && !displayName.isEmpty()) {
-        primaryItemName = displayName;
-    }
-    else {
-        QString stripped = firstPath;
-        if (stripped.endsWith(u'/') && stripped.length() > 1) {
-            stripped.chop(1);
-        }
-        primaryItemName = stripped.section(u'/', -1);
+        painter.fillPath(path, QColor(24, 28, 36, 235));
+        painter.setPen(QPen(QColor(218, 165, 32), 1.5));
+        painter.drawPath(path);
+
+        painter.setPen(QColor(255, 255, 255));
+        painter.setFont(font);
+        painter.drawText(QRect(12, 0, pixmapWidth - 16, pixmapHeight),
+                         Qt::AlignVCenter | Qt::AlignLeft,
+                         (isFolder ? QStringLiteral("📁 ") : QStringLiteral("📄 ")) + primaryName);
     }
 
-    if (primaryItemName.isEmpty()) {
-        primaryItemName = QStringLiteral("Item");
-    }
+    QMimeData *mimeData = new QMimeData();
+    mimeData->setData(QStringLiteral("application/x-secdet-export"), normPath.toUtf8());
+    mimeData->setText(primaryName);
 
-    // DelayedExtractMimeData for on-drop lazy extraction
-    DelayedExtractMimeData *mimeData = new DelayedExtractMimeData(this, paths, primaryItemName, primaryIsDir);
-    mimeData->setData(QStringLiteral("application/x-secdet-item"), firstPath.toUtf8());
-    mimeData->setData(QStringLiteral("application/x-secdet-isfolder"), primaryIsDir ? "1" : "0");
-    mimeData->setText(paths.size() == 1 ? firstPath : QStringLiteral("%1 items").arg(paths.size()));
-
-    // Construct QDrag
     QDrag *drag = new QDrag(this);
     drag->setMimeData(mimeData);
+    drag->setPixmap(dragPixmap);
+    drag->setHotSpot(QPoint(16, pixmapHeight / 2));
 
-    // Drag overlay Removed
+    setStatusMessage(QStringLiteral("Dragging '%1' outside window — release to extract").arg(primaryName));
 
-    setStatusMessage(QStringLiteral("Dragging '%1' • Drop outside window to extract immediately, or on folder to move").arg(primaryItemName));
-
-    Qt::DropAction dropAction = drag->exec(Qt::CopyAction | Qt::MoveAction);
+    // Execute native OS drag loop
+    Qt::DropAction action = drag->exec(Qt::CopyAction | Qt::MoveAction, Qt::CopyAction);
+    Q_UNUSED(action);
     drag->deleteLater();
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 50); // BUG : CRITC FAIL -> removed the drag overlay , upon test we will know if it got fixed or not
 
-    if (dropAction != Qt::IgnoreAction) {
-        setStatusMessage(QStringLiteral("Extracted '%1' to drop destination").arg(primaryItemName));
-        return true;
-    } else {
-        setStatusMessage(QStringLiteral("Drag canceled"));
-        return false;
+    // When dropped outside application window
+#ifdef Q_OS_WIN
+    POINT pt;
+    GetCursorPos(&pt);
+    QString dropTarget = getExplorerOrDesktopPathAtPoint(pt);
+    if (!dropTarget.isEmpty()) {
+        setStatusMessage(QStringLiteral("Extracting '%1' to '%2'...").arg(primaryName, dropTarget));
+        emit nativeDragDropped(normPath, dropTarget);
     }
+#else
+    QString dropTarget = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    emit nativeDragDropped(normPath, dropTarget);
+#endif
 }
+
+
 
 bool ArchiveInterface::removeJob(int jobId, int modelIndex) {
     if (!m_archive)
@@ -1457,13 +1554,15 @@ void ArchiveInterface::onJobProgressUpdated(const SeJob &job) {
         return;
     }
 
-    if (job.GetJobType() != JobType::CompressionLevelChange) {
-        /*int lvl = !job.GetFileName().empty() ? (job.GetFileName()[0] - u'0') : 0;
-        m_currentFileName = (lvl == 1) ? QStringLiteral("Fast (Store)")
-                            : (lvl == 2) ? QStringLiteral("Balanced")
-                            : (lvl == 3) ? QStringLiteral("Ultra")
-                            : QStringLiteral("Level %1").arg(lvl);*/
+    if (job.GetJobType() != JobType::CompressionLevelChange) {   
         m_currentFileName = QString::fromStdU16String(job.GetFileName());
+    }
+    else {
+        int lvl = !job.GetFileName().empty() ? (job.GetFileName()[0] - u'0') : 0;
+        m_currentFileName = (lvl == 1) ? QStringLiteral("Fast (Store)")
+            : (lvl == 2) ? QStringLiteral("Balanced")
+            : (lvl == 3) ? QStringLiteral("Ultra")
+            : QStringLiteral("Level %1").arg(lvl);
     }
 
     if (job.GetJobType() == JobType::ExtractDirectory ||
@@ -1474,9 +1573,9 @@ void ArchiveInterface::onJobProgressUpdated(const SeJob &job) {
         m_extractTotalBytes = job.totalBytes;
         m_extractProcessedBytes = job.processedBytes;
         m_extractCompressedBytes = job.compressedBytes;
-        m_overallProgress = static_cast<qreal>(job.percentage) / 100.0;
+        //m_overallProgress = job.totalBytes > 0.0 ? static_cast<double>(job.processedBytes) / job.totalBytes : 0.0;
+        m_fileProgress = job.percentage / 100.0;
 
-        m_fileProgress = (job.GetStatus() == JobStatus::Finished || job.percentage == 100) ? 1.0 : 0.0;
         if (m_jobModel && m_jobModel->count() > 0) {
             m_jobModel->updateJob(job);
             m_overallProgress = m_jobModel->overallProgress();
@@ -1555,12 +1654,13 @@ void ArchiveInterface::onJobsBatchProgressUpdated(const std::vector<SeJob> &batc
 
     if (lastJob.GetJobType() != JobType::CompressionLevelChange) {
         m_currentFileName = QString::fromStdU16String(lastJob.GetFileName());
-
-        /*int lvl = !lastJob.GetFileName().empty() ? (lastJob.GetFileName()[0] - u'0') : 0;
-        m_currentFileName = (lvl == 1) ? QStringLiteral("Fast (Store)")
+    }
+    else {
+        int lvl = !lastJob.GetFileName().empty() ? (lastJob.GetFileName()[0] - u'0') : 0;
+        m_currentFileName = (lvl == 1) ? QStringLiteral("Fast")
                             : (lvl == 2) ? QStringLiteral("Balanced")
                             : (lvl == 3) ? QStringLiteral("Ultra")
-                            : QStringLiteral("Level %1").arg(lvl);*/
+                            : QStringLiteral("Level %1").arg(lvl);
     }
 
     if (lastJob.GetJobType() == JobType::ExtractDirectory ||
@@ -1571,12 +1671,12 @@ void ArchiveInterface::onJobsBatchProgressUpdated(const std::vector<SeJob> &batc
         m_extractTotalBytes = lastJob.totalBytes;
         m_extractProcessedBytes = lastJob.processedBytes;
         m_extractCompressedBytes = lastJob.compressedBytes;
-        m_overallProgress = lastJob.totalBytes > 0.0 ? static_cast<double>(lastJob.processedBytes) / lastJob.totalBytes : 0.0;
+        //m_overallProgress = lastJob.totalBytes > 0.0 ? static_cast<double>(lastJob.processedBytes) / lastJob.totalBytes : 0.0;
         m_fileProgress = lastJob.percentage / 100.0;
 
         if (m_jobModel && m_jobModel->count() > 0) {
             m_jobModel->updateJobsBatch(batch);
-            //m_overallProgress = m_jobModel->overallProgress();
+            m_overallProgress = m_jobModel->overallProgress();
             m_processedFiles = m_jobModel->finishedCount();
             m_totalFiles = m_jobModel->count();
         }
@@ -1602,161 +1702,168 @@ void ArchiveInterface::onJobsBatchProgressUpdated(const std::vector<SeJob> &batc
 }
 
 void ArchiveInterface::onSaveCompleted(bool success, const QString &errorMsg) {
-  m_currentTask.reset();
-  emit isPausedChanged(false);
-  setBusy(false);
-  m_isCommitting = false;
-  emit isCommittingChanged(false);
-  m_stopSource = std::stop_source();
+    m_currentTask.reset();
+    emit isPausedChanged(false);
+    setBusy(false);
+    m_isCommitting = false;
+    emit isCommittingChanged(false);
+    m_stopSource = std::stop_source();
 
-  bool isCancelled = errorMsg.contains(QStringLiteral("cancel"), Qt::CaseInsensitive);
+    bool isCancelled = errorMsg.contains(QStringLiteral("cancel"), Qt::CaseInsensitive);
 
-  if (success) {
-    m_stagedPendingItems.clear();
-    m_overallProgress = 1.0;
-    m_fileProgress = 1.0;
-    setStatusMessage(QStringLiteral("All changes saved successfully."));
-    refreshArchiveView();
-    emit operationCompleted(QStringLiteral("Save Changes"), true,
-                            QStringLiteral("Archive updated."));
-    calculateEntropy();
-  } else if (isCancelled) {
-    setStatusMessage(QStringLiteral("Save changes cancelled."));
-    if (m_jobModel) {
-      m_jobModel->abortRunningJobs();
+    if (success) {
+        m_stagedPendingItems.clear();
+        m_overallProgress = 1.0;
+        m_fileProgress = 1.0;
+        setStatusMessage(QStringLiteral("All changes saved successfully."));
+        refreshArchiveView();
+        emit operationCompleted(QStringLiteral("Save Changes"), true,QStringLiteral("Archive updated."));
+    } 
+    else if (isCancelled) {
+        setStatusMessage(QStringLiteral("Save changes cancelled."));
+        if (m_jobModel) {
+            m_jobModel->abortRunningJobs();
+        }
+        refreshArchiveView();
+        emit operationCompleted(QStringLiteral("Save Changes"), false, QStringLiteral("Operation was canceled"));
     }
-    refreshArchiveView();
-    emit operationCompleted(QStringLiteral("Save Changes"), false, QStringLiteral("Operation was canceled"));
-  } else {
-    setStatusMessage(QStringLiteral("Save failed: ") + errorMsg);
-    refreshArchiveView();
-    emit errorOccurred(QStringLiteral("Save Changes Error"), errorMsg);
-    emit operationCompleted(QStringLiteral("Save Changes"), false, errorMsg);
-  }
+    else {
+        setStatusMessage(QStringLiteral("Save failed: ") + errorMsg);
+        refreshArchiveView();
+        emit errorOccurred(QStringLiteral("Save Changes Error"), errorMsg);
+        emit operationCompleted(QStringLiteral("Save Changes"), false, errorMsg);
+    }
 
-  emit progressChanged();
+    emit progressChanged();
 }
 
-void ArchiveInterface::onExtractCompleted(bool success,
-                                          const QString &errorMsg,
-                                          bool isCryptoFail,
-                                          const QString &failedPath) {
-  m_currentTask.reset();
-  emit isPausedChanged(false);
-  setBusy(false);
-  m_stopSource = std::stop_source();
+void ArchiveInterface::onExtractCompleted(bool success,const QString &errorMsg,bool isCryptoFail,const QString &failedPath) {
+    m_currentTask.reset();
+    emit isPausedChanged(false);
+    setBusy(false);
+    m_stopSource = std::stop_source();
 
-  bool isCancelled = errorMsg.contains(QStringLiteral("cancel"), Qt::CaseInsensitive);
+    bool isCancelled = errorMsg.contains(QStringLiteral("cancel"), Qt::CaseInsensitive);
 
-  if (success) {
-    m_overallProgress = 1.0;
-    m_fileProgress = 1.0;
-    setStatusMessage(QStringLiteral("Extraction completed successfully."));
-    emit operationCompleted(QStringLiteral("Extraction"), true,
-                            QStringLiteral("Files extracted to destination."));
-  } else if (isCancelled) {
-    setStatusMessage(QStringLiteral("Extraction cancelled."));
-    if (m_jobModel) {
-      m_jobModel->abortRunningJobs();
+    if (success) {
+        m_overallProgress = 1.0;
+        m_fileProgress = 1.0;
+        if (m_jobModel) {
+            for (int i = 0; i < m_jobModel->count(); ++i) {
+                QString st = m_jobModel->get(i).value(QStringLiteral("state")).toString();
+                if (st == QStringLiteral("running") || st == QStringLiteral("pending")) {
+                    m_jobModel->setProperty(i, QStringLiteral("state"), QStringLiteral("finished"));
+                    m_jobModel->setProperty(i, QStringLiteral("progress"), 1.0);
+                    m_jobModel->setProperty(i, QStringLiteral("detail"), QStringLiteral("Finished"));
+                }
+            }
+        }
+        setStatusMessage(QStringLiteral("Extraction completed successfully."));
+        emit operationCompleted(QStringLiteral("Extraction"), true, QStringLiteral("Files extracted to destination."));
+    } 
+    else if (isCancelled) {
+        setStatusMessage(QStringLiteral("Extraction cancelled."));
+        if (m_jobModel) {
+            m_jobModel->abortRunningJobs();
+        }
+        syncJobsList();
+        emit operationCompleted(QStringLiteral("Extraction"), false, QStringLiteral("Operation was canceled"));
     }
-    syncJobsList();
-    emit operationCompleted(QStringLiteral("Extraction"), false, QStringLiteral("Operation was canceled"));
-  } else if (isCryptoFail) {
-    setStatusMessage(QStringLiteral("Extraction paused: Key mismatch on encrypted file."));
-    emit extractionCryptoMismatch(failedPath.isEmpty() ? m_lastExtractRelPath : failedPath, m_lastExtractOutputDir);
-  } else {
-    setStatusMessage(QStringLiteral("Extraction failed: ") + errorMsg);
-    emit errorOccurred(QStringLiteral("Extraction Error"), errorMsg);
-    emit operationCompleted(QStringLiteral("Extraction"), false, errorMsg);
-  }
+    else if (isCryptoFail) {
+        setStatusMessage(QStringLiteral("Extraction paused: Key mismatch on encrypted file."));
+        emit extractionCryptoMismatch(failedPath.isEmpty() ? m_lastExtractRelPath : failedPath, m_lastExtractOutputDir);
+    } 
+    else {
+        setStatusMessage(QStringLiteral("Extraction failed: ") + errorMsg);
+        emit errorOccurred(QStringLiteral("Extraction Error"), errorMsg);
+        emit operationCompleted(QStringLiteral("Extraction"), false, errorMsg);
+    }
 
-  emit progressChanged();
+    emit progressChanged();
 }
 
 void ArchiveInterface::syncJobsList() {
-  m_jobsList.clear();
+    m_jobsList.clear();
 
-  if (!m_archive) {
-    if (m_jobModel)
-      m_jobModel->clear();
-    emit jobsChanged();
-    return;
-  }
-
-  const auto &jobs = m_archive->GetJobs();
-  if (m_jobModel) {
-    m_jobModel->setJobs(jobs);
-  }
-
-  // Only populate legacy QVariantList for small batches (<= 200 items).
-  // Large batches rely exclusively on the high-performance virtualized jobModel
-  // to avoid freezing the UI thread with hundreds of thousands of QVariantMap allocations.
-  if (jobs.size() <= 200) {
-    for (const auto &job : jobs) {
-      SeJobObject jobObj(job);
-      m_jobsList.append(jobObj.toVariantMap());
+    if (!m_archive) {
+        if (m_jobModel)
+            m_jobModel->clear();
+        emit jobsChanged();
+        return;
     }
-  }
 
-  emit jobsChanged();
+    const auto &jobs = m_archive->GetJobs();
+    if (m_jobModel) {
+        m_jobModel->setJobs(jobs);
+    }
+
+    // Only populate legacy QVariantList for small batches (<= 200 items).
+    // Large batches rely exclusively on the high-performance virtualized jobModel
+    // to avoid freezing the UI thread with hundreds of thousands of QVariantMap allocations.
+    if (jobs.size() <= 200) { // Job count is normaly below 200 now since we modified addDirectory to have its own job type
+        for (const auto &job : jobs) {
+            SeJobObject jobObj(job);
+            m_jobsList.append(jobObj.toVariantMap());
+        }
+    }
+
+    emit jobsChanged();
 }
 
 void ArchiveInterface::buildArchiveTree() {
-  m_archiveTree.clear();
+    m_archiveTree.clear();
 
-  if (!m_archive) {
-    if (m_treeModel)
-      m_treeModel->clear();
-    m_metadata->updateStats(0, 0, 0, 0);
-    emit archiveTreeChanged();
-    return;
-  }
-
-  std::vector<ArchiveTreeModel::PendingItem> pending;
-  pending.reserve(m_stagedPendingItems.size());
-  for (auto it = m_stagedPendingItems.constBegin(); it != m_stagedPendingItems.constEnd(); ++it) {
-    const auto &item = it.value();
-    ArchiveTreeModel::PendingItem p;
-    p.localDiskPath = item.localDiskPath;
-    p.archiveRelPath = item.archiveRelPath;
-    p.name = item.name;
-    p.isDirectory = item.isDirectory;
-    p.size = item.size;
-    pending.push_back(std::move(p));
-  }
-
-  std::vector<QString> removePaths;
-  std::vector<ArchiveTreeModel::StagedMoveItem> moveItems;
-  if (m_archive) {
-    for (const auto &job : m_archive->GetJobs()) {
-      if (job.GetJobType() == JobType::RemoveFile ||
-          job.GetJobType() == JobType::DeleteDirectory) {
-        removePaths.push_back(QString::fromStdU16String(job.GetFileName()));
-      } else if (job.GetJobType() == JobType::MoveArchiveFile ||
-                 job.GetJobType() == JobType::MoveDirectory) {
-        ArchiveTreeModel::StagedMoveItem mi;
-        mi.srcPath = QString::fromStdU16String(job.GetFileName());
-        mi.dstDirPath = QString::fromStdU16String(job.GetFilePath());
-        mi.isDirectory = (job.GetJobType() == JobType::MoveDirectory);
-        moveItems.push_back(mi);
-      }
+    if (!m_archive) {
+        if (m_treeModel)
+            m_treeModel->clear();
+        m_metadata->updateStats(0, 0, 0, 0);
+        emit archiveTreeChanged();
+        return;
     }
-  }
 
-  if (m_treeModel) {
-    m_treeModel->buildTree(m_archive->GetTOC().GetEntries(), pending, moveItems,
-                           removePaths, archiveFileName());
+    std::vector<ArchiveTreeModel::PendingItem> pending;
+    pending.reserve(m_stagedPendingItems.size());
+    for (auto it = m_stagedPendingItems.constBegin(); it != m_stagedPendingItems.constEnd(); ++it) {
+        const auto &item = it.value();
+        ArchiveTreeModel::PendingItem p;
+        p.localDiskPath = item.localDiskPath;
+        p.archiveRelPath = item.archiveRelPath;
+        p.name = item.name;
+        p.isDirectory = item.isDirectory;
+        p.size = item.size;
+        pending.push_back(std::move(p));
+    }
+
+    std::vector<QString> removePaths;
+    std::vector<ArchiveTreeModel::StagedMoveItem> moveItems;
+    if (m_archive) {
+        for (const auto &job : m_archive->GetJobs()) {
+            if (job.GetJobType() == JobType::RemoveFile || job.GetJobType() == JobType::DeleteDirectory) {
+                removePaths.push_back(QString::fromStdU16String(job.GetFileName()));
+            } 
+            else if (job.GetJobType() == JobType::MoveArchiveFile || job.GetJobType() == JobType::MoveDirectory) {
+                ArchiveTreeModel::StagedMoveItem mi;
+                mi.srcPath = QString::fromStdU16String(job.GetFileName());
+                mi.dstDirPath = QString::fromStdU16String(job.GetFilePath());
+                mi.isDirectory = (job.GetJobType() == JobType::MoveDirectory);
+                moveItems.push_back(mi);
+            }
+        }
+    }
+
+    if (m_treeModel) {
+    m_treeModel->buildTree(m_archive->GetTOC().GetEntries(), pending, moveItems, removePaths, archiveFileName());
     m_metadata->updateStats(
         m_treeModel->fileCount(), m_treeModel->folderCount(),
         m_treeModel->totalRealSize(), m_treeModel->totalCompressedSize());
-  }
+    }
 
-  updateFileMapRegions();
+    //updateFileMapRegions();
 
-  emit archiveTreeChanged();
+    emit archiveTreeChanged();
 }
 
-void ArchiveInterface::updateFileMapRegions() {
+/*void ArchiveInterface::updateFileMapRegions() {
   if (!m_archive || m_archivePath.isEmpty()) {
     m_fileMapCalcGeneration.fetch_add(1);
     m_entropyRegions.clear();
@@ -2221,10 +2328,10 @@ void ArchiveInterface::updateFileMapRegions() {
         },
         Qt::QueuedConnection);
   }).detach();
-}
+}*/
 
-void ArchiveInterface::calculateEntropy() {
-  /*
+/*void ArchiveInterface::calculateEntropy() {
+
   if (!m_archive || m_archivePath.isEmpty()) {
     m_entropyRegions.clear();
     m_averageEntropy = 0.0;
@@ -2326,26 +2433,25 @@ void ArchiveInterface::calculateEntropy() {
     };
     ...
   }).detach();
-  */
 
   // Update file map regions instantly from in-memory TOC
-  updateFileMapRegions();
-}
+  //updateFileMapRegions();
+}*/
 
 QVariantMap ArchiveInterface::getSunburstData(const QString &folderPath) const {
-  if (!m_treeModel) {
+    if (!m_treeModel) {
     return {};
-  }
-  return m_treeModel->getSunburstData(folderPath);
+    }
+    return m_treeModel->getSunburstData(folderPath);
 }
 
 bool ArchiveInterface::isItemLocked(const QString &archiveRelativePath) const {
-  if (!m_treeModel)
-    return false;
-  return m_treeModel->isPathOrDescendantsLocked(archiveRelativePath);
+    if (!m_treeModel)
+        return false;
+    return m_treeModel->isPathOrDescendantsLocked(archiveRelativePath);
 }
 
-bool ArchiveInterface::testKeyForPath(const QString &archiveRelativePath,
+/*bool ArchiveInterface::testKeyForPath(const QString& archiveRelativePath,
                                       const QString &password) {
   if (!m_archive)
     return false;
@@ -2376,603 +2482,623 @@ bool ArchiveInterface::testKeyForPath(const QString &archiveRelativePath,
     }
   }
   return anyTested ? anyMatched : true;
-}
+}*/
 
 bool ArchiveInterface::testFile(const QString &archiveRelativePath) {
-  if (!m_archive) {
-    emit errorOccurred(QStringLiteral("No Archive Open"), QStringLiteral("Please open an archive before testing files."));
-    return false;
-  }
-
-  QString normPath = archiveRelativePath;
-  normPath.replace(u'\\', u'/');
-  if (!normPath.startsWith(u'/')) {
-    normPath.prepend(u'/');
-  }
-
-  if (normPath.endsWith(u'/') || normPath == QStringLiteral("/")) {
-    emit errorOccurred(QStringLiteral("Invalid Target"), QStringLiteral("Directories cannot be tested directly."));
-    return false;
-  }
-
-  if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
-    emit passwordRequired(m_archivePath);
-    return false;
-  }
-
-  auto _entry = m_archive->GetTOC().GetEntry(normPath.toStdU16String());
-  if (!_entry) {
-    emit errorOccurred(QStringLiteral("File Not Found"), QStringLiteral("File '%1' was not found in the archive.").arg(normPath));
-    return false;
-  }
-  const auto entry = *_entry;
-  if (entry.isDirectory()) {
-    emit errorOccurred(QStringLiteral("Invalid Target"), QStringLiteral("Directories cannot be tested directly."));
-    return false;
-  }
-
-  // Check available disk space in temporary directory before extraction
-  QString tempBasePath = QDir::tempPath();
-  QStorageInfo storage(tempBasePath);
-  qint64 availableBytes = storage.bytesAvailable();
-  if (availableBytes >= 0 && entry.uncompressed_size > static_cast<uint64_t>(availableBytes)) {
-    emit errorOccurred(QStringLiteral("Insufficient Space"),
-                       QStringLiteral("Not enough free disk space in temporary directory to test file '%1'.\nRequired: %2\nAvailable: %3")
-                           .arg(normPath, SeFileEntryObject::formatBytes(entry.uncompressed_size), SeFileEntryObject::formatBytes(availableBytes)));
-    return false;
-  }
-
-  m_stopSource = std::stop_source();
-  setBusy(true);
-  QString fileName = QFileInfo(normPath).fileName();
-  m_currentOperationName = QStringLiteral("Testing file ") + fileName;
-  m_currentFileName = fileName;
-  setStatusMessage(QStringLiteral("Testing file %1...").arg(normPath));
-  m_overallProgress = 0.0;
-  m_fileProgress = 0.0;
-  m_totalFiles = 1;
-  m_processedFiles = 0;
-  m_extractTotalBytes = entry.uncompressed_size;
-  m_extractProcessedBytes = 0;
-  m_extractCompressedBytes = 0;
-  if (m_jobModel) {
-    m_jobModel->clear();
-  }
-  emit progressChanged();
-
-  std::stop_token stopToken = m_stopSource.get_token();
-  auto pauseState = std::make_shared<SePauseState>();
-  SePauseToken pauseToken(pauseState);
-
-  auto promise = std::make_shared<std::promise<expected<bool, error_code>>>();
-  auto future = promise->get_future().share();
-
-  std::jthread workerThread([this, normPath, entry, stopToken, pauseToken]() {
-    QTemporaryDir tempDir;
-    if (!tempDir.isValid()) {
-      QMetaObject::invokeMethod(this, [this]() {
-        m_currentTask.reset();
-        emit isPausedChanged(false);
-        setBusy(false);
-        emit errorOccurred(QStringLiteral("Temp Directory Error"), QStringLiteral("Failed to create temporary directory for testing."));
-        emit operationCompleted(QStringLiteral("Test File"), false, QStringLiteral("Failed to create temporary directory"));
-        emit progressChanged();
-      }, Qt::QueuedConnection);
-      return;
+    if (!m_archive) {
+        emit errorOccurred(QStringLiteral("No Archive Open"), QStringLiteral("Please open an archive before testing files."));
+        return false;
     }
 
-    QString tempDirPath = tempDir.path();
-    auto lastDispatch = std::make_shared<std::atomic<int64_t>>(0);
-    auto callback = [this, lastDispatch](const SeJob &job) {
-      auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                     std::chrono::steady_clock::now().time_since_epoch())
-                     .count();
-      int64_t last = lastDispatch->load(std::memory_order_relaxed);
-      if (job.percentage == 100 || (now - last >= 40)) {
-        lastDispatch->store(now, std::memory_order_relaxed);
-        QMetaObject::invokeMethod(this, [this, job]() {
-          this->onJobProgressUpdated(job);
-        }, Qt::QueuedConnection);
-      }
-    };
-
-    auto extractRes = m_archive->ExtractFileSync(normPath.toStdU16String(), tempDirPath.toStdU16String(), callback, stopToken, pauseToken);
-    if (stopToken.stop_requested() || m_stopSource.stop_requested() || (!extractRes && extractRes.error() == SeError::OperationCanceled)) {
-      tempDir.remove();
-      QMetaObject::invokeMethod(this, [this]() {
-        m_currentTask.reset();
-        emit isPausedChanged(false);
-        setBusy(false);
-        m_currentOperationName.clear();
-        m_currentFileName.clear();
-        m_overallProgress = 0.0;
-        m_fileProgress = 0.0;
-        setStatusMessage(QStringLiteral("Testing cancelled."));
-        syncJobsList();
-        emit operationCompleted(QStringLiteral("Test File"), false, QStringLiteral("Operation was canceled"));
-        emit progressChanged();
-      }, Qt::QueuedConnection);
-      return;
+    QString normPath = archiveRelativePath;
+    normPath.replace(u'\\', u'/');
+    if (!normPath.startsWith(u'/')) {
+        normPath.prepend(u'/');
     }
 
-    if (!extractRes) {
-      tempDir.remove();
-      QString errMsg = QString::fromLocal8Bit(extractRes.error().message().c_str());
-      QMetaObject::invokeMethod(this, [this, normPath, errMsg]() {
-        m_currentTask.reset();
-        emit isPausedChanged(false);
-        setBusy(false);
-        if (m_treeModel) {
-          m_treeModel->setFileHealthStatus(normPath, 2);
-        }
-        setStatusMessage(QStringLiteral("Testing failed: ") + errMsg);
-        emit errorOccurred(QStringLiteral("Health Test Failed"), errMsg);
-        emit operationCompleted(QStringLiteral("Test File"), false, errMsg);
-        emit progressChanged();
-      }, Qt::QueuedConnection);
-      return;
+    if (normPath.endsWith(u'/') || normPath == QStringLiteral("/")) {
+        emit errorOccurred(QStringLiteral("Invalid Target"), QStringLiteral("Directories cannot be tested directly."));
+        return false;
     }
 
-    // Now calculate CRC32 of extracted file on disk
-    QString fileName = QFileInfo(normPath).fileName();
-    QString extractedFilePath = QDir(tempDirPath).filePath(fileName);
-
-    uint32_t computedCrc = CRC32C_INIT;
-    bool readOk = true;
-    {
-      QFile extractedFile(extractedFilePath);
-      if (extractedFile.open(QIODevice::ReadOnly)) {
-        constexpr qint64 bufSize = 65536;
-        QByteArray buffer;
-        buffer.resize(bufSize);
-        while (!extractedFile.atEnd()) {
-          if (pauseToken.wait_if_paused(stopToken)) {
-            readOk = false;
-            break;
-          }
-          if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
-            readOk = false;
-            break;
-          }
-          qint64 bytesRead = extractedFile.read(buffer.data(), bufSize);
-          if (bytesRead > 0) {
-            computedCrc = crc32c_update(computedCrc, buffer.constData(), static_cast<size_t>(bytesRead));
-          } else if (bytesRead < 0) {
-            readOk = false;
-            break;
-          }
-        }
-        extractedFile.close();
-      } else {
-        readOk = false;
-      }
-    }
-    computedCrc = crc32c_finalize(computedCrc);
-
-    tempDir.remove();
-
-    if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
-      QMetaObject::invokeMethod(this, [this]() {
-        m_currentTask.reset();
-        emit isPausedChanged(false);
-        setBusy(false);
-        m_currentOperationName.clear();
-        m_currentFileName.clear();
-        m_overallProgress = 0.0;
-        m_fileProgress = 0.0;
-        setStatusMessage(QStringLiteral("Testing cancelled."));
-        syncJobsList();
-        emit operationCompleted(QStringLiteral("Test File"), false, QStringLiteral("Operation was canceled"));
-        emit progressChanged();
-      }, Qt::QueuedConnection);
-      return;
+    if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
+        emit passwordRequired(m_archivePath);
+        return false;
     }
 
-    if (!readOk) {
-      QMetaObject::invokeMethod(this, [this, normPath]() {
-        m_currentTask.reset();
-        emit isPausedChanged(false);
-        setBusy(false);
-        if (m_treeModel) {
-          m_treeModel->setFileHealthStatus(normPath, 2);
-        }
-        setStatusMessage(QStringLiteral("Failed to read extracted file for verification."));
-        emit operationCompleted(QStringLiteral("Test File"), false, QStringLiteral("Failed to read extracted file"));
-        emit progressChanged();
-      }, Qt::QueuedConnection);
-      return;
+    auto _entry = m_archive->GetTOC().GetEntry(normPath.toStdU16String());
+    if (!_entry) {
+        emit errorOccurred(QStringLiteral("File Not Found"), QStringLiteral("File '%1' was not found in the archive.").arg(normPath));
+        return false;
+    }
+    const auto entry = *_entry;
+    if (entry.isDirectory()) {
+        emit errorOccurred(QStringLiteral("Invalid Target"), QStringLiteral("Directories cannot be tested directly."));
+        return false;
     }
 
-    bool match = (computedCrc == entry.crc32);
-    QMetaObject::invokeMethod(this, [this, normPath, match, computedCrc, expectedCrc = entry.crc32]() {
-      m_currentTask.reset();
-      emit isPausedChanged(false);
-      setBusy(false);
-      if (match) {
-        m_overallProgress = 1.0;
-        m_fileProgress = 1.0;
-        if (m_treeModel) {
-          m_treeModel->setFileHealthStatus(normPath, 1);
-        }
-        setStatusMessage(QStringLiteral("File is OK! CRC32 verified: 0x%1").arg(computedCrc, 8, 16, QLatin1Char('0')).toUpper());
-        emit operationCompleted(QStringLiteral("Test File"), true, QStringLiteral("File is OK"));
-      } else {
-        if (m_treeModel) {
-          m_treeModel->setFileHealthStatus(normPath, 2);
-        }
-        QString errMsg = QStringLiteral("CRC32 mismatch! Expected 0x%1, got 0x%2")
-                             .arg(expectedCrc, 8, 16, QLatin1Char('0'))
-                             .arg(computedCrc, 8, 16, QLatin1Char('0'))
-                             .toUpper();
-        setStatusMessage(errMsg);
-        emit errorOccurred(QStringLiteral("Health Test Failed"), errMsg);
-        emit operationCompleted(QStringLiteral("Test File"), false, errMsg);
-      }
-      emit progressChanged();
-    }, Qt::QueuedConnection);
-  });
-
-  auto taskHandle = std::make_shared<SeTaskHandle<bool>>(
-      std::move(workerThread), std::move(future), pauseState);
-  m_currentTask = taskHandle;
-  emit isPausedChanged(false);
-
-  return true;
-}
-
-bool ArchiveInterface::testArchive() {
-  if (!m_archive) {
-    emit errorOccurred(QStringLiteral("No Archive"), QStringLiteral("No archive is currently open."));
-    return false;
-  }
-
-  if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
-    emit passwordRequired(m_archivePath);
-    return false;
-  }
-
-  if (isBusy()) {
-    emit errorOccurred(QStringLiteral("Busy"), QStringLiteral("Another operation is already in progress."));
-    return false;
-  }
-
-  m_stopSource = std::stop_source();
-  setBusy(true);
-  m_currentOperationName = QStringLiteral("Testing archive integrity...");
-  m_currentFileName = QString();
-  setStatusMessage(QStringLiteral("Preparing archive integrity test..."));
-  m_overallProgress = 0.0;
-  m_fileProgress = 0.0;
-  m_totalFiles = 0;
-  m_processedFiles = 0;
-  m_extractTotalBytes = 0;
-  m_extractProcessedBytes = 0;
-  m_extractCompressedBytes = 0;
-
-  if (m_jobModel) {
-    m_jobModel->clear();
-  }
-  emit progressChanged();
-
-  std::stop_token stopToken = m_stopSource.get_token();
-  auto pauseState = std::make_shared<SePauseState>();
-  SePauseToken pauseToken(pauseState);
-
-  auto promise = std::make_shared<std::promise<expected<bool, error_code>>>();
-  auto future = promise->get_future().share();
-
-  struct TestedFileResult {
-    QString normPath;
-    int jobIdx;
-    bool ok;
-  };
-
-  // Run the entire test workflow in a managed jthread task
-  std::jthread workerThread([this, stopToken, pauseToken]() {
-    const auto &entries = m_archive->GetTOC().GetEntries();
-    std::vector<SeArchiveEntry> filesToTest;
-    filesToTest.reserve(entries.size());
-    uint64_t totalBytesAll = 0;
-    uint64_t maxFileSize = 0;
-    QStringList filePathsList;
-    filePathsList.reserve(static_cast<int>(entries.size()));
-
-    for (const auto &entry : entries) {
-      if (!entry.isDirectory()) {
-        filesToTest.push_back(entry);
-        totalBytesAll += entry.uncompressed_size;
-        if (entry.uncompressed_size > maxFileSize) {
-          maxFileSize = entry.uncompressed_size;
-        }
-        QString normPath = QString::fromStdU16String(entry.path);
-        if (!normPath.startsWith(u'/')) {
-          normPath.prepend(u'/');
-        }
-        filePathsList.append(normPath);
-      }
-    }
-
-    int totalFiles = static_cast<int>(filesToTest.size());
-
-    if (totalFiles == 0) {
-      QMetaObject::invokeMethod(this, [this]() {
-        m_currentTask.reset();
-        emit isPausedChanged(false);
-        setBusy(false);
-        m_currentOperationName.clear();
-        m_currentFileName.clear();
-        setStatusMessage(QStringLiteral("Archive contains no files to test."));
-        syncJobsList();
-        emit operationCompleted(QStringLiteral("Test Archive"), true, QStringLiteral("File is OK"));
-        emit progressChanged();
-      }, Qt::QueuedConnection);
-      return;
-    }
-
-    // Query disk space asynchronously in background thread to prevent UI stalls
+    // Check available disk space in temporary directory before extraction
     QString tempBasePath = QDir::tempPath();
     QStorageInfo storage(tempBasePath);
     qint64 availableBytes = storage.bytesAvailable();
-    if (availableBytes >= 0 && maxFileSize > static_cast<uint64_t>(availableBytes)) {
-      QMetaObject::invokeMethod(this, [this, maxFileSize, availableBytes]() {
-        m_currentTask.reset();
-        emit isPausedChanged(false);
-        setBusy(false);
-        m_currentOperationName.clear();
-        m_currentFileName.clear();
-        syncJobsList();
+    if (availableBytes >= 0 && entry.uncompressed_size > static_cast<uint64_t>(availableBytes)) {
         emit errorOccurred(QStringLiteral("Insufficient Space"),
-                           QStringLiteral("Not enough free disk space in temporary directory to test archive files.\nRequired: %1\nAvailable: %2")
-                               .arg(SeFileEntryObject::formatBytes(maxFileSize), SeFileEntryObject::formatBytes(availableBytes)));
-        emit operationCompleted(QStringLiteral("Test Archive"), false, QStringLiteral("Insufficient temporary disk space"));
-        emit progressChanged();
-      }, Qt::QueuedConnection);
-      return;
+                            QStringLiteral("Not enough free disk space in temporary directory to test file '%1'.\nRequired: %2\nAvailable: %3")
+                                .arg(normPath, SeFileEntryObject::formatBytes(entry.uncompressed_size), SeFileEntryObject::formatBytes(availableBytes)));
+        return false;
     }
 
-    // Batch initialize the job model on the main thread in a single O(N) model reset
-    QMetaObject::invokeMethod(this, [this, filePathsList, totalFiles, totalBytesAll]() {
-      m_totalFiles = totalFiles;
-      m_extractTotalBytes = totalBytesAll;
-      setStatusMessage(QStringLiteral("Testing %1 archive files...").arg(totalFiles));
-      if (m_jobModel) {
-        m_jobModel->setTestJobs(filePathsList);
-      }
-      emit progressChanged();
-    }, Qt::QueuedConnection);
+    m_stopSource = std::stop_source();
+    setBusy(true);
+    QString fileName = QFileInfo(normPath).fileName();
+    m_currentOperationName = QStringLiteral("Testing file ") + fileName;
+    m_currentFileName = fileName;
+    setStatusMessage(QStringLiteral("Testing file %1...").arg(normPath));
+    
+    m_overallProgress = 0.0;
+    m_fileProgress = 0.0;
+    m_totalFiles = 1;
+    m_processedFiles = 0;
+    m_extractTotalBytes = entry.uncompressed_size;
+    m_extractProcessedBytes = 0;
+    m_extractCompressedBytes = 0;
 
-    QTemporaryDir tempDir;
-    if (!tempDir.isValid()) {
-      QMetaObject::invokeMethod(this, [this]() {
-        m_currentTask.reset();
-        emit isPausedChanged(false);
-        setBusy(false);
-        m_currentOperationName.clear();
-        m_currentFileName.clear();
-        syncJobsList();
-        emit errorOccurred(QStringLiteral("Temp Directory Error"), QStringLiteral("Failed to create temporary directory for testing."));
-        emit operationCompleted(QStringLiteral("Test Archive"), false, QStringLiteral("Failed to create temporary directory"));
-        emit progressChanged();
-      }, Qt::QueuedConnection);
-      return;
+    if (m_jobModel) {
+        m_jobModel->clear();
     }
+    emit progressChanged();
 
-    QString tempDirPath = tempDir.path();
-    int processedCount = 0;
-    int failedCount = 0;
-    uint64_t accumulatedProcessedBytes = 0;
+    std::stop_token stopToken = m_stopSource.get_token();
+    auto pauseState = std::make_shared<SePauseState>();
+    SePauseToken pauseToken(pauseState);
 
-    std::vector<TestedFileResult> pendingResults;
-    pendingResults.reserve(64);
-    auto lastProgressDispatchMs = std::make_shared<std::atomic<int64_t>>(0);
-    auto lastBatchDispatchTime = std::chrono::steady_clock::now();
+    auto promise = std::make_shared<std::promise<expected<bool, error_code>>>();
+    auto future = promise->get_future().share();
 
-    for (int fileIdx = 0; fileIdx < totalFiles; ++fileIdx) {
-      if (pauseToken.wait_if_paused(stopToken)) {
-        break;
-      }
-      if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
-        break;
-      }
+    std::jthread workerThread([this, normPath, entry, stopToken, pauseToken]() {
+        QTemporaryDir tempDir;
 
-      const auto &entry = filesToTest[fileIdx];
-      const QString &normPath = filePathsList[fileIdx];
-      QString fileName = QFileInfo(normPath).fileName();
+        if (!tempDir.isValid()) {
+            QMetaObject::invokeMethod(this, [this]() {
+                m_currentTask.reset();
+                emit isPausedChanged(false);
+                setBusy(false);
+                emit errorOccurred(QStringLiteral("Temp Directory Error"), QStringLiteral("Failed to create temporary directory for testing."));
+                emit operationCompleted(QStringLiteral("Test File"), false, QStringLiteral("Failed to create temporary directory"));
+                emit progressChanged();
 
-      // Clean up file if it already exists before extraction
-      QString extractedFilePath = QDir(tempDirPath).filePath(fileName);
-      if (QFile::exists(extractedFilePath)) {
-        QFile::remove(extractedFilePath);
-      }
-
-      // Immediately notify UI that this file has started testing (prevents 1-file lag)
-      QMetaObject::invokeMethod(this, [this, fileIdx, totalFiles, fileName, normPath]() {
-        m_currentOperationName = QStringLiteral("Testing archive (%1/%2)").arg(fileIdx + 1).arg(totalFiles);
-        m_currentFileName = fileName;
-        setStatusMessage(QStringLiteral("Testing (%1/%2): %3...").arg(fileIdx + 1).arg(totalFiles).arg(normPath));
-        m_fileProgress = 0.0;
-        if (m_jobModel) {
-          m_jobModel->updateJobProgress(fileIdx + 1, QString(), JobStatus::Running, 0.0,
-                                        QStringLiteral("Testing..."));
+            }, Qt::QueuedConnection);
+            return;
         }
-        emit progressChanged();
-      }, Qt::QueuedConnection);
 
-      // Throttled intra-file progress callback (max ~25 updates/sec to prevent UI event loop starvation)
-      auto callback = [this, fileIdx, fileName, accumulatedProcessedBytes, totalBytesAll, lastProgressDispatchMs](const SeJob &job) {
-        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now().time_since_epoch())
-                       .count();
-        int64_t last = lastProgressDispatchMs->load(std::memory_order_relaxed);
-        if (now - last >= 40) {
-          lastProgressDispatchMs->store(now, std::memory_order_relaxed);
-          QMetaObject::invokeMethod(this, [this, fileIdx, fileName, pct = job.percentage, curBytes = accumulatedProcessedBytes + job.processedBytes, totalBytesAll]() {
-            m_currentFileName = fileName;
-            m_fileProgress = static_cast<qreal>(pct) / 100.0;
-            if (totalBytesAll > 0) {
-              m_overallProgress = static_cast<qreal>(curBytes) / static_cast<qreal>(totalBytesAll);
+        QString tempDirPath = tempDir.path();
+        auto lastDispatch = std::make_shared<std::atomic<int64_t>>(0);
+        auto callback = [this, lastDispatch](const SeJob &job) {
+            auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+            int64_t last = lastDispatch->load(std::memory_order_relaxed);
+            if (job.percentage == 100 || (now - last >= 40)) {
+                lastDispatch->store(now, std::memory_order_relaxed);
+                QMetaObject::invokeMethod(this, [this, job]() {
+                    this->onJobProgressUpdated(job);
+                }, Qt::QueuedConnection);
             }
-            m_extractProcessedBytes = curBytes;
-            m_extractTotalBytes = totalBytesAll;
-            if (m_jobModel) {
-              m_jobModel->updateJobProgress(fileIdx + 1, QString(), JobStatus::Running, m_fileProgress,
-                                            QStringLiteral("%1% completed").arg(pct),
-                                            curBytes, 0, totalBytesAll);
+        };
+
+        auto extractRes = m_archive->ExtractFileSync(normPath.toStdU16String(), tempDirPath.toStdU16String(), callback, stopToken, pauseToken);
+        if (stopToken.stop_requested() || m_stopSource.stop_requested() || (!extractRes && extractRes.error() == SeError::OperationCanceled)) {
+            tempDir.remove();
+
+            QMetaObject::invokeMethod(this, [this]() {
+                m_currentTask.reset();
+                emit isPausedChanged(false);
+                setBusy(false);
+                m_currentOperationName.clear();
+                m_currentFileName.clear();
+                m_overallProgress = 0.0;
+                m_fileProgress = 0.0;
+                setStatusMessage(QStringLiteral("Testing cancelled."));
+                syncJobsList();
+                emit operationCompleted(QStringLiteral("Test File"), false, QStringLiteral("Operation was canceled"));
+                emit progressChanged();
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        if (!extractRes) {
+            tempDir.remove();
+            QString errMsg = QString::fromLocal8Bit(extractRes.error().message().c_str());
+            QMetaObject::invokeMethod(this, [this, normPath, errMsg]() {
+            m_currentTask.reset();
+            emit isPausedChanged(false);
+            setBusy(false);
+            if (m_treeModel) {
+                m_treeModel->setFileHealthStatus(normPath, 2);
             }
+            setStatusMessage(QStringLiteral("Testing failed: ") + errMsg);
+            emit errorOccurred(QStringLiteral("Health Test Failed"), errMsg);
+            emit operationCompleted(QStringLiteral("Test File"), false, errMsg);
             emit progressChanged();
-          }, Qt::QueuedConnection);
+            }, Qt::QueuedConnection);
+            return;
         }
-      };
 
-      auto extractRes = m_archive->ExtractFileSync(normPath.toStdU16String(), tempDirPath.toStdU16String(), callback, stopToken, pauseToken);
+        // Now calculate CRC32 of extracted file on disk
+        QString fileName = QFileInfo(normPath).fileName();
+        QString extractedFilePath = QDir(tempDirPath).filePath(fileName);
 
-      if (stopToken.stop_requested() || m_stopSource.stop_requested() || (!extractRes && extractRes.error() == SeError::OperationCanceled)) {
-        if (QFile::exists(extractedFilePath)) {
-          QFile::remove(extractedFilePath);
-        }
-        break;
-      }
-
-      bool ok = false;
-      if (extractRes) {
         uint32_t computedCrc = CRC32C_INIT;
         bool readOk = true;
         {
-          QFile extractedFile(extractedFilePath);
-          if (extractedFile.open(QIODevice::ReadOnly)) {
-            constexpr qint64 bufSize = 65536;
-            QByteArray buffer;
-            buffer.resize(bufSize);
-            while (!extractedFile.atEnd()) {
-              if (pauseToken.wait_if_paused(stopToken)) {
-                readOk = false;
-                break;
-              }
-              if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
-                readOk = false;
-                break;
-              }
-              qint64 bytesRead = extractedFile.read(buffer.data(), bufSize);
-              if (bytesRead > 0) {
-                computedCrc = crc32c_update(computedCrc, buffer.constData(), static_cast<size_t>(bytesRead));
-              } else if (bytesRead < 0) {
-                readOk = false;
-                break;
-              }
+            QFile extractedFile(extractedFilePath); // TODO: use QFile::map instead of read
+            if (extractedFile.open(QIODevice::ReadOnly)) {
+                constexpr qint64 bufSize = 65536;
+                QByteArray buffer;
+                buffer.resize(bufSize);
+                while (!extractedFile.atEnd()) {
+                    if (pauseToken.wait_if_paused(stopToken)) {
+                        readOk = false;
+                        break;
+                    }
+                    if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
+                        readOk = false;
+                        break;
+                    }
+                    qint64 bytesRead = extractedFile.read(buffer.data(), bufSize);
+                    if (bytesRead > 0) {
+                    computedCrc = crc32c_update(computedCrc, buffer.constData(), static_cast<size_t>(bytesRead));
+                    }
+                    else if (bytesRead < 0) {
+                        readOk = false;
+                        break;
+                    }
+                }
+                extractedFile.close();
             }
-            extractedFile.close();
-          } else {
-            readOk = false;
-          }
+            else {
+                readOk = false;
+            }
         }
         computedCrc = crc32c_finalize(computedCrc);
 
-        if (readOk && (computedCrc == entry.crc32)) {
-          ok = true;
+        tempDir.remove();
+
+        if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
+            QMetaObject::invokeMethod(this, [this]() {
+                m_currentTask.reset();
+                emit isPausedChanged(false);
+                setBusy(false);
+                m_currentOperationName.clear();
+                m_currentFileName.clear();
+                m_overallProgress = 0.0;
+                m_fileProgress = 0.0;
+                setStatusMessage(QStringLiteral("Testing cancelled."));
+                syncJobsList();
+                emit operationCompleted(QStringLiteral("Test File"), false, QStringLiteral("Operation was canceled"));
+                emit progressChanged();
+            }, Qt::QueuedConnection);
+            return;
         }
-      }
 
-      // Ensure the temporary file is removed immediately after verification
-      if (QFile::exists(extractedFilePath)) {
-        QFile::remove(extractedFilePath);
-      }
-
-      if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
-        break;
-      }
-
-      accumulatedProcessedBytes += entry.uncompressed_size;
-      processedCount++;
-      if (!ok) {
-        failedCount++;
-      }
-
-      pendingResults.push_back({normPath, fileIdx + 1, ok});
-
-      auto now = std::chrono::steady_clock::now();
-      auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBatchDispatchTime).count();
-      bool isLastFile = (fileIdx == totalFiles - 1) || stopToken.stop_requested() || m_stopSource.stop_requested();
-
-      if (isLastFile || elapsedMs >= 40 || pendingResults.size() >= 50) {
-        lastBatchDispatchTime = now;
-        auto batch = std::move(pendingResults);
-        pendingResults.clear();
-
-        QMetaObject::invokeMethod(this, [this, batch = std::move(batch), normPath, fileName, fileIdx, processedCount, totalFiles, accumulatedProcessedBytes, totalBytesAll]() {
-          if (m_treeModel) {
-            for (const auto &item : batch) {
-              m_treeModel->setFileHealthStatus(item.normPath, item.ok ? 1 : 2);
+        if (!readOk) {
+            QMetaObject::invokeMethod(this, [this, normPath]() {
+            m_currentTask.reset();
+            emit isPausedChanged(false);
+            setBusy(false);
+            if (m_treeModel) {
+                m_treeModel->setFileHealthStatus(normPath, 2);
             }
-          }
-          if (m_jobModel) {
-            for (const auto &item : batch) {
-              m_jobModel->updateJobProgress(item.jobIdx, QString(), item.ok ? JobStatus::Finished : JobStatus::Failed, 1.0,
-                                            item.ok ? QStringLiteral("Verified OK") : QStringLiteral("Corrupt / CRC mismatch"));
+            setStatusMessage(QStringLiteral("Failed to read extracted file."));
+            emit operationCompleted(QStringLiteral("Test File"), false, QStringLiteral("Failed to read extracted file"));
+            emit progressChanged();
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        bool match = (computedCrc == entry.crc32);
+        QMetaObject::invokeMethod(this, [this, normPath, match, computedCrc, expectedCrc = entry.crc32]() {
+            m_currentTask.reset();
+            emit isPausedChanged(false);
+            setBusy(false);
+            if (match) {
+            m_overallProgress = 1.0;
+            m_fileProgress = 1.0;
+            if (m_treeModel) {
+                m_treeModel->setFileHealthStatus(normPath, 1);
             }
-          }
-          m_currentOperationName = QStringLiteral("Testing archive (%1/%2)").arg(fileIdx + 1).arg(totalFiles);
-          m_currentFileName = fileName;
-          setStatusMessage(QStringLiteral("Testing (%1/%2): %3...").arg(fileIdx + 1).arg(totalFiles).arg(normPath));
-          m_processedFiles = processedCount;
-          m_fileProgress = 1.0;
-          m_extractProcessedBytes = accumulatedProcessedBytes;
-          m_extractTotalBytes = totalBytesAll;
-          if (totalBytesAll > 0) {
-            m_overallProgress = static_cast<qreal>(accumulatedProcessedBytes) / static_cast<qreal>(totalBytesAll);
-          } else {
-            m_overallProgress = static_cast<qreal>(processedCount) / static_cast<qreal>(totalFiles);
-          }
-          emit progressChanged();
+            setStatusMessage(QStringLiteral("File is OK! CRC32 verified: 0x%1").arg(computedCrc, 8, 16, QLatin1Char('0')).toUpper());
+            emit operationCompleted(QStringLiteral("Test File"), true, QStringLiteral("File is OK"));
+            } 
+            else {
+                if (m_treeModel) {
+                    m_treeModel->setFileHealthStatus(normPath, 2);
+                }
+                QString errMsg = QStringLiteral("CRC32 mismatch! Expected 0x%1, got 0x%2")
+                                        .arg(expectedCrc, 8, 16, QLatin1Char('0'))
+                                        .arg(computedCrc, 8, 16, QLatin1Char('0'))
+                                        .toUpper();
+                setStatusMessage(errMsg);
+                emit errorOccurred(QStringLiteral("Health Test Failed"), errMsg);
+                emit operationCompleted(QStringLiteral("Test File"), false, errMsg);
+            }
+            emit progressChanged();
         }, Qt::QueuedConnection);
-      }
-    }
+    });
 
-    // Completely remove temporary directory and any leftover files
-    tempDir.remove();
+    auto taskHandle = std::make_shared<SeTaskHandle<bool>>(std::move(workerThread), std::move(future), pauseState);
+    m_currentTask = taskHandle;
+    emit isPausedChanged(false);
 
-    QMetaObject::invokeMethod(this, [this, failedCount, processedCount, totalFiles]() {
-      m_currentTask.reset();
-      emit isPausedChanged(false);
-      setBusy(false);
-      m_currentOperationName.clear();
-      m_currentFileName.clear();
-      if (m_stopSource.stop_requested()) {
-        m_overallProgress = 0.0;
-        m_fileProgress = 0.0;
-        setStatusMessage(QStringLiteral("Archive test cancelled (%1 of %2 files tested).").arg(processedCount).arg(totalFiles));
-        if (m_jobModel) {
-          m_jobModel->abortRunningJobs();
-        }
-        syncJobsList();
-        emit operationCompleted(QStringLiteral("Test Archive"), false, QStringLiteral("Operation was canceled"));
-      } else if (failedCount == 0) {
-        m_overallProgress = 1.0;
-        m_fileProgress = 1.0;
-        setStatusMessage(QStringLiteral("All %1 files verified successfully! Archive is healthy.").arg(totalFiles));
-        emit operationCompleted(QStringLiteral("Test Archive"), true, QStringLiteral("File is OK"));
-      } else {
-        QString errMsg = QStringLiteral("%1 of %2 files failed integrity test!").arg(failedCount).arg(totalFiles);
-        setStatusMessage(errMsg);
-        emit errorOccurred(QStringLiteral("Archive Integrity Error"), errMsg);
-        emit operationCompleted(QStringLiteral("Test Archive"), false, errMsg);
-      }
-      emit progressChanged();
-    }, Qt::QueuedConnection);
-  });
-
-  auto taskHandle = std::make_shared<SeTaskHandle<bool>>(
-      std::move(workerThread), std::move(future), pauseState);
-  m_currentTask = taskHandle;
-  emit isPausedChanged(false);
-
-  return true;
+    return true;
 }
 
-// ============================================================================
-// --- Recovery Subsystem Implementation ---
-// ============================================================================
+bool ArchiveInterface::testArchive() {
+    if (!m_archive) {
+        emit errorOccurred(QStringLiteral("No Archive"), QStringLiteral("No archive is currently open."));
+        return false;
+    }
 
-void ArchiveInterface::populateRecoveryItemsFromArchive() {
+    if (!m_isKeyRegistered && !m_archive->IsKeyPresent()) {
+        emit passwordRequired(m_archivePath);
+        return false;
+    }
+
+    if (isBusy()) {
+        emit errorOccurred(QStringLiteral("Busy"), QStringLiteral("Another operation is already in progress."));
+        return false;
+    }
+
+    m_stopSource = std::stop_source();
+    setBusy(true);
+    m_isTestingArchive = true;
+    m_currentOperationName = QStringLiteral("Testing archive integrity...");
+    m_currentFileName = QString();
+    setStatusMessage(QStringLiteral("Preparing archive integrity test..."));
+    m_overallProgress = 0.0;
+    m_fileProgress = 0.0;
+    m_totalFiles = 0;
+    m_processedFiles = 0;
+    m_extractTotalBytes = 0;
+    m_extractProcessedBytes = 0;
+    m_extractCompressedBytes = 0;
+
+    if (m_jobModel) {
+        m_jobModel->clear();
+    }
+    emit progressChanged();
+
+    std::stop_token stopToken = m_stopSource.get_token();
+    auto pauseState = std::make_shared<SePauseState>();
+    SePauseToken pauseToken(pauseState);
+
+
+    struct TestedFileResult {
+        QString normPath;
+        int jobIdx;
+        bool ok;
+    };
+
+    auto promise = std::make_shared<std::promise<expected<bool, error_code>>>();
+    auto future = promise->get_future().share();
+
+    // Run the entire test workflow in a managed jthread task
+    std::jthread workerThread([this, stopToken, pauseToken]() {
+        const auto &entries = m_archive->GetTOC().GetEntries();
+        std::vector<SeArchiveEntry> filesToTest;
+        filesToTest.reserve(entries.size());
+        uint64_t totalBytesAll = 0;
+        uint64_t maxFileSize = 0;
+        QStringList filePathsList;
+        filePathsList.reserve(static_cast<int>(entries.size()));
+
+        for (const auto &entry : entries) {
+            if (!entry.isDirectory()) {
+                filesToTest.push_back(entry);
+                totalBytesAll += entry.uncompressed_size;
+                if (entry.uncompressed_size > maxFileSize) {
+                    maxFileSize = entry.uncompressed_size;
+                }
+                QString normPath = QString::fromStdU16String(entry.path);
+                if (!normPath.startsWith(u'/')) {
+                    normPath.prepend(u'/');
+                }
+                filePathsList.append(normPath);
+            }
+        }
+
+        int totalFiles = static_cast<int>(filesToTest.size());
+
+        if (totalFiles == 0) {
+            QMetaObject::invokeMethod(this, [this]() {
+            m_isTestingArchive = false;
+            m_currentTask.reset();
+            emit isPausedChanged(false);
+            setBusy(false);
+            m_currentOperationName.clear();
+            m_currentFileName.clear();
+            setStatusMessage(QStringLiteral("Archive contains no files to test."));
+            syncJobsList();
+            emit operationCompleted(QStringLiteral("Test Archive"), true, QStringLiteral("File is OK"));
+            emit progressChanged();
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        QString tempBasePath = QDir::tempPath();
+        QStorageInfo storage(tempBasePath);
+        qint64 availableBytes = storage.bytesAvailable();
+        if (availableBytes >= 0 && maxFileSize > static_cast<uint64_t>(availableBytes)) {
+
+            QMetaObject::invokeMethod(this, [this, maxFileSize, availableBytes]() {
+                m_isTestingArchive = false;
+                m_currentTask.reset();
+                emit isPausedChanged(false);
+                setBusy(false);
+                m_currentOperationName.clear();
+                m_currentFileName.clear();
+                syncJobsList();
+                emit errorOccurred(QStringLiteral("Insufficient Space"),
+                                    QStringLiteral("Not enough free disk space in temporary directory to test archive files.\nRequired: %1\nAvailable: %2")
+                                        .arg(SeFileEntryObject::formatBytes(maxFileSize), SeFileEntryObject::formatBytes(availableBytes)));
+                emit operationCompleted(QStringLiteral("Test Archive"), false, QStringLiteral("Insufficient temporary disk space"));
+                emit progressChanged();
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        // Batch initialize the job model on the main thread in a single O(N) model reset
+        QMetaObject::invokeMethod(this, [this, filePathsList, totalFiles, totalBytesAll]() {
+            m_totalFiles = totalFiles;
+            m_extractTotalBytes = totalBytesAll;
+            setStatusMessage(QStringLiteral("Testing %1 archive files...").arg(totalFiles));
+            if (m_jobModel) {
+                m_jobModel->setTestJobs(filePathsList);
+            }
+            emit progressChanged();
+        }, Qt::QueuedConnection);
+
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            QMetaObject::invokeMethod(this, [this]() {
+                m_isTestingArchive = false;
+                m_currentTask.reset();
+                emit isPausedChanged(false);
+                setBusy(false);
+                m_currentOperationName.clear();
+                m_currentFileName.clear();
+                syncJobsList();
+                emit errorOccurred(QStringLiteral("Temp Directory Error"), QStringLiteral("Failed to create temporary directory for testing."));
+                emit operationCompleted(QStringLiteral("Test Archive"), false, QStringLiteral("Failed to create temporary directory"));
+                emit progressChanged();
+            }, Qt::QueuedConnection);
+            return;
+        }
+
+        QString tempDirPath = tempDir.path();
+        int processedCount = 0;
+        int failedCount = 0;
+        uint64_t accumulatedProcessedBytes = 0;
+
+        std::vector<TestedFileResult> pendingResults;
+        pendingResults.reserve(64);
+        auto lastProgressDispatchMs = std::make_shared<std::atomic<int64_t>>(0);
+        auto lastBatchDispatchTime = std::chrono::steady_clock::now();
+
+        for (int fileIdx = 0; fileIdx < totalFiles; ++fileIdx) { // Main file iter loop
+            if (pauseToken.wait_if_paused(stopToken) || stopToken.stop_requested() || m_stopSource.stop_requested() ) {
+                break;
+            }
+
+            const auto &entry = filesToTest[fileIdx];
+            const QString &normPath = filePathsList[fileIdx];
+            QString fileName = QFileInfo(normPath).fileName();
+
+            // avoid double file extraction
+            QString extractedFilePath = QDir(tempDirPath).filePath(fileName);
+            if (QFile::exists(extractedFilePath)) {
+                QFile::remove(extractedFilePath);
+            }
+
+            QMetaObject::invokeMethod(this, [this, fileIdx, totalFiles, fileName, normPath]() {
+                m_currentOperationName = QStringLiteral("Testing archive (%1/%2)").arg(fileIdx + 1).arg(totalFiles);
+                m_currentFileName = fileName;
+                setStatusMessage(QStringLiteral("Testing (%1/%2): %3...").arg(fileIdx + 1).arg(totalFiles).arg(normPath));
+                m_fileProgress = 0.0;
+                if (m_jobModel) {
+                    m_jobModel->updateJobProgress(fileIdx + 1, QString(), JobStatus::Running, 0.0,
+                                                QStringLiteral("Testing..."));
+                }
+                emit progressChanged();
+            }, Qt::QueuedConnection);
+
+            uint64_t fileEntrySize = entry.uncompressed_size;
+            auto callback = [this, fileIdx, fileName, accumulatedProcessedBytes,
+                                        totalBytesAll, fileEntrySize, lastProgressDispatchMs](const SeJob &job) {
+
+                auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+                int64_t last = lastProgressDispatchMs->load(std::memory_order_relaxed);
+                if (now - last >= 40) {
+                    lastProgressDispatchMs->store(now, std::memory_order_relaxed);
+                    QMetaObject::invokeMethod(this, [this, fileIdx, fileName, pct = job.percentage, fileProcessed = job.processedBytes, fileEntrySize, curBytes = accumulatedProcessedBytes + job.processedBytes, totalBytesAll]() {
+                        m_currentFileName = fileName;
+                        m_fileProgress = static_cast<qreal>(pct) / 100.0;
+                        if (totalBytesAll > 0) {
+                            qreal p = static_cast<qreal>(curBytes) / static_cast<qreal>(totalBytesAll);
+                            if (p > m_overallProgress) {
+                                m_overallProgress = p;
+                            }
+                        }
+                        if (curBytes > m_extractProcessedBytes) {
+                            m_extractProcessedBytes = curBytes;
+                        }
+                        m_extractTotalBytes = totalBytesAll;
+                        if (m_jobModel) {
+                            m_jobModel->updateJobProgress(fileIdx + 1, QString(), JobStatus::Running, m_fileProgress,
+                                                        QStringLiteral("%1% completed").arg(pct),
+                                                        fileProcessed, 0, fileEntrySize);
+                        }
+                        emit progressChanged();
+                    }, Qt::QueuedConnection);
+                }
+            };
+
+            auto extractRes = m_archive->ExtractFileSync(normPath.toStdU16String(), tempDirPath.toStdU16String(), callback, stopToken, pauseToken);
+
+            if (stopToken.stop_requested() || m_stopSource.stop_requested() || (!extractRes && extractRes.error() == SeError::OperationCanceled)) {
+                if (QFile::exists(extractedFilePath)) {
+                    QFile::remove(extractedFilePath);
+                }
+                break;
+            }
+
+            bool ok = false;
+            if (extractRes) {
+            uint32_t computedCrc = CRC32C_INIT;
+            bool readOk = true;
+            {
+                QFile extractedFile(extractedFilePath); // Again i have to use qfile map here!
+                if (extractedFile.open(QIODevice::ReadOnly)) {
+                constexpr qint64 bufSize = 65536;
+                QByteArray buffer;
+                buffer.resize(bufSize);
+                while (!extractedFile.atEnd()) {
+                    if (pauseToken.wait_if_paused(stopToken)) {
+                    readOk = false;
+                    break;
+                    }
+                    if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
+                    readOk = false;
+                    break;
+                    }
+                    qint64 bytesRead = extractedFile.read(buffer.data(), bufSize);
+                    if (bytesRead > 0) {
+                    computedCrc = crc32c_update(computedCrc, buffer.constData(), static_cast<size_t>(bytesRead));
+                    } else if (bytesRead < 0) {
+                    readOk = false;
+                    break;
+                    }
+                }
+                extractedFile.close();
+                } else {
+                    readOk = false;
+                }
+            }
+            computedCrc = crc32c_finalize(computedCrc);
+
+                if (readOk && (computedCrc == entry.crc32)) {
+                    ok = true;
+                }
+            }
+
+            if (QFile::exists(extractedFilePath)) {
+                QFile::remove(extractedFilePath);
+            }
+
+            if (stopToken.stop_requested() || m_stopSource.stop_requested()) {
+                    break;
+            }
+
+            accumulatedProcessedBytes += entry.uncompressed_size;
+            processedCount++;
+            if (!ok) {
+                failedCount++;
+            }
+
+            pendingResults.push_back({normPath, fileIdx + 1, ok});
+
+            auto now = std::chrono::steady_clock::now();
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBatchDispatchTime).count();
+            bool isLastFile = (fileIdx == totalFiles - 1) || stopToken.stop_requested() || m_stopSource.stop_requested();
+
+            if (isLastFile || elapsedMs >= 40 || pendingResults.size() >= 50) {
+                lastBatchDispatchTime = now;
+                auto batch = std::move(pendingResults);
+                pendingResults.clear();
+
+                QMetaObject::invokeMethod(this, [this, batch = std::move(batch), normPath, fileName, fileIdx, isLastFile, processedCount, totalFiles, accumulatedProcessedBytes, totalBytesAll]() {
+                    if (m_treeModel) {
+                    for (const auto &item : batch) {
+                        m_treeModel->setFileHealthStatus(item.normPath, item.ok ? 1 : 2);
+                    }
+                    }
+                    if (m_jobModel) {
+                    for (const auto &item : batch) {
+                        m_jobModel->updateJobProgress(item.jobIdx, QString(), item.ok ? JobStatus::Finished : JobStatus::Failed, 1.0,
+                                                    item.ok ? QStringLiteral("Verified OK") : QStringLiteral("Corrupt / CRC mismatch"));
+                    }
+                    }
+                    m_currentOperationName = QStringLiteral("Testing archive (%1/%2)").arg(fileIdx + 1).arg(totalFiles);
+                    m_currentFileName = fileName;
+                    setStatusMessage(QStringLiteral("Testing (%1/%2): %3...").arg(fileIdx + 1).arg(totalFiles).arg(normPath));
+                    m_processedFiles = processedCount;
+                    if (isLastFile) {
+                        m_fileProgress = 1.0;
+                    }
+                    if (accumulatedProcessedBytes > m_extractProcessedBytes) {
+                        m_extractProcessedBytes = accumulatedProcessedBytes;
+                    }
+                    m_extractTotalBytes = totalBytesAll;
+                    if (totalBytesAll > 0) {
+                        qreal p = static_cast<qreal>(accumulatedProcessedBytes) / static_cast<qreal>(totalBytesAll);
+                        if (p > m_overallProgress) {
+                            m_overallProgress = p;
+                        }
+                    } else {
+                        qreal p = static_cast<qreal>(processedCount) / static_cast<qreal>(totalFiles);
+                        if (p > m_overallProgress) {
+                            m_overallProgress = p;
+                        }
+                    }
+                    emit progressChanged();
+                }, Qt::QueuedConnection);
+            }
+        }
+
+        tempDir.remove();
+
+        QMetaObject::invokeMethod(this, [this, failedCount, processedCount, totalFiles]() {
+            m_isTestingArchive = false;
+            m_currentTask.reset();
+            emit isPausedChanged(false);
+            setBusy(false);
+            m_currentOperationName.clear();
+            m_currentFileName.clear();
+            if (m_stopSource.stop_requested()) {
+            m_overallProgress = 0.0;
+            m_fileProgress = 0.0;
+            setStatusMessage(QStringLiteral("Archive test cancelled (%1 of %2 files tested).").arg(processedCount).arg(totalFiles));
+            if (m_jobModel) {
+                m_jobModel->abortRunningJobs();
+            }
+            syncJobsList();
+            emit operationCompleted(QStringLiteral("Test Archive"), false, QStringLiteral("Operation was canceled"));
+            } else if (failedCount == 0) {
+            m_overallProgress = 1.0;
+            m_fileProgress = 1.0;
+            setStatusMessage(QStringLiteral("All %1 files verified successfully! Archive is healthy.").arg(totalFiles));
+            emit operationCompleted(QStringLiteral("Test Archive"), true, QStringLiteral("File is OK"));
+            } else {
+            QString errMsg = QStringLiteral("%1 of %2 files failed integrity test!").arg(failedCount).arg(totalFiles);
+            setStatusMessage(errMsg);
+            emit errorOccurred(QStringLiteral("Archive Integrity Error"), errMsg);
+            emit operationCompleted(QStringLiteral("Test Archive"), false, errMsg);
+            }
+            emit progressChanged();
+        }, Qt::QueuedConnection);
+    });
+
+    auto taskHandle = std::make_shared<SeTaskHandle<bool>>(
+        std::move(workerThread), std::move(future), pauseState);
+    m_currentTask = taskHandle;
+    emit isPausedChanged(false);
+
+    return true;
+}
+
+/*void ArchiveInterface::populateRecoveryItemsFromArchive() {
   m_recoveryItems.clear();
   if (!m_recoveryArchive) {
     emit recoveryItemsChanged();
@@ -3330,3 +3456,4 @@ QVariantMap ArchiveInterface::testRecoveryBatch(const QStringList &archiveRelati
   batchResult[QStringLiteral("results")] = details;
   return batchResult;
 }
+*/

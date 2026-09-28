@@ -307,7 +307,7 @@ void SeJobModel::setTestJobs(const QStringList &filePaths) {
     emit countChanged();
 }
 
-void SeJobModel::setExtractJobs(const QStringList &filePaths) {
+void SeJobModel::setExtractJobs(const QStringList &filePaths, qulonglong totalBytes) {
     beginResetModel();
     m_jobs.clear();
     m_displayToSource.clear();
@@ -320,19 +320,29 @@ void SeJobModel::setExtractJobs(const QStringList &filePaths) {
         JobData data;
         data.id = i + 1;
         const QString &fPath = filePaths[i];
-        QString fName = QFileInfo(fPath).fileName();
-        data.name = QStringLiteral("Extract %1").arg(fName.isEmpty() ? fPath : fName);
+
+        QString cleanPath = fPath;
+        while (cleanPath.endsWith(u'/') && cleanPath.length() > 1) {
+            cleanPath.chop(1);
+        }
+        QString fName = (cleanPath == u"/") ? QStringLiteral("All files") : QFileInfo(cleanPath).fileName();
+        if (fName.isEmpty()) fName = fPath;
+
+        data.name = QStringLiteral("Extract %1").arg(fName);
         data.fileName = fPath;
         data.state = QStringLiteral("pending");
         data.progress = 0.0;
         data.detail = QStringLiteral("Queued");
-        data.totalBytes = 0;
+        data.totalBytes = (filePaths.size() == 1 && totalBytes > 0) ? totalBytes : 0;
         data.processedBytes = 0;
         data.compressedBytes = 0;
 
         m_jobs.push_back(data);
         m_idToIndex[data.id] = i;
         indexJobFile(data.fileName, i);
+        if (cleanPath != fPath) {
+            indexJobFile(cleanPath, i);
+        }
     }
 
     endResetModel();
@@ -513,13 +523,13 @@ void SeJobModel::updateJobsBatch(const std::vector<SeJob> &batch) {
         }
     }
 
-    /*if (anyProgressChanged && !m_jobs.empty()) {
+    if (anyProgressChanged && !m_jobs.empty()) {
         qreal newOverall = m_progressSum / static_cast<qreal>(m_jobs.size());
         if (std::abs(m_overallProgress - newOverall) > 0.005 || (newOverall >= 0.999 && m_overallProgress < 0.999)) {
             m_overallProgress = newOverall;
             emit overallProgressChanged();
         }
-    }*/
+    }
 
     if (anyBytesChanged) {
         emit this->progressChanged();
@@ -598,7 +608,6 @@ void SeJobModel::updateJobProgress(int id, const QString &fileName, JobStatus st
         emit dataChanged(idx, idx, {StateRole, ProgressRole, DetailRole, FileNameRole});
     }
 
-    // O(1) incremental aggregate update!
     if (progressChanged) {
         m_progressSum += (clampedProgress - oldProgress);
         if (m_progressSum < 0.0) m_progressSum = 0.0;

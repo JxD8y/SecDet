@@ -67,7 +67,7 @@ public:
 
     void setJobs(const std::vector<SeJob> &jobs);
     void setTestJobs(const QStringList &filePaths);
-    void setExtractJobs(const QStringList &filePaths);
+    void setExtractJobs(const QStringList &filePaths, qulonglong totalBytes = 0);
     void updateJob(const SeJob &job);
     void updateJobsBatch(const std::vector<SeJob> &batch);
     void updateJobProgress(int id, const QString &fileName, JobStatus status, qreal progress, const QString &detail,

@@ -20,6 +20,8 @@ target_sources(SecDet PRIVATE
     src/SeJobModel.cpp
     src/ArchiveTreeModel.h
     src/ArchiveTreeModel.cpp
+    src/ArchiveRecoveryInterface.h
+    src/ArchiveRecoveryInterface.cpp
 )
 
 set_target_properties(SecDet PROPERTIES WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>)

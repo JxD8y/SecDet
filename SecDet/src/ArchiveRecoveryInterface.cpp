@@ -20,238 +20,243 @@ ArchiveRecoveryInterface::ArchiveRecoveryInterface(QObject *parent)
     : QObject(parent) {}
 
 ArchiveRecoveryInterface::~ArchiveRecoveryInterface() {
-  cancelCurrentOperation();
-  if (m_currentTask) {
-    m_currentTask->request_stop();
-  }
+    cancelCurrentOperation();
+    if (m_currentTask) {
+        m_currentTask->request_stop();
+    }
 }
 
 void ArchiveRecoveryInterface::setBusy(bool busy) {
-  if (m_isBusy != busy) {
-    m_isBusy = busy;
-    emit isBusyChanged(m_isBusy);
-  }
+    if (m_isBusy != busy) {
+        m_isBusy = busy;
+        emit isBusyChanged(m_isBusy);
+    }
 }
 
 void ArchiveRecoveryInterface::resetProgress() {
-  m_overallProgress = 0.0;
-  m_fileProgress = 0.0;
-  m_processedFiles = 0;
-  m_totalFiles = 0;
-  m_totalProcessedBytes = 0;
-  m_totalCompressedBytes = 0;
-  m_totalBytes = 0;
-  m_currentFileName.clear();
-  m_currentOperationName.clear();
-  emit progressChanged();
+    m_overallProgress = 0.0;
+    m_fileProgress = 0.0;
+    m_processedFiles = 0;
+    m_totalFiles = 0;
+    m_totalProcessedBytes = 0;
+    m_totalCompressedBytes = 0;
+    m_totalBytes = 0;
+    m_currentFileName.clear();
+    m_currentOperationName.clear();
+    emit progressChanged();
 }
 
 bool ArchiveRecoveryInterface::loadArchive(const QString &filePath, const QString &password) {
-  if (filePath.isEmpty()) {
-    return false;
-  }
-
-  QString cleanPath = filePath;
-  if (cleanPath.startsWith(QStringLiteral("file:///"))) {
-    cleanPath = QUrl(cleanPath).toLocalFile();
-  } else if (cleanPath.startsWith(QStringLiteral("file://"))) {
-    cleanPath = cleanPath.mid(7);
-  }
-
-  QFileInfo fi(cleanPath);
-  if (!fi.exists() || !fi.isFile()) {
-    emit errorOccurred(QStringLiteral("Recovery Error"),
-                       QStringLiteral("File does not exist or is not a regular file."));
-    return false;
-  }
-
-  // Cancel any currently running operation before loading new archive
-  cancelCurrentOperation();
-
-  m_isLoading = true;
-  m_archivePath = cleanPath;
-  emit recoveryStatusChanged();
-
-  // Run the recovery scan, key registration, and item parsing on a dedicated background worker thread
-  std::jthread workerThread([this, cleanPath, password](std::stop_token stopToken) {
-    auto result = SeArchive::RecoverArchiveSync(cleanPath.toStdU16String(), stopToken);
-
-    if (stopToken.stop_requested()) {
-      QMetaObject::invokeMethod(this, [this]() {
-        m_isLoading = false;
-        emit recoveryStatusChanged();
-      }, Qt::QueuedConnection);
-      return;
+    if (filePath.isEmpty()) {
+        return false;
     }
 
-    if (!result) {
-      QString errorTitle = QStringLiteral("Critical Crypto Data Missing");
-      QString errorDetail;
-      if (result.error() == SeError::RequiredFieldMissing ||
-          result.error() == SeError::InvalidMetadataMagic ||
-          result.error() == std::errc::invalid_argument) {
-        errorDetail = QStringLiteral(
-            "Cannot open archive for recovery: Critical cryptographic parameters "
-            "(Salt or Password Verification Value) are damaged or unreadable in the metadata header.\n\n"
-            "Without valid Salt and PVV, cryptographic derivation and decryption cannot take place.");
-      } else {
-        errorTitle = QStringLiteral("Recovery Analysis Failed");
-        errorDetail = QStringLiteral("Failed to open archive for recovery: ") +
-                      QString::fromLocal8Bit(result.error().message().c_str());
-      }
-
-      QMetaObject::invokeMethod(this, [this, errorTitle, errorDetail]() {
-        m_isLoading = false;
-        m_archive.reset();
-        m_recoveryItems.clear();
-        m_isMetadataHealthy = false;
-        m_metadataHealthState = QStringLiteral("Corrupted / Unreadable");
-        m_metadataDetails = errorDetail;
-        m_isTocHealthy = false;
-        m_tocHealthState = QStringLiteral("Unavailable");
-        m_tocDetails = QStringLiteral("Cannot reconstruct Table of Contents without valid cryptographic metadata.");
-        m_okCount = 0;
-        m_foundOkCount = 0;
-        m_truncatedCount = 0;
-        m_notFoundCount = 0;
-
-        emit recoveryStatusChanged();
-        emit recoveryItemsChanged();
-        emit recoveryCompleted(false, errorDetail);
-        emit errorOccurred(errorTitle, errorDetail);
-      }, Qt::QueuedConnection);
-      return;
+    QString cleanPath = filePath;
+    if (cleanPath.startsWith(QStringLiteral("file:///"))) {
+        cleanPath = QUrl(cleanPath).toLocalFile();
+    }
+    else if (cleanPath.startsWith(QStringLiteral("file://"))) {
+        cleanPath = cleanPath.mid(7);
     }
 
-    auto archive = std::make_unique<SeArchive>(std::move(*result));
-
-    // Register key in worker thread off the UI thread to keep UI completely smooth
-    if (!password.isEmpty()) {
-      (void)archive->RegisterKey(password.toStdString());
-    }
-    bool keyRegistered = archive->IsKeyPresent();
-
-    QString metaHealthStr = QString::fromStdString(archive->GetMetadataHealth());
-    bool isMetaHealthy = !metaHealthStr.contains(QStringLiteral("Corrupt"), Qt::CaseInsensitive) &&
-                         !metaHealthStr.contains(QStringLiteral("Invalid"), Qt::CaseInsensitive);
-    QString metaHealthState = isMetaHealthy ? QStringLiteral("Healthy (Valid Header)")
-                                           : QStringLiteral("Corrupted / Damaged");
-
-    QString tocHealthStr = QString::fromStdString(archive->GetTOCHealth());
-    bool isTocHealthy = !tocHealthStr.contains(QStringLiteral("Truncated"), Qt::CaseInsensitive) &&
-                        !tocHealthStr.contains(QStringLiteral("Damaged"), Qt::CaseInsensitive) &&
-                        !tocHealthStr.contains(QStringLiteral("Corrupt"), Qt::CaseInsensitive);
-    QString tocHealthState = isTocHealthy ? QStringLiteral("Valid (Full TOC)")
-                                         : QStringLiteral("Truncated / Reconstructed");
-
-    // Parse and precalculate all recovery entries and counters on worker thread
-    const auto &entries = archive->GetTOC().GetEntries();
-    uint64_t totalRealBytes = 0;
-    for (const auto &e : entries) {
-      if (e.path == u"/") continue;
-      totalRealBytes += e.uncompressed_size;
+    QFileInfo fi(cleanPath);
+    if (!fi.exists() || !fi.isFile()) {
+        emit errorOccurred(QStringLiteral("Recovery Error"),
+                        QStringLiteral("File does not exist or is not a regular file."));
+        return false;
     }
 
-    int okC = 0;
-    int foundOkC = 0;
-    int truncatedC = 0;
-    int notFoundC = 0;
-    QVariantList items;
-    items.reserve(static_cast<qsizetype>(entries.size()));
+    cancelCurrentOperation();
 
-    for (const auto &e : entries) {
-      if (e.path == u"/") continue;
+    m_isLoading = true;
+    m_archivePath = cleanPath;
+    emit recoveryStatusChanged();
 
-      QString itemPath = QString::fromStdU16String(e.path);
-      QString itemName = QFileInfo(itemPath).fileName();
-      if (itemName.isEmpty()) {
-        itemName = itemPath;
-      }
+    
+    std::jthread workerThread([this, cleanPath, password](std::stop_token stopToken) {
 
-      QString stateStr;
-      switch (e.recoveryState) {
-        case EntryRecoveryState::FoundIndexed:
-          stateStr = QStringLiteral("Ok");
-          okC++;
-          break;
-        case EntryRecoveryState::FoundOk:
-          stateStr = QStringLiteral("Found OK");
-          foundOkC++;
-          break;
-        case EntryRecoveryState::FoundTruncated:
-          stateStr = QStringLiteral("Found Truncated");
-          truncatedC++;
-          break;
-        case EntryRecoveryState::NotFound:
-          stateStr = QStringLiteral("Not Found");
-          notFoundC++;
-          break;
-      }
+        auto result = SeArchive::RecoverArchiveSync(cleanPath.toStdU16String(), stopToken);
 
-      QString crcStr;
-      if (e.recoveryState == EntryRecoveryState::NotFound || e.crc32 == 0) {
-        crcStr = QStringLiteral("N/A");
-      } else {
-        crcStr = QString::asprintf("0x%08X", e.crc32);
-      }
+        if (stopToken.stop_requested()) {
+            QMetaObject::invokeMethod(this, [this]() {
+            m_isLoading = false;
+            emit recoveryStatusChanged();
+            }, Qt::QueuedConnection);
+            return;
+        }
 
-      double sharePct = 0.0;
-      if (totalRealBytes > 0 && e.uncompressed_size > 0) {
-        sharePct = (static_cast<double>(e.uncompressed_size) / static_cast<double>(totalRealBytes)) * 100.0;
-      }
-      QString shareStr = QString::asprintf("%.1f%%", sharePct);
+        if (!result) {
+            QString errorTitle = QStringLiteral("Critical Crypto Data Missing");
+            QString errorDetail;
+            if (result.error() == SeError::RequiredFieldMissing ||
+                result.error() == SeError::InvalidMetadataMagic ||
+                result.error() == std::errc::invalid_argument) {
 
-      QVariantMap itemMap;
-      itemMap[QStringLiteral("name")] = itemName;
-      itemMap[QStringLiteral("path")] = itemPath;
-      itemMap[QStringLiteral("isFolder")] = e.isDirectory();
-      itemMap[QStringLiteral("state")] = stateStr;
-      itemMap[QStringLiteral("compSize")] = SeFileEntryObject::formatBytes(e.compressed_size);
-      itemMap[QStringLiteral("realSize")] = SeFileEntryObject::formatBytes(e.uncompressed_size);
-      itemMap[QStringLiteral("crc")] = crcStr;
-      itemMap[QStringLiteral("share")] = shareStr;
-      itemMap[QStringLiteral("checked")] = (e.recoveryState != EntryRecoveryState::NotFound);
+                errorDetail = QStringLiteral(
+                    "Cannot open archive for recovery: Critical cryptographic parameters "
+                    "(Salt or Password Verification Value) are damaged or unreadable in the metadata header.\n\n"
+                    "Without valid Salt and PVV, cryptographic derivation and decryption cannot take place.");
+            } 
+            else {
+                errorTitle = QStringLiteral("Recovery Analysis Failed");
+                errorDetail = QStringLiteral("Failed to open archive for recovery: ") +
+                                QString::fromLocal8Bit(result.error().message().c_str());
+            }
 
-      items.append(itemMap);
-    }
+            QMetaObject::invokeMethod(this, [this, errorTitle, errorDetail]() {
+                m_isLoading = false;
+                m_archive.reset();
+                m_recoveryItems.clear();
+                m_isMetadataHealthy = false;
+                m_metadataHealthState = QStringLiteral("Corrupted / Unreadable");
+                m_metadataDetails = errorDetail;
+                m_isTocHealthy = false;
+                m_tocHealthState = QStringLiteral("Unavailable");
+                m_tocDetails = QStringLiteral("Cannot reconstruct Table of Contents without valid cryptographic metadata.");
+                m_okCount = 0;
+                m_foundOkCount = 0;
+                m_truncatedCount = 0;
+                m_notFoundCount = 0;
 
-    uint64_t totalArcSize = 0;
-    QFileInfo arcFi(cleanPath);
-    if (arcFi.exists()) {
-      totalArcSize = static_cast<uint64_t>(arcFi.size());
-    }
+                emit recoveryStatusChanged();
+                emit recoveryItemsChanged();
+                emit recoveryCompleted(false, errorDetail);
+                emit errorOccurred(errorTitle, errorDetail);
+            }, Qt::QueuedConnection);
+            return;
+        }
 
-    QMetaObject::invokeMethod(
-        this,
-        [this, arc = std::move(archive), items = std::move(items), keyRegistered,
-         isMetaHealthy, metaHealthState, metaHealthStr, isTocHealthy, tocHealthState,
-         tocHealthStr, okC, foundOkC, truncatedC, notFoundC, totalArcSize]() mutable {
-          m_archive = std::move(arc);
-          m_recoveryItems = std::move(items);
-          m_isKeyRegistered = keyRegistered;
-          m_isMetadataHealthy = isMetaHealthy;
-          m_metadataHealthState = metaHealthState;
-          m_metadataDetails = metaHealthStr;
-          m_isTocHealthy = isTocHealthy;
-          m_tocHealthState = tocHealthState;
-          m_tocDetails = tocHealthStr;
-          m_okCount = okC;
-          m_foundOkCount = foundOkC;
-          m_truncatedCount = truncatedC;
-          m_notFoundCount = notFoundC;
-          m_totalArchiveSize = totalArcSize;
-          m_isLoading = false;
+        auto archive = std::make_unique<SeArchive>(std::move(*result));
 
-          emit recoveryStatusChanged();
-          emit recoveryKeyStatusChanged(m_isKeyRegistered);
-          emit recoveryItemsChanged();
-          emit recoveryCompleted(true, QStringLiteral("Archive recovery analysis completed successfully."));
-        },
-        Qt::QueuedConnection);
-  });
+        // Register key in worker thread off the UI thread to keep UI completely smooth
+        if (!password.isEmpty()) {
+            (void)archive->RegisterKey(password.toStdString());
+        }
+        bool keyRegistered = archive->IsKeyPresent();
 
-  workerThread.detach();
-  return true;
+        QString metaHealthStr = QString::fromStdString(archive->GetMetadataHealth());
+        bool isMetaHealthy = !metaHealthStr.contains(QStringLiteral("Corrupt"), Qt::CaseInsensitive) &&
+                                !metaHealthStr.contains(QStringLiteral("Invalid"), Qt::CaseInsensitive);
+
+        QString metaHealthState = isMetaHealthy ? QStringLiteral("Healthy (Valid Header)")
+                                                : QStringLiteral("Corrupted / Damaged");
+
+        QString tocHealthStr = QString::fromStdString(archive->GetTOCHealth());
+        bool isTocHealthy = !tocHealthStr.contains(QStringLiteral("Truncated"), Qt::CaseInsensitive) &&
+                            !tocHealthStr.contains(QStringLiteral("Damaged"), Qt::CaseInsensitive) &&
+                            !tocHealthStr.contains(QStringLiteral("Corrupt"), Qt::CaseInsensitive);
+
+        QString tocHealthState = isTocHealthy ? QStringLiteral("Valid (Full TOC)")
+                                                : QStringLiteral("Truncated / Reconstructed");
+
+        // Parse and precalculate all recovery entries and counters on worker thread
+        const auto &entries = archive->GetTOC().GetEntries();
+        uint64_t totalRealBytes = 0;
+        for (const auto &e : entries) {
+            if (e.path == u"/") continue;
+            totalRealBytes += e.uncompressed_size;
+        }
+
+        int okC = 0;
+        int foundOkC = 0;
+        int truncatedC = 0;
+        int notFoundC = 0;
+        QVariantList items;
+        items.reserve(static_cast<qsizetype>(entries.size()));
+
+        for (const auto &e : entries) {
+            if (e.path == u"/") continue;
+
+            QString itemPath = QString::fromStdU16String(e.path);
+            QString itemName = QFileInfo(itemPath).fileName();
+            if (itemName.isEmpty()) {
+            itemName = itemPath;
+            }
+
+            QString stateStr;
+            switch (e.recoveryState) {
+            case EntryRecoveryState::FoundIndexed:
+                stateStr = QStringLiteral("Ok");
+                okC++;
+                break;
+            case EntryRecoveryState::FoundOk:
+                stateStr = QStringLiteral("Found OK");
+                foundOkC++;
+                break;
+            case EntryRecoveryState::FoundTruncated:
+                stateStr = QStringLiteral("Found Truncated");
+                truncatedC++;
+                break;
+            case EntryRecoveryState::NotFound:
+                stateStr = QStringLiteral("Not Found");
+                notFoundC++;
+                break;
+            }
+
+            QString crcStr;
+            if (e.recoveryState == EntryRecoveryState::NotFound || e.crc32 == 0) {
+            crcStr = QStringLiteral("N/A");
+            } else {
+            crcStr = QString::asprintf("0x%08X", e.crc32);
+            }
+
+            double sharePct = 0.0;
+            if (totalRealBytes > 0 && e.uncompressed_size > 0) {
+            sharePct = (static_cast<double>(e.uncompressed_size) / static_cast<double>(totalRealBytes)) * 100.0;
+            }
+            QString shareStr = QString::asprintf("%.1f%%", sharePct);
+
+            QVariantMap itemMap;
+            itemMap[QStringLiteral("name")] = itemName;
+            itemMap[QStringLiteral("path")] = itemPath;
+            itemMap[QStringLiteral("isFolder")] = e.isDirectory();
+            itemMap[QStringLiteral("state")] = stateStr;
+            itemMap[QStringLiteral("compSize")] = SeFileEntryObject::formatBytes(e.compressed_size);
+            itemMap[QStringLiteral("realSize")] = SeFileEntryObject::formatBytes(e.uncompressed_size);
+            itemMap[QStringLiteral("crc")] = crcStr;
+            itemMap[QStringLiteral("share")] = shareStr;
+            itemMap[QStringLiteral("checked")] = (e.recoveryState != EntryRecoveryState::NotFound);
+
+            items.append(itemMap);
+        }
+
+        uint64_t totalArcSize = 0;
+        QFileInfo arcFi(cleanPath);
+        if (arcFi.exists()) {
+            totalArcSize = static_cast<uint64_t>(arcFi.size());
+        }
+
+        QMetaObject::invokeMethod(
+            this,
+            [this, arc = std::move(archive), items = std::move(items), keyRegistered,
+                isMetaHealthy, metaHealthState, metaHealthStr, isTocHealthy, tocHealthState,
+                tocHealthStr, okC, foundOkC, truncatedC, notFoundC, totalArcSize]() mutable {
+                m_archive = std::move(arc);
+                m_recoveryItems = std::move(items);
+                m_isKeyRegistered = keyRegistered;
+                m_isMetadataHealthy = isMetaHealthy;
+                m_metadataHealthState = metaHealthState;
+                m_metadataDetails = metaHealthStr;
+                m_isTocHealthy = isTocHealthy;
+                m_tocHealthState = tocHealthState;
+                m_tocDetails = tocHealthStr;
+                m_okCount = okC;
+                m_foundOkCount = foundOkC;
+                m_truncatedCount = truncatedC;
+                m_notFoundCount = notFoundC;
+                m_totalArchiveSize = totalArcSize;
+                m_isLoading = false;
+
+                emit recoveryStatusChanged();
+                emit recoveryKeyStatusChanged(m_isKeyRegistered);
+                emit recoveryItemsChanged();
+                emit recoveryCompleted(true, QStringLiteral("Archive recovery analysis completed successfully."));
+            },
+            Qt::QueuedConnection);
+    });
+
+    workerThread.detach();
+    return true;
 }
 
 void ArchiveRecoveryInterface::unloadArchive() {

@@ -89,7 +89,7 @@ Page {
     readonly property color colorNotFoundBg: Colors.isDarkMode ? Qt.rgba(0.90, 0.20, 0.20, 0.16) : Qt.rgba(0.90, 0.15, 0.15, 0.08)
     readonly property color colorNotFoundBorder: Colors.isDarkMode ? Qt.rgba(0.95, 0.30, 0.30, 0.45) : Qt.rgba(0.85, 0.20, 0.20, 0.35)
 
-    // Clipboard helper for copying CRC/paths
+   
     TextInput {
         id: clipboardHelper
         visible: false
@@ -113,7 +113,7 @@ Page {
 
     property string pendingRecoveryFilePath: ""
 
-    // Initialize or load an archive into the recovery tool
+    
     function loadArchive(filePath) {
         if (!filePath || filePath.length === 0) return;
 
@@ -128,7 +128,6 @@ Page {
         }
         cleanPath = decodeURIComponent(cleanPath);
 
-        // Extension check
         if (!cleanPath.toLowerCase().endsWith(".sda")) {
             let fName = cleanPath.split("/").pop().split("\\").pop();
             errorDialog.showError("Invalid Archive File", "The file '" + fName + "' is not a valid SecDet Archive (.sda).\n\nPlease choose a file with the .sda extension for recovery analysis.");
@@ -358,7 +357,7 @@ Page {
             }
 
             Text {
-                text: "Drop SecDet archive (.sda) here to inspect in Recovery Tools"
+                text: "Drop (.sda) file here to inspect in Recovery Tools"
                 font.family: Colors.fontFamily
                 font.pixelSize: 11
                 font.weight: Font.DemiBold
@@ -385,22 +384,16 @@ Page {
         }
     }
 
-    // ==========================================
-    // --- Main Layout ---
-    // ==========================================
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 12
         spacing: 10
 
-        // ==========================================
-        // --- Header Row: Icon, Title & Close Button ---
-        // ==========================================
+
         RowLayout {
             Layout.fillWidth: true
             spacing: 10
 
-            // Circular repair tools icon badge
             Rectangle {
                 width: 32
                 height: 32
@@ -428,15 +421,6 @@ Page {
                     font.pixelSize: 14
                     font.weight: Font.Bold
                     color: Colors.textMain
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                }
-
-                Text {
-                    text: root.hasActiveArchive ? "Reconstruction & Integrity Salvage Workspace" : "Standalone archive salvage & repair engine"
-                    font.family: Colors.fontFamily
-                    font.pixelSize: 10
-                    color: Colors.textMuted
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
@@ -502,10 +486,7 @@ Page {
                 ToolTip.delay: 400
             }
         }
-
-        // ==========================================
-        // --- Empty State: When no archive is loaded ---
-        // ==========================================
+        
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -554,7 +535,7 @@ Page {
 
                     Text {
                         Layout.alignment: Qt.AlignHCenter
-                        text: "Drag and drop a SecDet archive (.sda) here or select one to reconstruct damaged or missing items."
+                        text: "Drag and drop a (.sda) file here or select one to reconstruct damaged or missing items."
                         font.family: Colors.fontFamily
                         font.pixelSize: 11
                         color: Colors.textMuted
@@ -608,10 +589,8 @@ Page {
                 }
             }
         }
+        
 
-        // ==========================================
-        // --- Active Recovery State Container ---
-        // ==========================================
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -691,9 +670,10 @@ Page {
                             Text {
                                 text: root.metadataDetails
                                 font.family: Colors.fontFamily
-                                font.pixelSize: 10
+                                font.pixelSize: 11
                                 color: Colors.textMain
                                 elide: Text.ElideRight
+                                wrapMode: Text.Wrap
                                 Layout.fillWidth: true
                             }
                         }
@@ -762,9 +742,10 @@ Page {
                             Text {
                                 text: root.tocDetails
                                 font.family: Colors.fontFamily
-                                font.pixelSize: 10
+                                font.pixelSize: 11
                                 color: Colors.textMain
                                 elide: Text.ElideRight
+                                wrapMode: Text.Wrap
                                 Layout.fillWidth: true
                             }
                         }
@@ -2446,17 +2427,11 @@ Page {
         }
     }
 
-    // =========================================================
-    // --- Error Dialog (Reused from ErrorDialog.qml) ---
-    // =========================================================
     ErrorDialog {
         id: errorDialog
         anchors.centerIn: parent
     }
 
-    // =========================================================
-    // --- Password Dialog (Reused from PasswordDialog.qml) ---
-    // =========================================================
     PasswordDialog {
         id: passwordDialog
         anchors.centerIn: parent
@@ -2479,17 +2454,12 @@ Page {
         }
     }
 
-    // =========================================================
-    // --- Progress Window (Reused from ProgressWindow.qml) ---
-    // =========================================================
     ProgressWindow {
         id: progressWindow
         backend: root.backend
     }
 
-    // =========================================================
-    // --- Recovery Analyzing Overlay ---
-    // =========================================================
+    // Loading overlay
     Rectangle {
         anchors.fill: parent
         color: Colors.isDarkMode ? Qt.rgba(0.06, 0.08, 0.11, 0.88) : Qt.rgba(0.96, 0.97, 0.99, 0.88)
@@ -2520,7 +2490,7 @@ Page {
 
                 Text {
                     Layout.alignment: Qt.AlignHCenter
-                    text: "Scanning payload blocks, metadata headers, and virtual TOC..."
+                    text: "Scanning archive payload..."
                     font.family: Colors.fontFamily
                     font.pixelSize: 11
                     color: Colors.textMuted

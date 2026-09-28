@@ -257,24 +257,26 @@ Window {
         }
     }
 
-    // Drag interface
-    signal itemMoved(var moveEvent)
-    signal externalDragStarted(var exportEvent)
-    signal fileDragExportRequested(var exportEvent)
+    // ── Drag State Machine ──────────────────────────────────────────────────
+    // External drag:  drag outside window → async extraction → OS QDrag::exec()
+    // Internal drag:  drag inside window  → DropArea → moveArchiveItem job
+
     signal pendingFilesAdded(var pendingEvent)
     signal pendingCommitted(var commitEvent)
+    signal itemMoved(var moveEvent)
 
     property var lastTreeAction: null
 
-    function getExternalDragInterface() {
-        return {
-            name: "SecDet External Drag Interface",
-            version: "1.0",
-            exportActive: dragManager.isDragging,
-            draggedItem: dragManager.draggedItem,
-            lastExport: lastTreeAction
-        };
-    }
+    // ── File Tree Drag State ──────────────────────────────────────────────────
+    property bool isTreeDragActive: false
+    property var draggedTreeItem: null
+    property string dragTargetDir: ""
+    property string dragTargetName: ""
+    property string dragOverlayText: ""
+    property bool dragOverlayValid: false
+    property real dragOverlayX: 0
+    property real dragOverlayY: 0
+
 
     // Status Objects
     QtObject {
@@ -650,205 +652,14 @@ Window {
         }
     }
 
-    // Folder hit-testing registry for bulletproof drag & drop
-    property var registeredFolderRows: ({})
-
-    function registerFolderRow(path, name, rowItem) {
-        registeredFolderRows[path] = {
-            name: name,
-            path: path,
-            item: rowItem
-        };
-    }
-
-    function unregisterFolderRow(path) {
-        delete registeredFolderRows[path];
-    }
-
     function isFolderDescendant(parentName, checkName) {
         if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.treeModel) {
             return archiveInterface.treeModel.isFolderDescendant(parentName, checkName);
         }
-        function searchIn(nodes) {
-            if (!nodes)
-                return false;
-            for (let i = 0; i < nodes.length; ++i) {
-                if ((nodes[i].name === parentName || nodes[i].filePath === parentName) && nodes[i].isFolder) {
-                    return hasChildRecursive(nodes[i].children, checkName);
-                }
-                if (nodes[i].children && searchIn(nodes[i].children))
-                    return true;
-            }
-            return false;
-        }
-        function hasChildRecursive(children, target) {
-            if (!children)
-                return false;
-            for (let c = 0; c < children.length; ++c) {
-                if (children[c].name === target || children[c].filePath === target)
-                    return true;
-                if (children[c].children && hasChildRecursive(children[c].children, target))
-                    return true;
-            }
-            return false;
-        }
-        return searchIn(archiveTreeData);
+        return false;
     }
 
-    function findFolderTargetAt(globalX, globalY) {
-        for (let pathKey in registeredFolderRows) {
-            let entry = registeredFolderRows[pathKey];
-            let rowItem = entry ? entry.item : null;
-            if (rowItem && rowItem.visible) {
-                let localPt = rowItem.mapFromItem(window.contentItem, globalX, globalY);
-                if (localPt.x >= 0 && localPt.x <= rowItem.width && localPt.y >= 0 && localPt.y <= rowItem.height) {
-                    return entry;
-                }
-            }
-        }
-        return null;
-    }
 
-    QtObject {
-        id: dragManager
-
-        property bool isDragging: false
-        property var draggedItem: null
-        property string sourceParentFolder: ""
-        property string activeTargetFolder: ""
-        property string activeTargetPath: ""
-        property real mouseX: 0
-        property real mouseY: 0
-
-        function startDrag(itemData, parentFolderName, startX, startY) {
-            draggedItem = itemData;
-            sourceParentFolder = parentFolderName;
-            activeTargetFolder = "";
-            activeTargetPath = "";
-            mouseX = startX;
-            mouseY = startY;
-            isDragging = true;
-            statusText.text = "Dragging '" + itemData.name + "' • Drop on a folder to move, or outside to export";
-        }
-
-        function updatePosition(globalX, globalY) {
-            if (!isDragging)
-                return;
-            mouseX = globalX;
-            mouseY = globalY;
-
-            let hit = window.findFolderTargetAt(globalX, globalY);
-            if (hit && hit.name !== sourceParentFolder && hit.name !== draggedItem.name && hit.path !== draggedItem.filePath) {
-                if (draggedItem.isFolder && window.isFolderDescendant(draggedItem.filePath || draggedItem.name, hit.path || hit.name)) {
-                    activeTargetFolder = "";
-                    activeTargetPath = "";
-                    statusText.text = "Cannot move folder '" + draggedItem.name + "' into its own subfolder";
-                } else {
-                    activeTargetFolder = hit.name;
-                    activeTargetPath = hit.path;
-                    statusText.text = "Drop to move '" + draggedItem.name + "' into folder '" + (hit.path || hit.name) + "'";
-                }
-            } else {
-                activeTargetFolder = "";
-                activeTargetPath = "";
-                let treePt = treeContainer.mapFromItem(window.contentItem, globalX, globalY);
-                let isOutside = (treePt.x < 0 || treePt.x > treeContainer.width || treePt.y < 0 || treePt.y > treeContainer.height);
-                if (isOutside) {
-                    statusText.text = "Release to export '" + draggedItem.name + "' outside archive (External Export)";
-                } else {
-                    statusText.text = "Dragging '" + draggedItem.name + "' • Drop on a folder to move";
-                }
-            }
-        }
-
-        function finishDrag(globalX, globalY) {
-            if (!isDragging)
-                return;
-
-            let item = draggedItem;
-            let srcParent = sourceParentFolder;
-            let targetName = activeTargetFolder;
-            let targetPath = activeTargetPath;
-
-            let treePt = treeContainer.mapFromItem(window.contentItem, globalX, globalY);
-            let isOutside = (treePt.x < 0 || treePt.x > treeContainer.width || treePt.y < 0 || treePt.y > treeContainer.height);
-
-            isDragging = false;
-            draggedItem = null;
-            sourceParentFolder = "";
-            activeTargetFolder = "";
-            activeTargetPath = "";
-
-            if (isOutside) {
-                window.handleExternalDragOut(item, srcParent);
-            } else if (targetName !== "" && targetName !== srcParent) {
-                window.executeMoveItem(item, srcParent, targetName, targetPath);
-            } else {
-                statusText.text = "Drag completed without move. Items can only be dropped into different folders.";
-            }
-        }
-
-        function cancelDrag() {
-            isDragging = false;
-            draggedItem = null;
-            sourceParentFolder = "";
-            activeTargetFolder = "";
-            activeTargetPath = "";
-        }
-    }
-
-    function startNativeItemDrag(itemData, parentFolderName) {
-        if (!itemData)
-            return;
-        let archivePath = itemData.filePath || itemData.path || ("/" + (parentFolderName ? parentFolderName + "/" : "") + itemData.name);
-        if (!archivePath.startsWith("/"))
-            archivePath = "/" + archivePath;
-        if (itemData.isFolder && !archivePath.endsWith("/"))
-            archivePath = archivePath + "/";
-
-        ensureKeyRegistered(function () {
-            if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.hasArchive) {
-                let pathsToDrag = [archivePath];
-                // If multiple items are selected and the dragged item is in the selection, drag all selected items!
-                if (window.selectedCount > 1 && window.isItemSelected(itemData.filePath || itemData.path || itemData.name)) {
-                    let selList = window.getSelectedItemsList();
-                    let collected = [];
-                    for (let i = 0; i < selList.length; ++i) {
-                        let p = selList[i].filePath || selList[i].path || ("/" + selList[i].name);
-                        if (!p.startsWith("/")) p = "/" + p;
-                        if (selList[i].isFolder && !p.endsWith("/")) p = p + "/";
-                        collected.push(p);
-                    }
-                    if (collected.length > 0) {
-                        pathsToDrag = collected;
-                    }
-                }
-
-                let exportDetails = {
-                    action: "EXTERNAL_EXPORT_DRAG",
-                    item: {
-                        name: itemData.name,
-                        isFolder: itemData.isFolder,
-                        realSize: itemData.realSize,
-                        compressedSize: itemData.compressedSize,
-                        ratio: itemData.ratio
-                    },
-                    archiveSourcePath: archivePath,
-                    exportTarget: "NATIVE_DESKTOP_DROP",
-                    timestamp: new Date().toISOString()
-                };
-                lastTreeAction = exportDetails;
-                externalDragStarted(exportDetails);
-                fileDragExportRequested(exportDetails);
-
-                archiveInterface.startNativeDrag(pathsToDrag, itemData.name, Boolean(itemData.isFolder));
-            }
-        });
-    }
-
-    function handleExternalDragOut(itemData, parentFolderName) {
-        startNativeItemDrag(itemData, parentFolderName);
-    }
 
 
     component ContextMenuItem: Rectangle {
@@ -1338,7 +1149,6 @@ Window {
     }
 
     function closeArchiveDirectly() {
-        registeredFolderRows = ({});
         pendingPostUnlockAction = null;
         pendingAddTargetFolder = null;
         pendingExtractTarget = null;
@@ -1362,13 +1172,20 @@ Window {
                 let target = window.pendingExtractTarget;
                 window.ensureKeyRegistered(function () {
                     progressWindow.resetProgressState();
+                    let targetPath = (target && (target.filePath || target.path)) ? (target.filePath || target.path) : "";
+                    if (targetPath !== "") {
+                        let displayItemName = targetPath.split("/").filter(Boolean).pop() || targetPath;
+                        progressWindow.title = "Extracting " + displayItemName + " ...";
+                    } else {
+                        progressWindow.title = "Extracting all files ...";
+                    }
                     progressWindow.show();
                     progressWindow.raise();
                     progressWindow.requestActivate();
 
                     let success = false;
-                    if (target && target.path) {
-                        success = archiveInterface.extractItem(target.path, dest);
+                    if (targetPath !== "") {
+                        success = archiveInterface.extractItem(targetPath, dest);
                     } else {
                         success = archiveInterface.extractAll(dest);
                     }
@@ -1405,22 +1222,24 @@ Window {
 
     Connections {
         target: typeof archiveInterface !== "undefined" ? archiveInterface : null
-        function onDragStagingStarted(itemName) {
-            progressWindow.resetProgressState();
-            progressWindow.title = "Extracting: " + itemName;
-            progressWindow.currentFileName = itemName;
-            progressWindow.show();
-            progressWindow.raise();
-            progressWindow.requestActivate();
-        }
-        function onDragStagingCompleted() {
-           
+
+        // ── Native OS drag drop handler ──────────────────────────────────
+        function onNativeDragDropped(archiveRelativePath, dropTargetDir) {
+            if (!dropTargetDir || dropTargetDir === "") return;
+            let displayItemName = archiveRelativePath.split("/").filter(Boolean).pop() || archiveRelativePath;
+            if (typeof progressWindow !== "undefined" && progressWindow) {
+                progressWindow.resetProgressState();
+                progressWindow.title = "Extracting " + displayItemName + " ...";
+                progressWindow.show();
+                progressWindow.raise();
+                progressWindow.requestActivate();
+            }
+            archiveInterface.extractItem(archiveRelativePath, dropTargetDir);
         }
         function onArchiveTreeChanged() {
             window.archiveTreeData = archiveInterface.archiveTree;
         }
         function onArchiveLoadedChanged(loaded) {
-            window.registeredFolderRows = ({});
             if (loaded) {
                 window.isUserLoadingArchive = false;
             } else {
@@ -2401,8 +2220,8 @@ Window {
                     bottomLeftRadius: 10
                     bottomRightRadius: 10
 
-                    border.color: treeDropArea.containsDrag ? Colors.goldPrimary : Colors.goldBorder
-                    border.width: treeDropArea.containsDrag ? 2 : 1
+                    border.color: (treeDropArea.containsDrag || window.isTreeDragActive) ? Colors.goldPrimary : Colors.goldBorder
+                    border.width: (treeDropArea.containsDrag || window.isTreeDragActive) ? 2 : 1
 
                     Behavior on color {
                         ColorAnimation {
@@ -2769,25 +2588,22 @@ Window {
                                 readonly property bool isFolder: model.isFolder
                                 readonly property bool isOpen: model.expanded
 
-                                Component.onCompleted: {
-                                    if (rowDelegate.isFolder) {
-                                        window.registerFolderRow(model.filePath || rowDelegate.nodeName, rowDelegate.nodeName, itemRowRect);
-                                    }
-                                }
-
-                                Component.onDestruction: {
-                                    if (rowDelegate.isFolder) {
-                                        window.unregisterFolderRow(model.filePath || rowDelegate.nodeName);
-                                    }
-                                }
-
                                 Rectangle {
                                     id: itemRowRect
                                     anchors.fill: parent
                                     anchors.bottomMargin: (window.mainTreeFindQuery.trim().length > 0) ? 2 : 0
                                     radius: 6
 
-                                    readonly property bool isDropTargetHovered: (dragManager.isDragging && (dragManager.activeTargetPath === model.filePath || dragManager.activeTargetFolder === rowDelegate.nodeName)) || (treeDropArea.containsDrag && treeDropArea.externalTargetFolder && (treeDropArea.externalTargetFolder.path === model.filePath || treeDropArea.externalTargetFolder.name === rowDelegate.nodeName))
+                                    readonly property bool isDropTargetHovered: rowDelegate.isFolder && (
+                                        (window.isTreeDragActive && window.dragTargetDir !== "" && (
+                                            window.dragTargetDir === model.filePath ||
+                                            window.dragTargetDir === (model.filePath ? (model.filePath.endsWith("/") ? model.filePath : (model.filePath + "/")) : "")
+                                        )) ||
+                                        (treeDropArea.containsDrag && treeDropArea.targetFolderPath !== "" && (
+                                            treeDropArea.targetFolderPath === model.filePath ||
+                                            treeDropArea.targetFolderPath === (model.filePath ? (model.filePath.endsWith("/") ? model.filePath : (model.filePath + "/")) : "")
+                                        ))
+                                    )
 
                                     color: isDropTargetHovered ? Colors.goldLightHover : rowDelegate.isPending ? (itemMouse.containsMouse ? Colors.goldLightHover : (Colors.isDarkMode ? Qt.rgba(0.9, 0.76, 0.35, 0.09) : Qt.rgba(0.69, 0.51, 0.12, 0.08))) : rowDelegate.isSelected ? (Colors.isDarkMode ? Qt.rgba(0.32, 0.36, 0.44, 0.70) : Qt.rgba(0.55, 0.58, 0.65, 0.70)) : itemMouse.containsPress ? (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(0, 0, 0, 0.08)) : itemMouse.containsMouse ? Colors.bgHover : "transparent"
 
@@ -2904,7 +2720,7 @@ Window {
                                                     color: Colors.textOnGold
                                                 }
                                                 Text {
-                                                    text: dragManager.isDragging ? "Move into folder" : "Add into folder"
+                                                    text: window.isTreeDragActive ? "Move into folder" : "Add into folder"
                                                     font.family: Colors.fontFamily
                                                     font.pixelSize: 10
                                                     font.weight: Font.Bold
@@ -3036,61 +2852,213 @@ Window {
                                         anchors.fill: parent
                                         hoverEnabled: true
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                        cursorShape: rowDelegate.canDrag ? Qt.OpenHandCursor : Qt.PointingHandCursor
+                                        cursorShape: {
+                                            if (window.isTreeDragActive)
+                                                return Qt.DragMoveCursor;
+                                            if (rowDelegate.canDrag)
+                                                return Qt.OpenHandCursor;
+                                            return Qt.PointingHandCursor;
+                                        }
 
-                                        property real pressX: -9999
-                                        property real pressY: -9999
-                                        property bool dragInitiated: false
-                                        property bool dragTriggered: false
+                                        property real pressGlobalX: -9999
+                                        property real pressGlobalY: -9999
+                                        property bool isDragging: false
+                                        property bool nativeDragStarted: false
 
                                         onPressed: mouse => {
                                             if (mouse.button === Qt.LeftButton) {
-                                                pressX = mouse.x;
-                                                pressY = mouse.y;
-                                                dragInitiated = false;
-                                                dragTriggered = false;
+                                                let gPt = mapToItem(window.contentItem, mouse.x, mouse.y);
+                                                pressGlobalX = gPt.x;
+                                                pressGlobalY = gPt.y;
+                                                isDragging = false;
+                                                nativeDragStarted = false;
                                             }
                                         }
 
                                         onPositionChanged: mouse => {
-                                            if (pressed && (mouse.buttons & Qt.LeftButton) && pressX >= 0 && !dragTriggered) {
-                                                if (!dragInitiated) {
-                                                    let dist = Math.sqrt(Math.pow(mouse.x - pressX, 2) + Math.pow(mouse.y - pressY, 2));
-                                                    if (dist > 8) {
-                                                        if (rowDelegate.canDrag) {
-                                                            dragTriggered = true;
-                                                            dragInitiated = true;
-                                                            pressX = -9999;
-                                                            pressY = -9999;
-                                                            let nodeData = archiveInterface ? archiveInterface.treeModel.getNodeData(index) : {};
-                                                            window.startNativeItemDrag(nodeData, model.parentName || "");
-                                                            dragInitiated = false;
-                                                        } else if (rowDelegate.isPending) {
-                                                            statusText.text = "Item '" + rowDelegate.nodeName + "' is pending. Commit before moving.";
-                                                        }
-                                                    }
+                                            if (!(pressed && (mouse.buttons & Qt.LeftButton))) return;
+                                            if (pressGlobalX < 0) return;
+                                            if (nativeDragStarted) return;
+
+                                            let gPt = mapToItem(window.contentItem, mouse.x, mouse.y);
+                                            let dist = Math.sqrt(Math.pow(gPt.x - pressGlobalX, 2) + Math.pow(gPt.y - pressGlobalY, 2));
+
+                                            if (!isDragging) {
+                                                if (dist <= 8) return;
+                                                if (!rowDelegate.canDrag) {
+                                                    if (rowDelegate.isPending)
+                                                        statusText.text = "Item '" + rowDelegate.nodeName + "' is pending — commit before moving.";
+                                                    return;
                                                 }
+                                                isDragging = true;
+                                                window.draggedTreeItem = archiveInterface ? archiveInterface.treeModel.getNodeData(index) : null;
+                                            }
+
+                                            if (!window.draggedTreeItem) return;
+
+                                            // 1. Outside application window: start native OS file drag
+                                            let outsideWindow = (gPt.x < 0 || gPt.x > window.width || gPt.y < 0 || gPt.y > window.height);
+                                            if (outsideWindow) {
+                                                window.isTreeDragActive = false;
+                                                window.dragTargetDir = "";
+                                                window.dragTargetName = "";
+                                                window.dragOverlayText = "";
+                                                window.dragOverlayValid = false;
+
+                                                nativeDragStarted = true;
+                                                let node = window.draggedTreeItem;
+                                                let archivePath = node.filePath || node.path || ("/" + node.name);
+                                                if (!archivePath.startsWith("/")) archivePath = "/" + archivePath;
+                                                let isDir = Boolean(node.isFolder);
+                                                if (isDir && !archivePath.endsWith("/")) archivePath += "/";
+
+                                                archiveInterface.startNativeFileDrag(archivePath, node.name, isDir);
+                                                return;
+                                            }
+
+                                            // 2. Mouse inside file tree container: track directories and update overlay
+                                            let treePt = mapToItem(treeContainer, mouse.x, mouse.y);
+                                            let isInsideTree = (treePt.x >= 0 && treePt.x <= treeContainer.width && treePt.y >= 0 && treePt.y <= treeContainer.height);
+
+                                            if (isInsideTree) {
+                                                window.isTreeDragActive = true;
+                                                window.dragOverlayX = Math.min(treeContainer.width - 240, Math.max(10, treePt.x + 14));
+                                                window.dragOverlayY = Math.min(treeContainer.height - 44, Math.max(10, treePt.y + 14));
+
+                                                let srcNode = window.draggedTreeItem;
+                                                let srcName = srcNode.name || "Item";
+                                                let srcPath = srcNode.filePath || srcNode.path || ("/" + srcName);
+                                                if (!srcPath.startsWith("/")) srcPath = "/" + srcPath;
+                                                if (srcNode.isFolder && !srcPath.endsWith("/")) srcPath += "/";
+
+                                                // Check directory under cursor in mainTreeListView
+                                                let listPt = mapToItem(mainTreeListView, mouse.x, mouse.y);
+                                                let targetIdx = mainTreeListView.indexAt(listPt.x, listPt.y);
+
+                                                if (targetIdx >= 0 && archiveInterface && archiveInterface.treeModel) {
+                                                    let targetNode = archiveInterface.treeModel.getNodeData(targetIdx);
+                                                    if (targetNode && targetNode.isFolder) {
+                                                        let targetPath = targetNode.filePath || ("/" + targetNode.name);
+                                                        if (!targetPath.startsWith("/")) targetPath = "/" + targetPath;
+                                                        if (!targetPath.endsWith("/")) targetPath += "/";
+
+                                                        let targetName = targetNode.name || targetPath;
+
+                                                        // Validate destination
+                                                        let isValid = true;
+                                                        let invalidMsg = "";
+
+                                                        if (srcPath === targetPath || (srcPath + "/") === targetPath) {
+                                                            isValid = false;
+                                                            invalidMsg = "Cannot move item into itself";
+                                                        } else if (srcNode.isFolder && archiveInterface.treeModel.isFolderDescendant(srcPath, targetPath)) {
+                                                            isValid = false;
+                                                            invalidMsg = "Cannot move folder into its subfolder";
+                                                        } else {
+                                                            let stripped = srcPath.endsWith("/") ? srcPath.slice(0, -1) : srcPath;
+                                                            let parentDir = stripped.substring(0, stripped.lastIndexOf("/") + 1);
+                                                            if (!parentDir.startsWith("/")) parentDir = "/" + parentDir;
+                                                            if (!parentDir.endsWith("/")) parentDir += "/";
+                                                            if (parentDir === targetPath) {
+                                                                isValid = false;
+                                                                invalidMsg = "Already in " + targetName;
+                                                            }
+                                                        }
+
+                                                        if (isValid) {
+                                                            window.dragTargetDir = targetPath;
+                                                            window.dragTargetName = targetName;
+                                                            window.dragOverlayValid = true;
+                                                            window.dragOverlayText = "Move " + srcName + " to " + targetName + " !";
+                                                        } else {
+                                                            window.dragTargetDir = "";
+                                                            window.dragTargetName = "";
+                                                            window.dragOverlayValid = false;
+                                                            window.dragOverlayText = invalidMsg;
+                                                        }
+                                                    } else {
+                                                        window.dragTargetDir = "";
+                                                        window.dragTargetName = "";
+                                                        window.dragOverlayValid = false;
+                                                        window.dragOverlayText = "Drag over a folder to move " + srcName;
+                                                    }
+                                                } else {
+                                                    window.dragTargetDir = "";
+                                                    window.dragTargetName = "";
+                                                    window.dragOverlayValid = false;
+                                                    window.dragOverlayText = "Drag over a folder to move " + srcName;
+                                                }
+                                            } else {
+                                                // 3. User dragged outside of file tree into main window section: dismiss drag operation
+                                                window.isTreeDragActive = false;
+                                                window.dragTargetDir = "";
+                                                window.dragTargetName = "";
+                                                window.dragOverlayText = "";
+                                                window.dragOverlayValid = false;
                                             }
                                         }
 
                                         onReleased: mouse => {
-                                            pressX = -9999;
-                                            pressY = -9999;
-                                            dragInitiated = false;
+                                            pressGlobalX = -9999;
+                                            pressGlobalY = -9999;
+
+                                            if (nativeDragStarted) {
+                                                nativeDragStarted = false;
+                                                isDragging = false;
+                                                window.isTreeDragActive = false;
+                                                window.draggedTreeItem = null;
+                                                window.dragTargetDir = "";
+                                                window.dragTargetName = "";
+                                                window.dragOverlayText = "";
+                                                window.dragOverlayValid = false;
+                                                return;
+                                            }
+
+                                            if (isDragging) {
+                                                isDragging = false;
+                                                let wasActive = window.isTreeDragActive;
+                                                let valid = window.dragOverlayValid;
+                                                let targetDir = window.dragTargetDir;
+                                                let targetName = window.dragTargetName;
+                                                let srcNode = window.draggedTreeItem;
+
+                                                window.isTreeDragActive = false;
+                                                window.draggedTreeItem = null;
+                                                window.dragTargetDir = "";
+                                                window.dragTargetName = "";
+                                                window.dragOverlayText = "";
+                                                window.dragOverlayValid = false;
+
+                                                if (wasActive && valid && targetDir !== "" && srcNode) {
+                                                    let srcPath = srcNode.filePath || srcNode.path || ("/" + srcNode.name);
+                                                    if (!srcPath.startsWith("/")) srcPath = "/" + srcPath;
+                                                    let isDir = Boolean(srcNode.isFolder);
+                                                    if (isDir && !srcPath.endsWith("/")) srcPath += "/";
+
+                                                    if (archiveInterface && archiveInterface.moveArchiveItem(srcPath, targetDir, isDir)) {
+                                                        moveToast.show(1, targetName || targetDir);
+                                                        statusText.text = "Moved " + srcNode.name + " into '" + targetDir + "' (staged for commit)";
+                                                    }
+                                                }
+                                                return;
+                                            }
                                         }
 
                                         onCanceled: {
-                                            pressX = -9999;
-                                            pressY = -9999;
-                                            dragInitiated = false;
-                                            dragTriggered = false;
+                                            pressGlobalX = -9999;
+                                            pressGlobalY = -9999;
+                                            isDragging = false;
+                                            nativeDragStarted = false;
+                                            window.isTreeDragActive = false;
+                                            window.draggedTreeItem = null;
+                                            window.dragTargetDir = "";
+                                            window.dragTargetName = "";
+                                            window.dragOverlayText = "";
+                                            window.dragOverlayValid = false;
                                         }
 
                                         onClicked: mouse => {
-                                            if (dragTriggered) {
-                                                dragTriggered = false;
-                                                return;
-                                            }
+                                            if (isDragging || nativeDragStarted) return;
                                             let nodeData = archiveInterface ? archiveInterface.treeModel.getNodeData(index) : {};
                                             let isCtrl = Boolean(mouse.modifiers & Qt.ControlModifier);
                                             window.selectItem(nodeData, isCtrl);
@@ -3105,11 +3073,9 @@ Window {
                                                 treeContextMenu.y = Math.min(globalPoint.y, window.height - 240);
                                                 treeContextMenu.open();
                                             } else if (mouse.button === Qt.LeftButton) {
-                                                if (!dragInitiated && !dragManager.isDragging) {
-                                                    if (rowDelegate.isFolder && !isCtrl) {
-                                                        if (archiveInterface && archiveInterface.treeModel) {
-                                                            archiveInterface.treeModel.toggleExpand(index);
-                                                        }
+                                                if (rowDelegate.isFolder && !isCtrl) {
+                                                    if (archiveInterface && archiveInterface.treeModel) {
+                                                        archiveInterface.treeModel.toggleExpand(index);
                                                     }
                                                 }
                                             }
@@ -3374,99 +3340,87 @@ Window {
                         }
                     }
 
-                    // Drop Area for external Explorer files
+                    // ── External File Drop Area (from OS / Windows Explorer) ────────────
                     DropArea {
                         id: treeDropArea
                         anchors.fill: parent
 
-                        property var externalTargetFolder: null
+                        property string targetFolderPath: ""
+                        property bool isValidDropTarget: false
 
-                        function eventHasFormat(eventObj, fmt) {
-                            if (!eventObj) return false;
-                            if (typeof eventObj.hasFormat === "function") {
-                                return eventObj.hasFormat(fmt);
+                        function resolveTargetFolder(dropX, dropY) {
+                            if (typeof archiveInterface === "undefined" || !archiveInterface || !archiveInterface.hasArchive)
+                                return "";
+                            let localPt = mainTreeListView.mapFromItem(treeDropArea, dropX, dropY);
+                            let idx = mainTreeListView.indexAt(localPt.x, localPt.y);
+                            if (idx >= 0 && archiveInterface.treeModel) {
+                                let node = archiveInterface.treeModel.getNodeData(idx);
+                                if (node && node.isFolder) {
+                                    let p = node.filePath || ("/" + node.name);
+                                    if (!p.startsWith("/")) p = "/" + p;
+                                    if (!p.endsWith("/")) p += "/";
+                                    return p;
+                                }
+                                return "";
                             }
-                            if (eventObj.formats && typeof eventObj.formats.indexOf === "function") {
-                                return eventObj.formats.indexOf(fmt) !== -1;
-                            }
-                            return false;
+                            return "/"; // blank area = root
                         }
 
                         onEntered: drag => {
-                            if (drag.hasUrls || eventHasFormat(drag, "application/x-secdet-item")) {
+                            if (drag.hasUrls) {
                                 drag.acceptProposedAction();
+                            } else {
+                                drag.accepted = false;
                             }
                         }
 
                         onPositionChanged: drag => {
-                            if (drag.hasUrls || eventHasFormat(drag, "application/x-secdet-item")) {
-                                drag.acceptProposedAction();
+                            if (drag.hasUrls) {
                                 if (typeof archiveInterface === "undefined" || !archiveInterface || !archiveInterface.hasArchive) {
+                                    targetFolderPath = "";
+                                    isValidDropTarget = true;
                                     statusText.text = "Drop .sda archive to open";
+                                    drag.acceptProposedAction();
                                     return;
                                 }
-                                let globalPt = mapToItem(window.contentItem, drag.x, drag.y);
-                                let hit = window.findFolderTargetAt(globalPt.x, globalPt.y);
-                                externalTargetFolder = hit;
-                                if (eventHasFormat(drag, "application/x-secdet-item")) {
-                                    if (hit) {
-                                        statusText.text = "Move item into folder: '" + (hit.path || hit.name) + "'";
-                                    } else {
-                                        statusText.text = "Drop on folder to move, or outside window to extract immediately";
-                                    }
-                                } else {
-                                    if (hit) {
-                                        statusText.text = "Add file(s) into folder: '" + (hit.path || hit.name) + "'";
-                                    } else {
-                                        statusText.text = "Add file(s) to archive root (/)";
-                                    }
-                                }
+                                let target = resolveTargetFolder(drag.x, drag.y);
+                                targetFolderPath = target;
+                                isValidDropTarget = true;
+                                statusText.text = target !== "" ? ("Add file(s) into folder: '" + target + "'") : "Add file(s) to archive root (/)";
+                                drag.acceptProposedAction();
                             }
                         }
 
                         onExited: {
-                            externalTargetFolder = null;
+                            targetFolderPath = "";
+                            isValidDropTarget = false;
                             statusText.text = (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.hasArchive) ? "Ready" : "No archive open";
                         }
 
                         onDropped: drop => {
-                            if (eventHasFormat(drop, "application/x-secdet-item")) {
-                                let srcPath = (typeof drop.getDataAsString === "function") ? drop.getDataAsString("application/x-secdet-item") : (drop.text || "");
-                                let isDir = eventHasFormat(drop, "application/x-secdet-isfolder")
-                                            ? ((typeof drop.getDataAsString === "function") ? (drop.getDataAsString("application/x-secdet-isfolder") === "1") : false)
-                                            : false;
-                                let target = externalTargetFolder;
-                                externalTargetFolder = null;
-                                if (target && target.path && target.path !== srcPath) {
-                                    archiveInterface.moveArchiveItem(srcPath, target.path, isDir);
-                                    drop.acceptProposedAction();
-                                }
-                                return;
-                            }
                             if (drop.hasUrls) {
+                                let target = targetFolderPath;
+                                targetFolderPath = "";
+                                isValidDropTarget = false;
+
                                 if (typeof archiveInterface === "undefined" || !archiveInterface || !archiveInterface.hasArchive) {
                                     drop.acceptProposedAction();
-                                    if (!drop.urls || drop.urls.length === 0)
-                                        return;
+                                    if (!drop.urls || drop.urls.length === 0) return;
                                     let rawUrl = drop.urls[0].toString();
                                     let cleanPath = rawUrl;
                                     if (cleanPath.startsWith("file:///")) {
-                                        if (cleanPath.length >= 10 && cleanPath.charAt(9) === ':')
-                                            cleanPath = cleanPath.substring(8);
-                                        else
-                                            cleanPath = cleanPath.substring(7);
+                                        cleanPath = (cleanPath.length >= 10 && cleanPath.charAt(9) === ':')
+                                            ? cleanPath.substring(8)
+                                            : cleanPath.substring(7);
                                     } else if (cleanPath.startsWith("file://")) {
                                         cleanPath = cleanPath.substring(7);
                                     }
                                     cleanPath = decodeURIComponent(cleanPath);
-
-                                    // Validate .sda extension
                                     if (!cleanPath.toLowerCase().endsWith(".sda")) {
                                         let fiName = cleanPath.split("/").pop().split("\\").pop();
                                         errorDialog.showError("Invalid Archive File", "The file '" + fiName + "' is not a valid SecDet Archive (.sda).\n\nOnly .sda archives can be opened directly. To add files to an archive, please create or open an archive first.");
                                         return;
                                     }
-
                                     if (typeof archiveInterface !== "undefined" && archiveInterface) {
                                         window.lastLoadingArchivePath = cleanPath;
                                         window.isUserLoadingArchive = true;
@@ -3475,49 +3429,84 @@ Window {
                                     return;
                                 }
 
-                                // Filter out self-drops from temporary drag staging
+                                // Filter out any SecDet staging URLs
                                 let validUrls = [];
                                 for (let i = 0; i < drop.urls.length; ++i) {
-                                    let uStr = drop.urls[i].toString();
-                                    if (uStr.indexOf("SecDet_Drag") === -1) {
+                                    if (drop.urls[i].toString().indexOf("SecDet_Drag") === -1)
                                         validUrls.push(drop.urls[i]);
-                                    }
                                 }
-                                if (validUrls.length === 0) {
-                                    drop.acceptProposedAction();
-                                    return;
-                                }
-
-                                let target = externalTargetFolder;
-                                externalTargetFolder = null;
-                                window.addPendingItems(validUrls, target ? target.path : "/");
+                                if (validUrls.length === 0) { drop.acceptProposedAction(); return; }
+                                window.addPendingItems(validUrls, target || "/");
                                 drop.acceptProposedAction();
                             }
                         }
                     }
 
-                    // Non-blocking sleek Drag Banner overlay at bottom of tree view
+                    // ── Tree Drag Floating Overlay (Follows Mouse Cursor) ────────────────
                     Rectangle {
-                        id: dragIndicatorBanner
+                        id: treeDragOverlay
+                        visible: window.isTreeDragActive && window.dragOverlayText !== ""
+                        x: window.dragOverlayX
+                        y: window.dragOverlayY
+                        z: 1000
+                        implicitHeight: 34
+                        implicitWidth: overlayLayout.implicitWidth + 24
+                        radius: 8
+                        color: Colors.isDarkMode ? Qt.rgba(0.12, 0.15, 0.20, 0.96) : Qt.rgba(0.98, 0.98, 1.0, 0.96)
+                        border.color: window.dragOverlayValid ? Colors.goldPrimary : (Colors.isDarkMode ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(0, 0, 0, 0.2))
+                        border.width: window.dragOverlayValid ? 1.5 : 1
+
+                        RowLayout {
+                            id: overlayLayout
+                            anchors.centerIn: parent
+                            spacing: 8
+
+                            Text {
+                                text: window.dragOverlayValid ? "\ue5c8" : "\ue5cd"
+                                font.family: materialIcons.name
+                                font.pixelSize: 15
+                                color: window.dragOverlayValid ? Colors.goldPrimary : Colors.textMuted
+                            }
+
+                            Text {
+                                text: window.dragOverlayText
+                                font.family: Colors.fontFamily
+                                font.pixelSize: 11
+                                font.weight: window.dragOverlayValid ? Font.Bold : Font.Normal
+                                color: window.dragOverlayValid ? Colors.textMain : Colors.textMuted
+                            }
+                        }
+
+                        Behavior on x {
+                            NumberAnimation { duration: 40; easing.type: Easing.OutQuad }
+                        }
+                        Behavior on y {
+                            NumberAnimation { duration: 40; easing.type: Easing.OutQuad }
+                        }
+                    }
+
+                    // ── Tree Drag Bottom Status Banner ──────────────────────────────────
+                    Rectangle {
+                        id: treeDragBottomBanner
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
                         anchors.margins: 8
                         height: 38
                         radius: 8
-                        color: Colors.isDarkMode ? Qt.rgba(0.12, 0.14, 0.18, 0.96) : Qt.rgba(0.98, 0.98, 0.99, 0.96)
-                        border.color: Colors.goldPrimary
-                        border.width: 1
-                        z: 100
+                        color: Colors.isDarkMode ? Qt.rgba(0.10, 0.13, 0.18, 0.97) : Qt.rgba(0.97, 0.97, 0.99, 0.97)
+                        border.color: window.dragOverlayValid ? Colors.goldPrimary : Colors.goldBorder
+                        border.width: 1.5
+                        z: 900
 
                         visible: opacity > 0
-                        opacity: treeDropArea.containsDrag ? 1.0 : 0.0
+                        opacity: (window.isTreeDragActive && window.dragOverlayText !== "") ? 1.0 : 0.0
 
                         Behavior on opacity {
-                            NumberAnimation {
-                                duration: 150
-                                easing.type: Easing.OutCubic
-                            }
+                            NumberAnimation { duration: 120 }
+                        }
+                        Behavior on border.color {
+                            ColorAnimation { duration: 120 }
                         }
 
                         RowLayout {
@@ -3527,31 +3516,31 @@ Window {
                             spacing: 8
 
                             Text {
-                                text: "\ue2c6" // file_upload
+                                text: window.dragOverlayValid ? "\ue5c8" : "\ue88e"
                                 font.family: materialIcons.name
                                 font.pixelSize: 17
-                                color: Colors.goldPrimary
+                                color: window.dragOverlayValid ? Colors.goldPrimary : Colors.textMuted
                             }
 
                             Text {
-                                text: (typeof archiveInterface === "undefined" || !archiveInterface || !archiveInterface.hasArchive) ? "Open archive (.sda)" : (treeDropArea.externalTargetFolder ? ("Adding to folder: " + (treeDropArea.externalTargetFolder.path || treeDropArea.externalTargetFolder.name)) : "Adding to archive root (/)")
+                                text: window.dragOverlayText
                                 font.family: Colors.fontFamily
                                 font.pixelSize: 11
-                                font.weight: Font.Bold
-                                color: Colors.textMain
+                                font.weight: window.dragOverlayValid ? Font.Bold : Font.Normal
+                                color: window.dragOverlayValid ? Colors.textMain : Colors.textMuted
                                 Layout.fillWidth: true
                                 elide: Text.ElideMiddle
                             }
 
                             Rectangle {
-                                implicitWidth: 100
+                                visible: window.dragOverlayValid
+                                implicitWidth: 90
                                 implicitHeight: 22
                                 radius: 4
                                 color: Colors.goldPrimary
-
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "Release to drop"
+                                    text: "Release to Move"
                                     font.family: Colors.fontFamily
                                     font.pixelSize: 10
                                     font.weight: Font.Bold
@@ -3560,6 +3549,85 @@ Window {
                             }
                         }
                     }
+
+                    // ── Move Confirmation Toast ─────────────────────────────────────────
+                    // Slides in at bottom-right after a successful internal move, auto-dismisses
+                    Rectangle {
+                        id: moveToast
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        anchors.rightMargin: 12
+                        anchors.bottomMargin: 56
+                        width: 280
+                        height: 42
+                        radius: 8
+                        color: Colors.isDarkMode ? Qt.rgba(0.08, 0.11, 0.15, 0.97) : Qt.rgba(0.97, 0.97, 0.99, 0.97)
+                        border.color: "#10B981"
+                        border.width: 1.5
+                        z: 150
+
+                        visible: opacity > 0
+                        opacity: 0.0
+
+                        property int movedCount: 0
+                        property string targetFolder: ""
+
+                        function show(count, folder) {
+                            movedCount = count;
+                            targetFolder = folder;
+                            opacity = 1.0;
+                            dismissTimer.restart();
+                        }
+
+                        Timer {
+                            id: dismissTimer
+                            interval: 2800
+                            onTriggered: moveToast.opacity = 0.0
+                        }
+
+                        Behavior on opacity {
+                            NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+                        }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 10
+                            spacing: 8
+
+                            Text {
+                                text: "\ue5ca"
+                                font.family: materialIcons.name
+                                font.pixelSize: 16
+                                color: "#10B981"
+                                Layout.alignment: Qt.AlignVCenter
+                            }
+
+                            ColumnLayout {
+                                spacing: 0
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignVCenter
+                                Text {
+                                    text: "Move staged for commit"
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 11
+                                    font.weight: Font.Bold
+                                    color: Colors.textMain
+                                }
+                                Text {
+                                    text: moveToast.movedCount + " item(s) → " + moveToast.targetFolder
+                                    font.family: Colors.fontFamily
+                                    font.pixelSize: 10
+                                    color: Colors.textMuted
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+                    }
+
+
+
                     
                     // Scanning items
                     Rectangle {
@@ -4054,89 +4122,7 @@ Window {
     }
 
 
-    MouseArea {
-        id: globalDragOverlay
-        anchors.fill: parent
-        z: 99998
-        enabled: dragManager.isDragging
-        visible: dragManager.isDragging
-        hoverEnabled: true
-        cursorShape: Qt.ClosedHandCursor
-        preventStealing: true
 
-        onPositionChanged: mouse => {
-            dragManager.updatePosition(mouse.x, mouse.y);
-        }
-
-        onReleased: mouse => {
-            dragManager.finishDrag(mouse.x, mouse.y);
-        }
-
-        onCanceled: {
-            dragManager.cancelDrag();
-        }
-    }
-
-    Item {
-        id: dragProxyItem
-        width: 210
-        height: 36
-        z: 99999
-        enabled: false // Mouse-transparent to prevent absorbing clicks
-        visible: dragManager.isDragging && dragManager.draggedItem !== null
-
-        x: Math.min(Math.max(10, dragManager.mouseX + 14), window.width - width - 10)
-        y: Math.min(Math.max(10, dragManager.mouseY + 14), window.height - height - 10)
-
-        Rectangle {
-            anchors.fill: parent
-            radius: 8
-            color: Colors.isDarkMode ? Qt.rgba(0.12, 0.14, 0.18, 0.96) : Qt.rgba(0.98, 0.98, 0.98, 0.96)
-            border.color: dragManager.activeTargetFolder !== "" ? Colors.goldPrimary : Colors.goldBorderHi
-            border.width: dragManager.activeTargetFolder !== "" ? 2 : 1.5
-
-            Rectangle {
-                anchors.fill: parent
-                anchors.margins: -2
-                radius: 10
-                z: -1
-                color: "transparent"
-                border.color: dragManager.activeTargetFolder !== "" ? Qt.rgba(0.9, 0.76, 0.35, 0.35) : Qt.rgba(0, 0, 0, 0.25)
-                border.width: 2
-            }
-
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 10
-                anchors.rightMargin: 10
-                spacing: 8
-
-                Text {
-                    text: dragManager.draggedItem && dragManager.draggedItem.isFolder ? "\ue2c8" : "\ue873"
-                    font.family: materialIcons.name
-                    font.pixelSize: 17
-                    color: Colors.goldPrimary
-                }
-
-                Text {
-                    text: dragManager.draggedItem ? dragManager.draggedItem.name : ""
-                    font.family: Colors.fontFamily
-                    font.pixelSize: 11
-                    font.weight: Font.DemiBold
-                    color: Colors.textMain
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                }
-
-                Text {
-                    text: dragManager.activeTargetFolder !== "" ? "\ue5ca" : "\ue5c8"
-                    font.family: materialIcons.name
-                    font.pixelSize: 14
-                    color: dragManager.activeTargetFolder !== "" ? Colors.goldPrimary : Colors.textMuted
-                }
-            }
-        }
-    }
 
     Component.onCompleted: {
         if (typeof archiveInterface !== "undefined" && archiveInterface && archiveInterface.hasArchive) {
